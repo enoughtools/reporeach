@@ -24,12 +24,20 @@ const firstDownload = artifacts.find(
 );
 const faqs = [
   [
+    "Do I need a GitHub account?",
+    "No. Add an HTTPS or SSH Git remote, a local bare repository, or an existing checkout path. RepoReach uses your native Git credentials or SSH setup. Connect GitHub only if you want automatic discovery of the repositories you can access.",
+  ],
+  [
+    "What happens to an existing checkout?",
+    "RepoReach creates a separate virtual checkout of its committed data. Your original folder, staged changes, local edits, and untracked files stay where they are. Adding it does not move or replace your working folder.",
+  ],
+  [
     "Are these real files?",
     "They appear in Finder, your editor, and the terminal through a mounted filesystem. RepoReach downloads committed contents when needed; previews and file metadata checks can also trigger downloads. Edits live on your Mac and use ordinary Git commits and pushes.",
   ],
   [
     "What does Keep Downloaded mean?",
-    "Keep Downloaded makes the current checkout available offline. Other branches, historical file versions, Git LFS objects, and submodules may still require a connection.",
+    "Keep Downloaded makes the current committed tree available offline. Other branches and historical file versions may still require a connection. The beta refuses submodules and checkout filters such as Git LFS.",
   ],
   [
     "Will closing RepoReach remove my folders?",
@@ -37,7 +45,11 @@ const faqs = [
   ],
   [
     "Does it upload every file I save?",
-    "No. RepoReach preserves normal Git behavior. Saving a file changes your local work; committing and pushing publishes it. Your repositories connect directly to GitHub.",
+    "No. RepoReach preserves normal Git behavior. Saving a file changes your local work; committing and pushing remain explicit Git operations. Syncing or refreshing gets Git data from your chosen source; it does not automatically publish your saves.",
+  ],
+  [
+    "Can I choose which repositories appear?",
+    "Yes. Switch off a repository or an owner to hide its folders and pause background downloads while retaining its data. Individual choices survive GitHub rediscovery, and turning an owner back on leaves individually disabled repos hidden. Already open files can continue to work.",
   ],
   [
     "How does Free Up Space protect my work?",
@@ -57,13 +69,13 @@ const faqs = [
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta
       name="description"
-      content="Your GitHub repositories in Finder. Browse on demand, keep the ones you need downloaded, and reclaim space. RepoReach is an open-source Mac app by Enough Tools."
+      content="Your Git repositories in Finder. Add a remote or local checkout, optionally discover GitHub repos, and choose what stays downloaded. RepoReach is an open-source Mac app by Enough Tools."
     />
     <meta name="theme-color" content="#3b4fe4" />
     <meta property="og:title" content="RepoReach — Every repo, within reach." />
     <meta
       property="og:description"
-      content="Your GitHub repositories in Finder. An open-source Mac app by Enough Tools."
+      content="Your Git repositories in Finder. GitHub sign-in is optional. An open-source Mac app by Enough Tools."
     />
     <meta property="og:url" content="https://reporeach.reb.run" />
     <meta property="og:type" content="website" />
@@ -110,9 +122,9 @@ const faqs = [
           </div>
           <h1 id="hero-title">Every repo,<br /><em>within reach.</em></h1>
           <p class="hero-description">
-            Your GitHub repositories belong in Finder. Browse them on demand,
-            keep the ones you need downloaded, and give the rest their space
-            back.
+            Your Git repositories belong in Finder. Add a remote or local
+            checkout, browse on demand, and keep the projects you need
+            downloaded.
           </p>
           <div class="hero-actions">
             <Button href="#download" variant="accent" size="lg"
@@ -124,7 +136,7 @@ const faqs = [
             >
           </div>
           <p class="hero-note">
-            Early beta · Apple Silicon and Intel · Your GitHub account
+            Early beta · Apple Silicon and Intel · GitHub sign-in optional
           </p>
         </div>
         <div
@@ -139,7 +151,7 @@ const faqs = [
             >
           </div>
           <div class="demo-path">
-            <span aria-hidden="true">▱</span> Home / Code / GitHub
+            <span aria-hidden="true">▱</span> Home / Code / Repositories
           </div>
           <div class="demo-columns">
             <span>Repository</span><span>Availability</span>
@@ -193,9 +205,8 @@ const faqs = [
         </div>
       </section>
       <section class="principles" aria-label="RepoReach principles">
-        <span>All your repositories</span><span>Your chosen folder</span><span
-          >Normal Git workflow</span
-        ><span>Less disk space</span>
+        <span>Your selected repositories</span><span>Your chosen folder</span
+        ><span>Normal Git workflow</span><span>Less disk space</span>
       </section>
       <section
         class="workflow section"
@@ -212,9 +223,11 @@ const faqs = [
         <div class="steps">
           <Card class="step"
             ><CardContent
-              ><span class="step-number">01</span><h3>Connect GitHub.</h3><p>
-                Discover the repositories you can access, including your
-                organizations. They appear together, organized by owner.
+              ><span class="step-number">01</span><h3>
+                Add your repositories.
+              </h3><p>
+                Start with a Git remote or existing checkout. Connect GitHub if
+                you want to discover your personal and organization repos.
               </p></CardContent
             ></Card
           >
@@ -223,16 +236,18 @@ const faqs = [
               ><span class="step-number">02</span><h3>
                 Make yourself at home.
               </h3><p>
-                Choose your catalogue folder. Open projects in Finder, your
-                editor, or the terminal. Contents arrive as you need them.
+                Choose your catalogue folder and which owners or repos appear.
+                Open projects in Finder, your editor, or the terminal. Contents
+                arrive as you need them.
               </p></CardContent
             ></Card
           >
           <Card class="step"
             ><CardContent
               ><span class="step-number">03</span><h3>Choose what stays.</h3><p>
-                Keep a checkout downloaded for offline work. Free up space when
-                a project is safely recoverable from GitHub.
+                Keep the current committed tree downloaded for offline work.
+                Free up space when a project is safely recoverable from its
+                source.
               </p></CardContent
             ></Card
           >
@@ -246,8 +261,8 @@ const faqs = [
             Close the window.<br /><em>Your repos stay.</em>
           </h2><p>
             RepoReach works quietly in the background. Finder actions handle the
-            everyday things; the app is there for sign-in, settings, and
-            managing your catalogue.
+            everyday things; the app is there for adding repositories, choosing
+            what appears, and managing your catalogue.
           </p>
         </div>
         <div class="action-list">
@@ -260,7 +275,9 @@ const faqs = [
               >Reclaim recoverable repository data</span
             >
           </div><div>
-            <span>Refresh</span><span>Check GitHub for updates</span>
+            <span>Refresh</span><span
+              >Fetch updates from your repository source</span
+            >
           </div><p>Available from a repository's Finder context menu.</p>
         </div>
       </section>

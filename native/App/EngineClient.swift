@@ -71,10 +71,23 @@ struct EngineClient {
     let socket: URL
 
     func request<T: Decodable>(_ method: String, path: String, body: [String: String]? = nil, timeout: TimeInterval = 45) async throws -> T {
+        try await execute(method, path: path, encodedBody: body.map { try Self.encodeBody($0) }, timeout: timeout)
+    }
+
+    func request<T: Decodable, Body: Encodable>(_ method: String, path: String, body: Body, timeout: TimeInterval = 45) async throws -> T {
+        try await execute(method, path: path, encodedBody: Self.encodeBody(body), timeout: timeout)
+    }
+
+    static func encodeBody<Body: Encodable>(_ body: Body) throws -> Data {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        return try encoder.encode(body)
+    }
+
+    private func execute<T: Decodable>(_ method: String, path: String, encodedBody: Data?, timeout: TimeInterval) async throws -> T {
         var arguments = ["desktop", "request", "--socket", socket.path, "--method", method, "--path", path]
-        if let body {
-            let data = try JSONSerialization.data(withJSONObject: body, options: [.sortedKeys])
-            guard let json = String(data: data, encoding: .utf8) else { throw EngineFailure(message: "Could not encode the request.") }
+        if let encodedBody {
+            guard let json = String(data: encodedBody, encoding: .utf8) else { throw EngineFailure(message: "Could not encode the request.") }
             arguments += ["--body", json]
         }
         let response = try await CommandRunner.run(executable: executable, arguments: arguments, timeout: timeout)
@@ -93,13 +106,15 @@ struct EngineClient {
         catch { throw EngineFailure(message: "The repository service returned an unreadable response. Update RepoReach and try again.") }
     }
 
-    static func redact(_ value: String) -> String {
+    static func redact(_ value: String, limit: Int = 1800, redactUserInfo: Bool = true) -> String {
         var result = value
-        for expression in ["gh[pousr]_[A-Za-z0-9_]+", "github_pat_[A-Za-z0-9_]+", "(?i)Bearer\\s+[^\\s]+", "https?://[^/\\s]+:[^@\\s]+@"] {
+        var expressions = ["(?i)gh[pousr]_[A-Za-z0-9_]+", "(?i)github_pat_[A-Za-z0-9_]+", "(?i)glpat-[A-Za-z0-9_-]+", "(?i)Bearer\\s+[^\\s]+"]
+        if redactUserInfo { expressions.append("(?i)(?:https?|ssh|git|file)://[^/\\s@]+@") }
+        for expression in expressions {
             if let regex = try? NSRegularExpression(pattern: expression) {
                 result = regex.stringByReplacingMatches(in: result, range: NSRange(result.startIndex..., in: result), withTemplate: "[redacted]")
             }
         }
-        return String(result.prefix(1800))
+        return String(result.prefix(limit))
     }
 }

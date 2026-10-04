@@ -21,8 +21,10 @@ struct ControlSmoke {
         let gh = root.appendingPathComponent("gh")
         let release = root.appendingPathComponent("release")
         let signed = root.appendingPathComponent("signed")
+        let trace = root.appendingPathComponent("gh-trace")
         let script = #"""
         #!/bin/sh
+        printf '%s\n' "$*" >> "$REPOREACH_FIXTURE_TRACE"
         case "$*" in
           'api --hostname github.com user')
             [ -f "$REPOREACH_FIXTURE_SIGNED" ] || exit 4
@@ -52,6 +54,7 @@ struct ControlSmoke {
         for key in ["GH_TOKEN", "GITHUB_TOKEN", "GH_HOST", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"] { environment.removeValue(forKey: key) }
         environment["REPOREACH_FIXTURE_RELEASE"] = release.path
         environment["REPOREACH_FIXTURE_SIGNED"] = signed.path
+        environment["REPOREACH_FIXTURE_TRACE"] = trace.path
         environment["GH_CONFIG_DIR"] = root.appendingPathComponent("gh-config").path
         environment["GIT_CONFIG_GLOBAL"] = "/dev/null"
         service.environment = environment
@@ -69,6 +72,38 @@ struct ControlSmoke {
         try expect(initial?.repositories.isEmpty == true && initial?.mounted == false, "initial status")
         let duplicate = try await CommandRunner.run(executable: engine, arguments: service.arguments!, timeout: 4)
         try expect(duplicate.status != 0, "duplicate service is refused")
+        let checkout = root.appendingPathComponent("source-checkout", isDirectory: true)
+        try FileManager.default.createDirectory(at: checkout, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        try await git(["init", "--initial-branch=main", checkout.path])
+        let committed = checkout.appendingPathComponent("committed.txt")
+        try Data("committed fixture\n".utf8).write(to: committed)
+        try await git(["-C", checkout.path, "add", "committed.txt"])
+        try await git(["-C", checkout.path, "-c", "user.name=RepoReach Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-m", "Fixture"])
+        try Data("staged fixture\n".utf8).write(to: committed)
+        try await git(["-C", checkout.path, "add", "committed.txt"])
+        try Data("unstaged fixture\n".utf8).write(to: committed)
+        try Data("untracked fixture\n".utf8).write(to: checkout.appendingPathComponent("untracked.txt"))
+        let sourceStatus = try await git(["-C", checkout.path, "status", "--porcelain=v1"])
+        let sourceDiff = try await git(["-C", checkout.path, "diff", "--binary"])
+        let stagedDiff = try await git(["-C", checkout.path, "diff", "--cached", "--binary"])
+        let traceBefore = (try? Data(contentsOf: trace)) ?? Data()
+        let adoption = RepositoryAdoptionRequest(remoteURL: checkout.path, owner: "fixture.group", name: "adopted.repo", branch: nil)
+        let adopted: EngineStatus = try await client.request("POST", path: "/v1/repositories/adopt", body: adoption, timeout: 125)
+        let adoptedID = "fixture.group/adopted.repo"
+        try expect(adopted.account == nil && adopted.repositories.contains(where: { $0.id == adoptedID && $0.isManual && $0.state == "virtual" }), "local adoption without GitHub sign-in")
+        let hiddenGroup: EngineStatus = try await client.request("POST", path: "/v1/organizations/settings", body: OrganizationSettingsRequest(owner: "fixture.group", enabled: false))
+        try expect(hiddenGroup.organizations.contains(where: { $0.name == "fixture.group" && !$0.enabled }), "group disable contract")
+        try expect(hiddenGroup.repositories.first(where: { $0.id == adoptedID })?.isEnabled(in: hiddenGroup.organizations) == false, "group effectively hides manual repository")
+        let individuallyHidden: EngineStatus = try await client.request("POST", path: "/v1/repositories/visibility", body: RepositoryVisibilityRequest(id: adoptedID, enabled: false))
+        try expect(individuallyHidden.repositories.first(where: { $0.id == adoptedID })?.disabled == true, "individual disable contract")
+        let restoredGroup: EngineStatus = try await client.request("POST", path: "/v1/organizations/settings", body: OrganizationSettingsRequest(owner: "fixture.group", enabled: true))
+        try expect(restoredGroup.repositories.first(where: { $0.id == adoptedID })?.isEnabled(in: restoredGroup.organizations) == false, "group enable retains individual hidden setting")
+        let restoredRepository: EngineStatus = try await client.request("POST", path: "/v1/repositories/visibility", body: RepositoryVisibilityRequest(id: adoptedID, enabled: true))
+        try expect(restoredRepository.repositories.first(where: { $0.id == adoptedID })?.isEnabled(in: restoredRepository.organizations) == true, "repository re-enabled contract")
+        try expect(try await git(["-C", checkout.path, "status", "--porcelain=v1"]) == sourceStatus, "original staged and untracked status unchanged")
+        try expect(try await git(["-C", checkout.path, "diff", "--binary"]) == sourceDiff, "original uncommitted contents unchanged")
+        try expect(try await git(["-C", checkout.path, "diff", "--cached", "--binary"]) == stagedDiff, "original staged contents unchanged")
+        try expect(((try? Data(contentsOf: trace)) ?? Data()) == traceBefore, "adoption and visibility never invoke GitHub CLI")
         let session: AuthSession = try await client.request("POST", path: "/v1/auth/start")
         try expect(session.pending, "auth flow is asynchronous")
         var pending: AuthSession?
@@ -88,7 +123,7 @@ struct ControlSmoke {
         }
         try expect(authenticated?.account?.login == "fixture-account" && authenticated?.deviceCode == nil, "completed auth contract")
         let discovered: EngineStatus = try await client.request("POST", path: "/v1/discover")
-        try expect(discovered.repositories.count == 1 && discovered.repositories[0].privateRepository, "discovery/private repo contract")
+        try expect(discovered.repositories.count == 2 && discovered.repositories.contains(where: { $0.id == "fixture-account/fixture-repo" && $0.privateRepository }), "discovery/private repo contract")
         let moved = root.appendingPathComponent("moved", isDirectory: true)
         let changed: EngineStatus = try await client.request("POST", path: "/v1/settings", body: ["mountRoot": moved.path])
         try expect(changed.mountRoot == moved.path, "settings migration")
@@ -127,7 +162,14 @@ struct ControlSmoke {
         }
         service.terminate(); service.waitUntilExit()
         try expect(!FileManager.default.fileExists(atPath: socket.path), "graceful shutdown removes socket")
-        print("PASS: status, duplicate startup, device auth, discovery, settings, operation/error decoding, dependency failure, graceful shutdown")
+        print("PASS: local adoption without sign-in, original dirty/staged work preservation, group/repository visibility, status, duplicate startup, device auth, discovery, settings, operation/error decoding, dependency failure, graceful shutdown")
+    }
+
+    @discardableResult
+    static func git(_ arguments: [String]) async throws -> Data {
+        let result = try await CommandRunner.run(executable: URL(fileURLWithPath: "/usr/bin/git"), arguments: arguments)
+        try expect(result.status == 0, "synthetic local Git fixture setup")
+        return result.output
     }
 
     static func expect(_ condition: Bool, _ message: String) throws {

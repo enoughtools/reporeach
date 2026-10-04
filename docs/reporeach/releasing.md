@@ -9,7 +9,7 @@ Use Go 1.26.8, full Xcode 16 or later and its command-line tools, Python 3, and 
 Check out a specific source revision and record your Xcode, macOS, Go, and XcodeGen versions. Keep the checkout clean when creating a release. For development packages:
 
 ```sh
-release_version=0.1.0-beta.1
+release_version=0.1.0-beta.2
 scripts/build-macos.sh --arch arm64 --version "$release_version" --unsigned
 scripts/build-macos.sh --arch x86_64 --version "$release_version" --unsigned
 python3 scripts/release-manifest.py manifest \
@@ -33,10 +33,10 @@ The scripts make source builds repeatable by using committed Go dependency check
 Use a Developer ID Application identity already available in your Keychain. Pass its name or hash, not a private key or password:
 
 ```sh
-release_version=0.1.0-beta.1
+release_version=0.1.0-beta.2
 export REPOREACH_SIGN_IDENTITY='Developer ID Application: Your Organization (TEAMID)'
 export REPOREACH_NOTARY_PROFILE='reporeach-notary'
-export REPOREACH_BUILD_NUMBER=1
+export REPOREACH_BUILD_NUMBER=2
 scripts/build-macos.sh --arch arm64 --version "$release_version" --notarize
 scripts/build-macos.sh --arch x86_64 --version "$release_version" --notarize
 python3 scripts/release-manifest.py manifest \
@@ -54,7 +54,7 @@ The manifest records source repository/revision, dirty-checkout status, artifact
 To stage verified downloads for the website:
 
 ```sh
-release_version=0.1.0-beta.1
+release_version=0.1.0-beta.2
 python3 scripts/release-manifest.py stage \
   --directory "dist/releases/$release_version" --version "$release_version"
 npm ci --prefix site
@@ -74,7 +74,10 @@ Staging writes versioned downloads and `site/public/releases/latest.json`. It re
 - [ ] Install a downloaded, quarantined app on a clean supported Mac. Check launch, Git availability, macFUSE setup, real GitHub authorization, and meaningful dependency errors.
 - [ ] Enable the installed Finder extension and verify badges, private cache access, single-repo action routing, and no action for a mixed-repo selection.
 - [ ] Browse owner/repo names without acquisition; enter one repo and verify on-demand reads, binary content, edits, staging, commit, branch switch, and restart persistence.
+- [ ] Without GitHub sign-in, add disposable HTTPS/SSH/local-bare/checkout sources using native Git authentication. Verify delayed preparation, committed-ref selection, unpushed committed history where applicable, and unchanged source index/dirty/untracked files.
+- [ ] Toggle repository and owner visibility, rediscover GitHub repos, and restart. Verify data retention, pin-loop pause, persistent individual exclusions, busy-toggle refusal, and the documented behavior of already open files.
 - [ ] Complete Keep Downloaded, disconnect the network, and read the current committed tree. Check cancellation and interrupted download recovery; do not claim full history, LFS, or submodule availability.
 - [ ] Exercise Free Up Space refusal for dirty/staged/unpushed/recovered state, unsupported metadata, and a busy mount. Verify retained data after failure and the surviving virtual entry after successful release.
 - [ ] Check explicit refresh and discovery semantics, folder relocation, quit/relaunch, and optional launch at login without silently changing or publishing local work.
 - [ ] Confirm private vulnerability reporting, accurate privacy/auth copy, and working product/download/source links. Publish release notes with tested environments and all remaining runtime limitations.
+- [ ] For beta.1 upgrades, test catalogue v1-to-v2 migration with existing local state. Explain the unsupported downgrade and preserve the old release/validation record; do not imply migration deleted or moved source checkouts.

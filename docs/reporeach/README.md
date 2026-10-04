@@ -1,6 +1,6 @@
 # RepoReach documentation
 
-RepoReach is an [Enough Tools](https://enoughtools.com) macOS app built on [Cloudflare ArtifactFS](https://github.com/cloudflare/artifact-fs). It puts the GitHub repositories your account can access in a folder you choose, grouped by owner. Repository contents become available on demand through a writable Git filesystem.
+RepoReach is an [Enough Tools](https://enoughtools.com) macOS app built on [Cloudflare ArtifactFS](https://github.com/cloudflare/artifact-fs). It puts selected Git repositories in a folder you choose. Add a remote or existing local checkout without signing in, or connect GitHub for account and organization discovery. Repository contents become available on demand through a writable Git filesystem.
 
 This documentation describes the current beta source. A packaged release's download manifest and release notes are the authority for its version, architecture, signing, and notarization status.
 

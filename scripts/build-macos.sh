@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 export GOTOOLCHAIN=go1.26.8
 ARCH=arm64
-VERSION=0.1.0-beta.1
+VERSION=0.1.0-beta.2
 SIGN_IDENTITY="${REPOREACH_SIGN_IDENTITY:-}"
 NOTARIZE=false
 while [ "$#" -gt 0 ]; do
@@ -58,7 +58,7 @@ macFUSE is a separately installed dependency and is not redistributed here.
 NOTICE
 MARKETING_VERSION="${VERSION%%-*}"
 MARKETING_VERSION="${MARKETING_VERSION%%+*}"
-BUILD_NUMBER="${REPOREACH_BUILD_NUMBER:-1}"
+BUILD_NUMBER="${REPOREACH_BUILD_NUMBER:-2}"
 for PLIST in "$APP/Contents/Info.plist" "$APP/Contents/PlugIns/RepoReachFinder.appex/Contents/Info.plist"; do
   /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $MARKETING_VERSION" "$PLIST"
   /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD_NUMBER" "$PLIST"

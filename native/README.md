@@ -29,6 +29,12 @@ swiftc -parse-as-library App/Models.swift App/EngineClient.swift Tools/control-s
 ../build/control-smoke /absolute/path/to/artifact-fs
 ```
 
+## Adding and choosing repositories
+
+**Add Repository** accepts any supported Git remote URL or an existing local checkout, without signing into GitHub. The folder picker accepts ordinary or bare Git repositories. Adopting local committed data creates a separate virtual checkout; RepoReach does not move or edit the original folder or its staged and uncommitted work. GitHub sign-in remains an optional discovery convenience. Remote access uses Git's existing credentials and SSH agent; inline tokens, passwords, and credential-bearing URLs are rejected before the control command runs.
+
+Use **Show repository in Finder** in repository details or **Owners & organizations** in Settings to choose what appears in the filesystem. Group settings also apply to manually adopted repositories with the same group. Hidden repositories remain in the app's catalogue, retain cached data and local work, and pause background downloading. Enabling a group does not override an individual repository's hidden setting. The **Hidden from Finder** filter makes these entries easy to find again.
+
 ## Architecture and safety
 
 - `App/RepositoryStore.swift` is the main-actor UI state and control layer.

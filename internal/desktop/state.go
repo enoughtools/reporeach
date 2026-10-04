@@ -14,15 +14,16 @@ import (
 )
 
 type persistedState struct {
-	SchemaVersion int          `json:"schemaVersion"`
-	MountRoot     string       `json:"mountRoot"`
-	MountDesired  bool         `json:"mountDesired"`
-	Account       *Account     `json:"account,omitempty"`
-	Repositories  []Repository `json:"repositories"`
+	SchemaVersion         int          `json:"schemaVersion"`
+	MountRoot             string       `json:"mountRoot"`
+	MountDesired          bool         `json:"mountDesired"`
+	Account               *Account     `json:"account,omitempty"`
+	Repositories          []Repository `json:"repositories"`
+	DisabledOrganizations []string     `json:"disabledOrganizations,omitempty"`
 }
 
 func readState(path, mountRoot string) (persistedState, error) {
-	state := persistedState{SchemaVersion: 1, MountRoot: mountRoot, Repositories: []Repository{}}
+	state := persistedState{SchemaVersion: 2, MountRoot: mountRoot, Repositories: []Repository{}}
 	f, err := os.Open(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return state, nil
@@ -40,14 +41,29 @@ func readState(path, mountRoot string) (persistedState, error) {
 	if decoder.Decode(new(any)) != io.EOF {
 		return state, errors.New("catalogue has trailing data")
 	}
-	if saved.SchemaVersion != 1 {
+	if saved.SchemaVersion != 1 && saved.SchemaVersion != 2 {
 		return state, fmt.Errorf("unsupported catalogue schema version %d", saved.SchemaVersion)
 	}
 	state = saved
+	// Version 1 had neither manual sources nor visibility policies. Defaults
+	// preserve its catalogue; the next atomic save records the upgraded schema.
+	state.SchemaVersion = 2
+	owners := make(map[string]bool, len(state.DisabledOrganizations))
+	for _, owner := range state.DisabledOrganizations {
+		if err := validateComponent(owner); err != nil {
+			return state, fmt.Errorf("invalid disabled organization: %w", err)
+		}
+		key := strings.ToLower(owner)
+		if owners[key] {
+			return state, errors.New("catalogue contains duplicate disabled organizations")
+		}
+		owners[key] = true
+	}
 	if err := validateMountRoot(state.MountRoot); err != nil {
 		return state, fmt.Errorf("invalid saved mount root: %w", err)
 	}
 	seen := map[string]bool{}
+	ownerSpellings := map[string]string{}
 	if state.Account != nil && (!validGitHubOwner(state.Account.Login) || githubAvatarURL(state.Account.AvatarURL) != state.Account.AvatarURL) {
 		return state, errors.New("invalid saved GitHub account")
 	}
@@ -61,6 +77,11 @@ func readState(path, mountRoot string) (persistedState, error) {
 			return state, errors.New("catalogue contains duplicate repositories")
 		}
 		seen[key] = true
+		ownerKey := strings.ToLower(repo.Owner)
+		if previous, exists := ownerSpellings[ownerKey]; exists && previous != repo.Owner {
+			return state, errors.New("catalogue contains conflicting owner spellings")
+		}
+		ownerSpellings[ownerKey] = repo.Owner
 		// Interrupted work is never reported as a completed download.
 		if repo.State == "preparing" {
 			repo.State = "virtual"
@@ -118,6 +139,12 @@ func validateRepository(repo Repository) error {
 	}
 	if repo.ID != repo.Owner+"/"+repo.Name {
 		return errors.New("repository ID must be owner/name")
+	}
+	if repo.Source == "manual" {
+		return validateManualRepository(repo)
+	}
+	if repo.Source != "" && repo.Source != "github" {
+		return errors.New("unsupported repository source")
 	}
 	if repo.CloneURL != "https://github.com/"+repo.ID+".git" {
 		return errors.New("repository clone URL must match its GitHub identity")

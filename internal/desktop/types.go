@@ -22,6 +22,16 @@ type Repository struct {
 	Pinned          bool   `json:"pinned"`
 	DownloadedBytes int64  `json:"downloadedBytes"`
 	Error           string `json:"error,omitempty"`
+	// Empty Source denotes a catalogue discovered through GitHub in older builds.
+	Source   string `json:"source,omitempty"`
+	Disabled bool   `json:"disabled,omitempty"`
+}
+
+// Organization is a catalogue owner group. It can also represent the group
+// chosen for a manually adopted repository on another Git host.
+type Organization struct {
+	Name    string `json:"name"`
+	Enabled bool   `json:"enabled"`
 }
 
 type AuthStatus struct {
@@ -47,12 +57,13 @@ type Operation struct {
 }
 
 type Status struct {
-	Version         string       `json:"version"`
-	MountRoot       string       `json:"mountRoot"`
-	Mounted         bool         `json:"mounted"`
-	DependencyReady bool         `json:"dependencyReady"`
-	Account         *Account     `json:"account,omitempty"`
-	Repositories    []Repository `json:"repositories"`
-	Operations      []Operation  `json:"operations"`
-	Message         string       `json:"message,omitempty"`
+	Version         string         `json:"version"`
+	MountRoot       string         `json:"mountRoot"`
+	Mounted         bool           `json:"mounted"`
+	DependencyReady bool           `json:"dependencyReady"`
+	Account         *Account       `json:"account,omitempty"`
+	Repositories    []Repository   `json:"repositories"`
+	Operations      []Operation    `json:"operations"`
+	Organizations   []Organization `json:"organizations"`
+	Message         string         `json:"message,omitempty"`
 }

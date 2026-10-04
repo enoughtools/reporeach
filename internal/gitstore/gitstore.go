@@ -288,8 +288,12 @@ func (s *Store) CloneBloblessNonInteractive(ctx context.Context, cfg model.RepoC
 }
 
 func (s *Store) cloneBlobless(ctx context.Context, cfg model.RepoConfig, extraEnv []string) error {
+	safeURL, credHelper, err := transportCredentialEnv(cfg)
+	if err != nil {
+		return err
+	}
 	if _, err := os.Stat(cfg.GitDir); err == nil {
-		return nil
+		return ConfigureCredentialHelper(ctx, cfg)
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
@@ -300,10 +304,6 @@ func (s *Store) cloneBlobless(ctx context.Context, cfg model.RepoConfig, extraEn
 
 	// Strip credentials from the CLI-visible URL; pass them via a credential helper
 	// so they don't appear in ps output.
-	safeURL, credHelper, err := credentialEnv(cfg.RemoteURL)
-	if err != nil {
-		return err
-	}
 	env := append([]string{}, extraEnv...)
 	env = append(env, credHelper...)
 
@@ -346,6 +346,11 @@ func (s *Store) cloneBlobless(ctx context.Context, cfg model.RepoConfig, extraEn
 
 	targetGitDir := filepath.Join(target, ".git")
 
+	cloneConfig := cfg
+	cloneConfig.GitDir = targetGitDir
+	if err := ConfigureCredentialHelper(ctx, cloneConfig); err != nil {
+		return err
+	}
 	if err := configureArtifactWorktree(ctx, targetGitDir); err != nil {
 		return err
 	}
@@ -362,6 +367,10 @@ func (s *Store) cloneBlobless(ctx context.Context, cfg model.RepoConfig, extraEn
 
 // PrepareSource acquires and verifies one exact remote source revision.
 func (s *Store) PrepareSource(ctx context.Context, cfg model.RepoConfig, requirement model.SourceRequirement) (model.PreparedSource, error) {
+	safeURL, credHelper, err := transportCredentialEnv(cfg)
+	if err != nil {
+		return model.PreparedSource{}, err
+	}
 	requirement.Ref = strings.TrimSpace(requirement.Ref)
 	requirement.RequiredCommit = strings.ToLower(strings.TrimSpace(requirement.RequiredCommit))
 	if requirement.Ref == "" || !strings.HasPrefix(requirement.Ref, "refs/") {
@@ -384,6 +393,9 @@ func (s *Store) PrepareSource(ctx context.Context, cfg model.RepoConfig, require
 			return model.PreparedSource{}, err
 		}
 		if available {
+			if err := ConfigureCredentialHelper(ctx, cfg); err != nil {
+				return model.PreparedSource{}, err
+			}
 			if err := prepareFixedHEAD(ctx, cfg.GitDir, requirement.RequiredCommit, false); err != nil {
 				return model.PreparedSource{}, err
 			}
@@ -393,10 +405,6 @@ func (s *Store) PrepareSource(ctx context.Context, cfg model.RepoConfig, require
 
 	parent := filepath.Dir(cfg.GitDir)
 	if err := os.MkdirAll(parent, 0o755); err != nil {
-		return model.PreparedSource{}, err
-	}
-	safeURL, credHelper, err := credentialEnv(cfg.RemoteURL)
-	if err != nil {
 		return model.PreparedSource{}, err
 	}
 	env := append(nonInteractiveGitEnv(), credHelper...)
@@ -426,6 +434,11 @@ func (s *Store) PrepareSource(ctx context.Context, cfg model.RepoConfig, require
 			return err
 		}
 		if _, err := runGitWithEnv(ctx, candidateGitDir, env, "remote", "add", "origin", safeURL); err != nil {
+			return err
+		}
+		candidateConfig := cfg
+		candidateConfig.GitDir = candidateGitDir
+		if err := ConfigureCredentialHelper(ctx, candidateConfig); err != nil {
 			return err
 		}
 		refspec := "+" + requirement.Ref + ":" + verifiedSourceTrackingRef
@@ -796,6 +809,10 @@ func isTransientGitMessage(message string) bool {
 }
 
 func (s *Store) Fetch(ctx context.Context, repo model.RepoConfig) error {
+	_, env, err := transportCredentialEnv(repo)
+	if err != nil {
+		return err
+	}
 	remotesForLogging, cancelLookup := s.startRemotesForLogging(ctx, repo)
 	defer cancelLookup()
 	return s.retryGitOperationForRemoteLookup(ctx, GitOperationFetch, repo.Name, remotesForLogging, func() error {
@@ -804,17 +821,21 @@ func (s *Store) Fetch(ctx context.Context, repo model.RepoConfig) error {
 			args = append(args, fmt.Sprintf("--depth=%d", repo.HistoryDepth))
 		}
 		args = append(args, "origin")
-		_, err := runGit(ctx, repo.GitDir, args...)
+		_, err := runGitWithEnv(ctx, repo.GitDir, env, args...)
 		return err
 	})
 }
 
 func (s *Store) FetchRefNonInteractive(ctx context.Context, repo model.RepoConfig, ref string) error {
-	return s.fetchRef(ctx, repo, ref, nonInteractiveGitEnv())
+	_, env, err := transportCredentialEnv(repo)
+	if err != nil {
+		return err
+	}
+	return s.fetchRef(ctx, repo, ref, append(nonInteractiveGitEnv(), env...))
 }
 
 func (s *Store) FetchRefWithCredentials(ctx context.Context, repo model.RepoConfig, ref string) error {
-	_, env, err := credentialEnv(repo.RemoteURL)
+	_, env, err := transportCredentialEnv(repo)
 	if err != nil {
 		return err
 	}
@@ -885,11 +906,15 @@ func (s *Store) PrepareExistingCloneNonInteractive(ctx context.Context, repo mod
 }
 
 func (s *Store) ConfigureRemoteNonInteractive(ctx context.Context, repo model.RepoConfig) error {
-	return s.configureRemote(ctx, repo, repo.RemoteURL, nonInteractiveGitEnv())
+	safeURL, env, err := transportCredentialEnv(repo)
+	if err != nil {
+		return err
+	}
+	return s.configureRemote(ctx, repo, safeURL, append(nonInteractiveGitEnv(), env...))
 }
 
 func (s *Store) ConfigureRemoteWithCredentials(ctx context.Context, repo model.RepoConfig) error {
-	safeURL, env, err := credentialEnv(repo.RemoteURL)
+	safeURL, env, err := transportCredentialEnv(repo)
 	if err != nil {
 		return err
 	}
@@ -1135,7 +1160,7 @@ func (s *Store) BuildTreeIndex(ctx context.Context, repo model.RepoConfig, headO
 func streamTreeRecords(ctx context.Context, gitDir string, headOID string, fn func(string)) error {
 	cmd := exec.CommandContext(ctx, "git", "ls-tree", "-r", "-t", "-z", headOID)
 	configureCancelableCommand(cmd)
-	cmd.Env = append(os.Environ(), "GIT_DIR="+gitDir)
+	cmd.Env = append(inheritedGitEnvironment(os.Environ()), "GIT_DIR="+gitDir)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return err
@@ -1250,7 +1275,7 @@ func (s *Store) batchResolveSizes(ctx context.Context, repo model.RepoConfig, no
 	// triggers a network round-trip, turning a millisecond operation into
 	// minutes. Blobs reported as "missing" keep SizeState="unknown" and get
 	// their size resolved during hydration.
-	cmd.Env = append(os.Environ(), "GIT_DIR="+repo.GitDir, "GIT_NO_LAZY_FETCH=1")
+	cmd.Env = append(inheritedGitEnvironment(os.Environ()), "GIT_DIR="+repo.GitDir, "GIT_NO_LAZY_FETCH=1")
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return err
@@ -1611,7 +1636,7 @@ type batchCatFile struct {
 
 func newBatchCatFile(gitDir string, logger *slog.Logger) (*batchCatFile, error) {
 	cmd := exec.Command("git", "cat-file", "--batch")
-	cmd.Env = append(os.Environ(), "GIT_DIR="+gitDir)
+	cmd.Env = append(inheritedGitEnvironment(os.Environ()), "GIT_DIR="+gitDir)
 	cmd.Stderr = os.Stderr
 	configureCommandProcessGroup(cmd)
 
@@ -1814,14 +1839,8 @@ func (s *Store) EnsureIndexInitialized(ctx context.Context, repo model.RepoConfi
 		return err
 	}
 	indexPath := filepath.Join(repo.GitDir, "index")
-	if alternateIndex, ok := os.LookupEnv("GIT_INDEX_FILE"); ok {
-		if alternateIndex == "" {
-			return errors.New("GIT_INDEX_FILE is empty")
-		}
-		indexPath = alternateIndex
-	}
 	if _, err := os.Stat(indexPath); err == nil {
-		// Validate the effective index without refreshing it. Unlike read-tree,
+		// Validate the private index without refreshing it. Unlike read-tree,
 		// ls-files does not replace staged state or resolve missing blobs.
 		return runGitDiscardOutputWithEnv(
 			ctx,
@@ -1916,11 +1935,13 @@ func runGitDiscardOutputWithEnv(ctx context.Context, gitDir string, extraEnv []s
 func runGitWithEnvCapture(ctx context.Context, gitDir string, extraEnv []string, captureOutput bool, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, "git", args...)
 	configureCancelableCommand(cmd)
-	env := os.Environ()
+	env, err := gitCommandEnv(inheritedGitEnvironment(os.Environ()), extraEnv)
+	if err != nil {
+		return "", err
+	}
 	if gitDir != "" {
 		env = append(env, "GIT_DIR="+gitDir)
 	}
-	env = append(env, extraEnv...)
 	cmd.Env = env
 	buf := &bytes.Buffer{}
 	errBuf := &boundedGitError{limit: maxGitErrorBytes}
@@ -1969,6 +1990,157 @@ func configureCancelableCommand(cmd *exec.Cmd) {
 	configureCommandProcessGroup(cmd)
 	cmd.Cancel = func() error { return killCommandProcessGroup(cmd) }
 	cmd.WaitDelay = gitCommandWaitDelay
+}
+
+// inheritedGitEnvironment keeps native authentication and Git configuration,
+// while removing bindings to the repository that launched ArtifactFS. Those
+// bindings could redirect a private clone's index or objects into another repo.
+// Intentional command-specific bindings are applied after this boundary.
+func inheritedGitEnvironment(base []string) []string {
+	env := make([]string, 0, len(base))
+	for _, entry := range base {
+		key, _, _ := strings.Cut(entry, "=")
+		switch key {
+		case "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE",
+			"GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_PREFIX",
+			"GIT_SHALLOW_FILE", "GIT_NAMESPACE", "GIT_REPLACE_REF_BASE", "GIT_GRAFT_FILE",
+			"GIT_CONFIG":
+			continue
+		}
+		env = append(env, entry)
+	}
+	return env
+}
+
+// gitCommandEnv appends command-specific config after inherited Git config.
+// Git's indexed environment syntax has one shared count, so simple environment
+// concatenation would discard the caller's configuration whenever we add a helper.
+func gitCommandEnv(base, extra []string) ([]string, error) {
+	value, configured := environmentValue(extra, "GIT_CONFIG_COUNT")
+	if !configured {
+		return append(append([]string(nil), base...), extra...), nil
+	}
+	added := 0
+	var err error
+	if value != "" {
+		added, err = strconv.Atoi(value)
+		if err != nil || added < 0 {
+			return nil, errors.New("invalid command Git config count")
+		}
+	}
+	inherited := 0
+	if value, ok := environmentValue(base, "GIT_CONFIG_COUNT"); ok && value != "" {
+		inherited, err = strconv.Atoi(value)
+		if err != nil || inherited < 0 {
+			return nil, errors.New("invalid inherited Git config count")
+		}
+	}
+	if added > int(^uint(0)>>1)-inherited {
+		return nil, errors.New("Git config count overflow")
+	}
+	for i := 0; i < inherited; i++ {
+		if _, ok := environmentValue(base, fmt.Sprintf("GIT_CONFIG_KEY_%d", i)); !ok {
+			return nil, errors.New("missing inherited Git config key")
+		}
+		if _, ok := environmentValue(base, fmt.Sprintf("GIT_CONFIG_VALUE_%d", i)); !ok {
+			return nil, errors.New("missing inherited Git config value")
+		}
+	}
+	env := append([]string(nil), base...)
+	for _, entry := range extra {
+		key, _, _ := strings.Cut(entry, "=")
+		if key == "GIT_CONFIG_COUNT" || strings.HasPrefix(key, "GIT_CONFIG_KEY_") || strings.HasPrefix(key, "GIT_CONFIG_VALUE_") {
+			continue
+		}
+		env = append(env, entry)
+	}
+	for i := 0; i < added; i++ {
+		key, hasKey := environmentValue(extra, fmt.Sprintf("GIT_CONFIG_KEY_%d", i))
+		value, hasValue := environmentValue(extra, fmt.Sprintf("GIT_CONFIG_VALUE_%d", i))
+		if !hasKey || !hasValue {
+			return nil, errors.New("incomplete command Git config entry")
+		}
+		env = append(env, fmt.Sprintf("GIT_CONFIG_KEY_%d=%s", inherited+i, key), fmt.Sprintf("GIT_CONFIG_VALUE_%d=%s", inherited+i, value))
+	}
+	env = append(env, fmt.Sprintf("GIT_CONFIG_COUNT=%d", inherited+added))
+	return env, nil
+}
+
+func environmentValue(env []string, key string) (string, bool) {
+	prefix := key + "="
+	for i := len(env) - 1; i >= 0; i-- {
+		if value, ok := strings.CutPrefix(env[i], prefix); ok {
+			return value, true
+		}
+	}
+	return "", false
+}
+
+// transportCredentialEnv preserves explicit URL credentials as authoritative.
+// With no explicit profile, normal Git helpers and SSH authentication are inherited.
+func transportCredentialEnv(cfg model.RepoConfig) (string, []string, error) {
+	safeURL, env, err := credentialEnv(cfg.RemoteURL)
+	if err != nil {
+		return "", nil, err
+	}
+	if cfg.CredentialHelper == "" {
+		return safeURL, env, nil
+	}
+	scope, err := credentialHelperScope(safeURL, cfg.CredentialHelper)
+	if err != nil {
+		return "", nil, err
+	}
+	if len(env) != 0 {
+		return safeURL, env, nil
+	}
+	key := "credential." + scope + ".helper"
+	return safeURL, []string{
+		"GIT_CONFIG_COUNT=2",
+		"GIT_CONFIG_KEY_0=" + key,
+		"GIT_CONFIG_VALUE_0=",
+		"GIT_CONFIG_KEY_1=" + key,
+		"GIT_CONFIG_VALUE_1=" + cfg.CredentialHelper,
+	}, nil
+}
+
+func credentialHelperScope(remote, helper string) (string, error) {
+	if strings.TrimSpace(helper) == "" || strings.ContainsAny(helper, "\x00\r\n") {
+		return "", errors.New("credential helper must be a trusted single-line command")
+	}
+	u, err := url.Parse(remote)
+	if err != nil || !strings.EqualFold(u.Scheme, "https") || u.Hostname() == "" || u.User != nil || u.Opaque != "" {
+		return "", errors.New("credential helper requires an HTTPS remote")
+	}
+	return "https://" + u.Host, nil
+}
+
+// ConfigureCredentialHelper installs a trusted, secret-free helper in a private
+// clone, so subsequent hydration and Git commands from editors use that profile.
+// Empty profiles and inline credentials never change the clone's native helpers.
+func ConfigureCredentialHelper(ctx context.Context, cfg model.RepoConfig) error {
+	safeURL, env, err := transportCredentialEnv(cfg)
+	if err != nil {
+		return err
+	}
+	if cfg.CredentialHelper == "" {
+		return nil
+	}
+	if _, inline, err := credentialEnv(cfg.RemoteURL); err != nil || len(inline) != 0 {
+		return err
+	}
+	if cfg.GitDir == "" {
+		return errors.New("private Git directory is required for credential helper")
+	}
+	scope, err := credentialHelperScope(safeURL, cfg.CredentialHelper)
+	if err != nil {
+		return err
+	}
+	key := "credential." + scope + ".helper"
+	if _, err := runGitWithEnv(ctx, cfg.GitDir, env, "config", "--local", "--replace-all", key, ""); err != nil {
+		return err
+	}
+	_, err = runGitWithEnv(ctx, cfg.GitDir, env, "config", "--local", "--add", key, cfg.CredentialHelper)
+	return err
 }
 
 // credentialEnv returns a sanitized URL (safe for ps) and env vars that

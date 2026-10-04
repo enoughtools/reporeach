@@ -55,12 +55,10 @@ struct ActionRoute: Equatable {
         guard pieces.count == 2 else { return false }
         let owner = pieces[0]
         let name = pieces[1]
-        guard (1...39).contains(owner.utf8.count),
+        guard (1...100).contains(owner.utf8.count),
               (1...100).contains(name.utf8.count),
               owner != ".", owner != "..", name != ".", name != "..",
-              owner.utf8.allSatisfy({ isASCIIAlphanumeric($0) || $0 == 45 || $0 == 95 }),
-              owner.utf8.first.map(isASCIIAlphanumeric) == true,
-              owner.utf8.last != 45,
+              owner.utf8.allSatisfy({ isASCIIAlphanumeric($0) || $0 == 45 || $0 == 46 || $0 == 95 }),
               name.utf8.allSatisfy({ isASCIIAlphanumeric($0) || $0 == 45 || $0 == 46 || $0 == 95 })
         else { return false }
         return true

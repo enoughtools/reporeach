@@ -45,8 +45,9 @@ func desktopCommand(ctx context.Context, stdout, stderr io.Writer) ucli.Command 
 					if ghPath == "" || !filepath.IsAbs(ghPath) {
 						return errors.New("--gh must name the bundled GitHub CLI with an absolute path")
 					}
-					// Only this child service receives the official helper. No user
-					// global Git configuration or token is read or changed here.
+					// Authentication belongs to each repository. Keep the user's
+					// native Git configuration and SSH agent available to manual
+					// remotes; only disable terminal prompts and telemetry here.
 					type priorEnvironment struct {
 						value   string
 						present bool
@@ -61,7 +62,7 @@ func desktopCommand(ctx context.Context, stdout, stderr io.Writer) ucli.Command 
 							}
 						}
 					}()
-					for _, value := range desktop.GitCredentialEnvironment(ghPath) {
+					for _, value := range []string{"GIT_TERMINAL_PROMPT=0", "GH_TELEMETRY=false"} {
 						key, content, _ := strings.Cut(value, "=")
 						old, present := os.LookupEnv(key)
 						previous[key] = priorEnvironment{old, present}

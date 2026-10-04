@@ -129,6 +129,38 @@ func (s *Service) Handler() http.Handler {
 			response, err = s.github.StartAuth(ctx)
 		case "POST /v1/discover":
 			response, err = s.Discover(ctx)
+		case "POST /v1/repositories/adopt":
+			var adoption AdoptionRequest
+			err = readJSON(w, r, &adoption)
+			if err == nil {
+				response, err = s.Adopt(ctx, adoption)
+			}
+		case "POST /v1/organizations/settings":
+			var setting struct {
+				Owner   string `json:"owner"`
+				Enabled *bool  `json:"enabled"`
+			}
+			err = readJSON(w, r, &setting)
+			if err == nil && setting.Enabled == nil {
+				err = errors.New("enabled must be a boolean")
+			}
+			if err == nil {
+				err = s.SetOrganizationEnabled(ctx, setting.Owner, *setting.Enabled)
+			}
+			response = s.Status()
+		case "POST /v1/repositories/visibility":
+			var setting struct {
+				ID      string `json:"id"`
+				Enabled *bool  `json:"enabled"`
+			}
+			err = readJSON(w, r, &setting)
+			if err == nil && setting.Enabled == nil {
+				err = errors.New("enabled must be a boolean")
+			}
+			if err == nil {
+				err = s.SetRepositoryEnabled(ctx, setting.ID, *setting.Enabled)
+			}
+			response = s.Status()
 		case "POST /v1/settings":
 			var settings struct {
 				MountRoot string `json:"mountRoot"`

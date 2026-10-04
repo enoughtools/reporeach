@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -219,11 +220,70 @@ func TestE2EGitStatusDetectsSameSizeRewriteAfterMtimeRestore(t *testing.T) {
 	if err := os.WriteFile(readmePath, updated, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chtimes(readmePath, indexedMtime, indexedMtime); err != nil {
+	if err := restoreE2ETimestamps(readmePath, indexedMtime, indexedMtime); err != nil {
 		t.Fatal(err)
+	}
+	if restored, err := os.Stat(readmePath); err != nil || !restored.ModTime().Equal(indexedMtime) {
+		t.Fatalf("restored README timestamp: %v, %v", restored, err)
+	}
+	if actual := []byte(readFileEventually(t, readmePath)); !bytes.Equal(actual, updated) {
+		t.Fatal("restoring the timestamp changed README contents")
 	}
 
 	assertGitStatus(t, repo.mountPath, map[string]string{"README.md": " M"})
+}
+
+func restoreE2ETimestamps(path string, atime, mtime time.Time) error {
+	return restoreE2ETimestampsUsing(path, atime, mtime, os.Chtimes)
+}
+
+func restoreE2ETimestampsUsing(path string, atime, mtime time.Time, restore func(string, time.Time, time.Time) error) error {
+	// FUSE can interrupt the request when the client receives a signal. Unlike
+	// os.Rename, os.Chtimes does not retry EINTR. Assigning the same explicit
+	// timestamps again is idempotent; any other error must still fail the test.
+	const maxAttempts = 8
+	var err error
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		err = restore(path, atime, mtime)
+		if !errors.Is(err, syscall.EINTR) {
+			return err
+		}
+	}
+	return fmt.Errorf("timestamp restore interrupted after %d attempts: %w", maxAttempts, err)
+}
+
+func TestTimestampRestoreRetriesOnlyBoundedInterruptions(t *testing.T) {
+	atime := time.Date(2026, 1, 2, 3, 4, 5, 678, time.UTC)
+	mtime := atime.Add(-time.Hour)
+	for _, test := range []struct {
+		name      string
+		failures  []error
+		wantErr   error
+		wantCalls int
+	}{
+		{name: "success", wantCalls: 1},
+		{name: "interrupted twice", failures: []error{syscall.EINTR, &os.PathError{Op: "chtimes", Path: "fixture", Err: syscall.EINTR}}, wantCalls: 3},
+		{name: "backing error", failures: []error{syscall.EIO}, wantErr: syscall.EIO, wantCalls: 1},
+		{name: "missing file", failures: []error{syscall.EINTR, syscall.ENOENT}, wantErr: syscall.ENOENT, wantCalls: 2},
+		{name: "persistent interruption", failures: []error{syscall.EINTR, syscall.EINTR, syscall.EINTR, syscall.EINTR, syscall.EINTR, syscall.EINTR, syscall.EINTR, syscall.EINTR}, wantErr: syscall.EINTR, wantCalls: 8},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			calls := 0
+			err := restoreE2ETimestampsUsing("fixture", atime, mtime, func(path string, actualAtime, actualMtime time.Time) error {
+				if path != "fixture" || actualAtime != atime || actualMtime != mtime {
+					t.Fatal("retry changed the target or explicit timestamps")
+				}
+				calls++
+				if calls <= len(test.failures) {
+					return test.failures[calls-1]
+				}
+				return nil
+			})
+			if !errors.Is(err, test.wantErr) || calls != test.wantCalls {
+				t.Fatalf("timestamp restore: %v after %d attempts, want %v after %d", err, calls, test.wantErr, test.wantCalls)
+			}
+		})
+	}
 }
 
 func TestE2EGitStatusPorcelain(t *testing.T) {

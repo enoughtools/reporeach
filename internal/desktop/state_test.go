@@ -24,7 +24,7 @@ func TestStateMissingStartsWithEmptyCatalogue(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if state.SchemaVersion != 1 || state.MountRoot != root || state.Repositories == nil || len(state.Repositories) != 0 || state.MountDesired {
+	if state.SchemaVersion != 2 || state.MountRoot != root || state.Repositories == nil || len(state.Repositories) != 0 || state.MountDesired {
 		t.Fatalf("unexpected initial state: %+v", state)
 	}
 }
@@ -96,7 +96,7 @@ func TestStateRejectsMalformedAndUnsafeCatalogues(t *testing.T) {
 		"trailing value": encode(valid) + `{}`, "trailing junk": encode(valid) + ` trailing`,
 	}
 	mutations := map[string]func(*persistedState){
-		"schema":               func(s *persistedState) { s.SchemaVersion = 2 },
+		"schema":               func(s *persistedState) { s.SchemaVersion = 3 },
 		"relative root":        func(s *persistedState) { s.MountRoot = "relative" },
 		"filesystem root":      func(s *persistedState) { s.MountRoot = "/" },
 		"owner traversal":      func(s *persistedState) { s.Repositories[0].Owner = "../outside" },
@@ -110,6 +110,9 @@ func TestStateRejectsMalformedAndUnsafeCatalogues(t *testing.T) {
 		"remote option":     func(s *persistedState) { s.Repositories[0].CloneURL = "--upload-pack=unexpected" },
 		"duplicate identity": func(s *persistedState) {
 			s.Repositories = append(s.Repositories, catalogueRepository("OCTOCAT", "REPO"))
+		},
+		"owner spelling collision": func(s *persistedState) {
+			s.Repositories = append(s.Repositories, catalogueRepository("OCTOCAT", "different"))
 		},
 	}
 	for name, mutate := range mutations {

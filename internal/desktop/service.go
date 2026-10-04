@@ -21,6 +21,7 @@ import (
 	"github.com/cloudflare/artifact-fs/internal/catalogfs"
 	"github.com/cloudflare/artifact-fs/internal/daemon"
 	"github.com/cloudflare/artifact-fs/internal/fusefs"
+	"github.com/cloudflare/artifact-fs/internal/gitstore"
 	"github.com/cloudflare/artifact-fs/internal/model"
 )
 
@@ -113,6 +114,19 @@ func New(ctx context.Context, opts Options) (*Service, error) {
 		cancel()
 		return nil, fmt.Errorf("recover mount folder: %w", err)
 	}
+	for _, repo := range s.state.Repositories {
+		if repo.Source == "manual" {
+			remote, err := parseAdoptionRemote(repo.CloneURL)
+			if err == nil {
+				err = s.adoptionAllowedLocked(remote)
+			}
+			if err != nil {
+				_ = engine.Close()
+				cancel()
+				return nil, fmt.Errorf("invalid adopted repository location: %w", err)
+			}
+		}
+	}
 	// Reconcile UI state with durable engine registration after interrupted work.
 	configs, err := engine.ListRepos(ctx)
 	if err != nil {
@@ -203,7 +217,8 @@ func (s *Service) Status() Status {
 	}
 	return Status{Version: Version, MountRoot: s.state.MountRoot,
 		Mounted: s.mounted != nil, DependencyReady: s.dependencyReady(),
-		Account: account, Repositories: repos, Operations: operations, Message: s.message}
+		Account: account, Repositories: repos, Operations: operations,
+		Organizations: s.organizationsLocked(), Message: s.message}
 }
 
 func (s *Service) Discover(ctx context.Context) (Status, error) {
@@ -225,22 +240,47 @@ func (s *Service) Discover(ctx context.Context) (Status, error) {
 	}
 	previous := s.state
 	old := map[string]Repository{}
+	owners := map[string]string{}
+	for _, owner := range s.state.DisabledOrganizations {
+		owners[strings.ToLower(owner)] = owner
+	}
 	for _, repo := range s.state.Repositories {
 		old[strings.ToLower(repo.ID)] = repo
+		owners[strings.ToLower(repo.Owner)] = repo.Owner
 	}
 	for i := range repos {
 		repo := &repos[i]
 		if existing, ok := old[strings.ToLower(repo.ID)]; ok {
-			repo.State, repo.Pinned, repo.DownloadedBytes, repo.Error = existing.State, existing.Pinned, existing.DownloadedBytes, existing.Error
+			if existing.Source == "manual" {
+				// Discovery must not replace a native Git remote or its auth mode.
+				*repo = existing
+			} else {
+				repo.State, repo.Pinned, repo.DownloadedBytes, repo.Error = existing.State, existing.Pinned, existing.DownloadedBytes, existing.Error
+				repo.Disabled, repo.Source = existing.Disabled, existing.Source
+				// Keep the stable catalogue identity when GitHub changes casing.
+				repo.ID, repo.Owner, repo.Name = existing.ID, existing.Owner, existing.Name
+				repo.CloneURL, repo.HTMLURL = existing.CloneURL, existing.HTMLURL
+			}
 			delete(old, strings.ToLower(repo.ID))
 		} else {
+			key := strings.ToLower(repo.Owner)
+			if owner, exists := owners[key]; exists {
+				repo.Owner = owner
+				repo.ID = owner + "/" + repo.Name
+				repo.HTMLURL = "https://github.com/" + repo.ID
+				repo.CloneURL = repo.HTMLURL + ".git"
+			} else {
+				owners[key] = repo.Owner
+			}
 			repo.State = "virtual"
 		}
 	}
 	// An access change must not orphan local edits or pinned data. Keep previous
 	// entries until the user explicitly frees them, and report the access change.
 	for _, repo := range old {
-		repo.Error = "Repository was not returned by GitHub. Local data has been retained."
+		if repo.Source != "manual" {
+			repo.Error = "Repository was not returned by GitHub. Local data has been retained."
+		}
 		repos = append(repos, repo)
 	}
 	sort.Slice(repos, func(i, j int) bool { return strings.ToLower(repos[i].ID) < strings.ToLower(repos[j].ID) })
@@ -339,7 +379,9 @@ func (s *Service) mountLocked(ctx context.Context) error {
 		defer s.workers.Done()
 		err := mounted.Join(s.ctx)
 		s.mu.Lock()
-		if s.mounted == mounted && !s.closing {
+		// A canceled observation does not prove the kernel mount detached.
+		// Retain ownership until Close can unmount it after parent cancellation.
+		if s.mounted == mounted && !s.closing && s.ctx.Err() == nil {
 			s.mounted, s.catalog = nil, nil
 			s.message = "The repository folder was unmounted. Open RepoReach to mount it again."
 			if err != nil && !errors.Is(err, context.Canceled) {
@@ -419,6 +461,24 @@ func (s *Service) Settings(ctx context.Context, root string) error {
 		s.mu.Unlock()
 		return errors.New("choose a folder outside the current repository folder")
 	}
+	var localRepositories []Repository
+	for _, repo := range s.state.Repositories {
+		if repo.Source != "manual" {
+			continue
+		}
+		remote, err := parseAdoptionRemote(repo.CloneURL)
+		if err != nil {
+			s.mu.Unlock()
+			return err
+		}
+		if remote.localPath != "" {
+			if pathsLexicallyOverlap(root, remote.localPath) {
+				s.mu.Unlock()
+				return errors.New("choose a mount folder outside the adopted Git source folders")
+			}
+			localRepositories = append(localRepositories, repo)
+		}
+	}
 	s.maintenance = true
 	desired := s.state.MountDesired
 	s.mu.Unlock()
@@ -434,6 +494,14 @@ func (s *Service) Settings(ctx context.Context, root string) error {
 	}
 	if pathsOverlap(root, s.opts.StateDir) {
 		return errors.New("mount folder and state directory must be separate")
+	}
+	for _, repo := range localRepositories {
+		if err := validateManualSourceLocation(repo, oldRoot, s.opts.StateDir); err != nil {
+			return err
+		}
+		if err := validateManualSourceLocation(repo, root, s.opts.StateDir); err != nil {
+			return err
+		}
 	}
 	if err := safeMountDirectory(root); err != nil {
 		return err
@@ -477,10 +545,14 @@ func (s *Service) ensureRepository(ctx context.Context, id string) (*fusefs.Arti
 		return nil, errors.New("repository service is closing or needs recovery")
 	}
 	repo, ok := s.repositoryLocked(id)
+	enabled := ok && s.repositoryEnabledLocked(repo)
 	root := s.state.MountRoot
 	s.mu.Unlock()
 	if !ok {
 		return nil, errors.New("repository is not in the catalogue")
+	}
+	if !enabled {
+		return nil, errors.New("enable this repository and its owner group before opening it virtually")
 	}
 	configs, err := s.engine.ListRepos(ctx)
 	if err != nil {
@@ -495,12 +567,20 @@ func (s *Service) ensureRepository(ctx context.Context, id string) (*fusefs.Arti
 		}
 	}
 	if config == nil || config.PrepareError != "" || config.PrepareState == model.PrepareStateFailed || config.PrepareState == model.PrepareStateSyncPreparing {
+		if repo.Source == "manual" {
+			if err := validateManualSourceLocation(repo, root, s.opts.StateDir); err != nil {
+				return nil, err
+			}
+		}
 		s.setRepositoryState(id, "preparing", "")
 		cfg := model.RepoConfig{
 			ID: model.RepoID(name), Name: name, RemoteURL: repo.CloneURL,
 			Branch: "refs/heads/" + repo.DefaultBranch, Enabled: true,
 			MountRoot: root, MountPath: filepath.Join(root, repo.Owner, repo.Name),
 			RefreshInterval: 5 * time.Minute, RemoteRefreshDisabled: true,
+		}
+		if repo.Source != "manual" {
+			cfg.CredentialHelper = githubCredentialHelper(s.opts.GHPath)
 		}
 		if repo.DefaultBranch == "" {
 			return nil, errors.New("this repository has no default branch yet")
@@ -511,9 +591,11 @@ func (s *Service) ensureRepository(ctx context.Context, id string) (*fusefs.Arti
 		}
 	}
 	gitDir := filepath.Join(s.opts.StateDir, "engine", "repos", name, "git")
-	if err := configureRepositoryAuth(ctx, gitDir, s.opts.GHPath); err != nil {
-		s.setRepositoryState(id, "error", safeError(err))
-		return nil, err
+	if repo.Source != "manual" {
+		if err := configureRepositoryAuth(ctx, gitDir, s.opts.GHPath); err != nil {
+			s.setRepositoryState(id, "error", safeError(err))
+			return nil, err
+		}
 	}
 	fs, err := s.engine.OpenCatalogRepository(ctx, name)
 	if err != nil {
@@ -541,9 +623,11 @@ func (s *Service) Action(id, action string) (Operation, error) {
 	if s.maintenance {
 		return Operation{}, errors.New("wait for the folder change to finish")
 	}
-	if _, ok := s.repositoryLocked(id); !ok {
+	repo, ok := s.repositoryLocked(id)
+	if !ok {
 		return Operation{}, errors.New("repository is not in the catalogue")
 	}
+	id = repo.ID
 	if action == "cancel" {
 		if cancel, ok := s.cancels[id]; ok {
 			cancel()
@@ -557,6 +641,9 @@ func (s *Service) Action(id, action string) (Operation, error) {
 	}
 	if action != "keep" && action != "prepare" && action != "refresh" && action != "free" {
 		return Operation{}, errors.New("unsupported repository action")
+	}
+	if action != "free" && !s.repositoryEnabledLocked(repo) {
+		return Operation{}, errors.New("enable this repository and its owner group before downloading or refreshing it")
 	}
 	if _, busy := s.cancels[id]; busy {
 		return Operation{}, errors.New("repository already has an active operation")
@@ -590,7 +677,16 @@ func (s *Service) runAction(ctx context.Context, cancel context.CancelFunc, op O
 		} else {
 			_, err = s.ensureRepository(ctx, op.RepositoryID)
 			if err == nil && op.Action == "refresh" {
-				err = s.engine.FetchCatalogUpdates(ctx, engineName(op.RepositoryID))
+				s.mu.Lock()
+				repo, exists := s.repositoryLocked(op.RepositoryID)
+				root := s.state.MountRoot
+				s.mu.Unlock()
+				if exists && repo.Source == "manual" {
+					err = validateManualSourceLocation(repo, root, s.opts.StateDir)
+				}
+				if err == nil {
+					err = s.engine.FetchCatalogUpdates(ctx, engineName(op.RepositoryID))
+				}
 			}
 			if err == nil && op.Action == "keep" {
 				err = s.download(ctx, op)
@@ -662,6 +758,14 @@ func (s *Service) freeRepository(ctx context.Context, id string) error {
 	if !exists {
 		s.mu.Unlock()
 		return errors.New("repository is not in the catalogue")
+	}
+	root := s.state.MountRoot
+	if repo.Source == "manual" {
+		s.mu.Unlock()
+		if err := validateManualSourceLocation(repo, root, s.opts.StateDir); err != nil {
+			return err
+		}
+		s.mu.Lock()
 	}
 	// Persist unpin intent before releasing storage. A crash after the engine
 	// commits removal must not cause the pin worker to download it all again.
@@ -745,7 +849,7 @@ func (s *Service) pinLoop() {
 			s.mu.Lock()
 			var pinned []Repository
 			for _, repo := range s.state.Repositories {
-				if repo.Pinned {
+				if repo.Pinned && s.repositoryEnabledLocked(repo) {
 					pinned = append(pinned, repo)
 				}
 			}
@@ -766,11 +870,12 @@ func (s *Service) pinLoop() {
 
 func (s *Service) lockRepo(ctx context.Context, id string) (func(), error) {
 	s.mu.Lock()
-	lock := s.locks[id]
+	key := strings.ToLower(id)
+	lock := s.locks[key]
 	if lock == nil {
 		lock = make(chan struct{}, 1)
 		lock <- struct{}{}
-		s.locks[id] = lock
+		s.locks[key] = lock
 	}
 	s.mu.Unlock()
 	select {
@@ -794,7 +899,7 @@ func (s *Service) setRepositoryState(id, state, message string) {
 
 func (s *Service) repositoryIndexLocked(id string) int {
 	for i := range s.state.Repositories {
-		if s.state.Repositories[i].ID == id {
+		if strings.EqualFold(s.state.Repositories[i].ID, id) {
 			return i
 		}
 	}
@@ -811,6 +916,9 @@ func (s *Service) repositoryLocked(id string) (Repository, bool) {
 func (s *Service) entriesLocked() []catalogfs.Entry {
 	entries := make([]catalogfs.Entry, 0, len(s.state.Repositories))
 	for _, repo := range s.state.Repositories {
+		if !s.repositoryEnabledLocked(repo) {
+			continue
+		}
 		entries = append(entries, catalogfs.Entry{ID: repo.ID, Owner: repo.Owner, Name: repo.Name})
 	}
 	return entries
@@ -912,19 +1020,12 @@ func platformDependencyReady() bool {
 
 func shellQuote(value string) string { return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'" }
 
-func GitCredentialEnvironment(ghPath string) []string {
-	return []string{
-		"GIT_TERMINAL_PROMPT=0", "GH_TELEMETRY=false", "GIT_CONFIG_COUNT=2",
-		"GIT_CONFIG_KEY_0=credential.helper", "GIT_CONFIG_VALUE_0=",
-		"GIT_CONFIG_KEY_1=credential.https://github.com.helper",
-		"GIT_CONFIG_VALUE_1=" + githubCredentialHelper(ghPath),
-	}
-}
-
 func configureRepositoryAuth(ctx context.Context, gitDir, ghPath string) error {
 	// This configuration belongs only to RepoReach's private clone. Git commands
 	// launched by an editor can then use the same official Keychain-backed helper.
-	return gitConfig(ctx, gitDir, "credential.https://github.com.helper", githubCredentialHelper(ghPath))
+	return gitstore.ConfigureCredentialHelper(ctx, model.RepoConfig{
+		GitDir: gitDir, RemoteURL: "https://github.com/", CredentialHelper: githubCredentialHelper(ghPath),
+	})
 }
 
 func githubCredentialHelper(ghPath string) string {
@@ -938,7 +1039,7 @@ func configureGitWorktree(ctx context.Context, gitDir, path string) error {
 
 func gitConfig(ctx context.Context, gitDir, key, value string) error {
 	cmd := exec.CommandContext(ctx, "git", "--git-dir", gitDir, "config", "--local", key, value)
-	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	cmd.Env = nativeAdoptionEnvironment(os.Environ())
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("configure repository Git integration: %w", err)
 	}

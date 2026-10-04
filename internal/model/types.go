@@ -30,12 +30,15 @@ type PreparedSource struct {
 }
 
 type RepoConfig struct {
-	ID                    RepoID
-	Name                  string
-	MountRoot             string
-	MountPath             string
-	RemoteURL             string
-	RemoteURLRedacted     string
+	ID                RepoID
+	Name              string
+	MountRoot         string
+	MountPath         string
+	RemoteURL         string
+	RemoteURLRedacted string
+	// CredentialHelper is a trusted, secret-free helper command for acquisition.
+	// It is not persisted in the registry; acquired clones retain scoped Git config.
+	CredentialHelper      string `json:"-"`
 	Branch                string
 	RefreshInterval       time.Duration
 	GitDir                string

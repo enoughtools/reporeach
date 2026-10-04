@@ -56,7 +56,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         guard mainWindow == nil else { return }
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1100, height: 740), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
         window.title = "RepoReach"
-        window.minSize = NSSize(width: 940, height: 640)
+        window.minSize = NSSize(width: 1040, height: 680)
         window.isReleasedWhenClosed = false
         window.delegate = self
         window.titlebarAppearsTransparent = true

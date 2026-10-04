@@ -501,11 +501,17 @@ func TestEnsureIndexInitializedHonorsCanceledContext(t *testing.T) {
 	}
 }
 
-func TestEnsureIndexInitializedRejectsEmptyAlternateIndexPath(t *testing.T) {
+func TestEnsureIndexInitializedIgnoresEmptyInheritedIndexPath(t *testing.T) {
+	repo := filepath.Join(t.TempDir(), "repo")
+	run(t, "git", "init", repo)
+	run(t, "git", "-C", repo, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "--allow-empty", "-m", "base")
 	t.Setenv("GIT_INDEX_FILE", "")
-	err := New(nil).EnsureIndexInitialized(context.Background(), model.RepoConfig{GitDir: t.TempDir()})
-	if err == nil || !strings.Contains(err.Error(), "GIT_INDEX_FILE") {
-		t.Fatalf("EnsureIndexInitialized error = %v, want empty GIT_INDEX_FILE error", err)
+	err := New(nil).EnsureIndexInitialized(context.Background(), model.RepoConfig{GitDir: filepath.Join(repo, ".git")})
+	if err != nil {
+		t.Fatalf("EnsureIndexInitialized: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(repo, ".git", "index")); err != nil {
+		t.Fatalf("private index was not initialized: %v", err)
 	}
 }
 
@@ -534,7 +540,7 @@ func TestEnsureIndexInitializedCreatesMissingIndex(t *testing.T) {
 	}
 }
 
-func TestEnsureIndexInitializedPreservesAlternateIndex(t *testing.T) {
+func TestEnsureIndexInitializedPreservesInheritedIndexAndCreatesPrivateIndex(t *testing.T) {
 	repo := filepath.Join(t.TempDir(), "repo")
 	run(t, "git", "init", repo)
 	run(t, "git", "-C", repo, "config", "user.name", "test")
@@ -586,9 +592,16 @@ func TestEnsureIndexInitializedPreservesAlternateIndex(t *testing.T) {
 	if after := runOutput(t, "git", "-c", "core.fsmonitor=false", "-C", repo, "diff", "--cached"); after != before {
 		t.Fatalf("alternate staged diff changed:\nbefore:\n%s\nafter:\n%s", before, after)
 	}
+	if _, err := os.Stat(defaultIndex); err != nil {
+		t.Fatalf("private index was not initialized: %v", err)
+	}
+	privateDiff, err := runGit(context.Background(), gitDir, "-c", "core.fsmonitor=false", "diff", "--cached")
+	if err != nil || privateDiff != "" {
+		t.Fatalf("private index should match HEAD: %q, %v", privateDiff, err)
+	}
 }
 
-func TestEnsureIndexInitializedCreatesMissingAlternateIndex(t *testing.T) {
+func TestEnsureIndexInitializedIgnoresMissingInheritedIndex(t *testing.T) {
 	repo := filepath.Join(t.TempDir(), "repo")
 	run(t, "git", "init", repo)
 	run(t, "git", "-C", repo, "config", "user.name", "test")
@@ -605,8 +618,11 @@ func TestEnsureIndexInitializedCreatesMissingAlternateIndex(t *testing.T) {
 	if err := New(nil).EnsureIndexInitialized(context.Background(), cfg); err != nil {
 		t.Fatal(err)
 	}
-	if got := strings.TrimSpace(runOutput(t, "git", "-C", repo, "ls-files")); got != "tracked.txt" {
-		t.Fatalf("alternate index entries = %q, want tracked.txt", got)
+	if _, err := os.Stat(alternateIndex); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("inherited index was created: %v", err)
+	}
+	if got, err := runGit(context.Background(), cfg.GitDir, "ls-files"); err != nil || got != "tracked.txt" {
+		t.Fatalf("private index entries = %q, error = %v, want tracked.txt", got, err)
 	}
 }
 

@@ -6,11 +6,13 @@ struct ContentView: View {
     @State private var filter: RepositoryFilter = .all
     @State private var freeCandidate: RepositoryRecord?
     @State private var confirmFree = false
+    @State private var showingAdoption = false
 
     private enum RepositoryFilter: String, CaseIterable {
         case all = "All repositories"
         case kept = "Kept downloaded"
         case active = "In progress"
+        case hidden = "Hidden from Finder"
     }
 
     private var visibleRepositories: [RepositoryRecord] {
@@ -19,6 +21,7 @@ struct ContentView: View {
             case .all: return true
             case .kept: return repo.pinned
             case .active: return repo.isWorking || operation(for: repo)?.isRunning == true
+            case .hidden: return !store.isRepositoryEnabled(repo)
             }
         }
     }
@@ -69,6 +72,7 @@ struct ContentView: View {
         .font(.system(size: 13))
         .frame(minWidth: 1040, minHeight: 680)
         .preferredColorScheme(.light)
+        .sheet(isPresented: $showingAdoption) { AdoptionView(onAdopted: { filter = .all }).environmentObject(store) }
         .confirmationDialog("Free up space for \(freeCandidate?.name ?? "this repository")?", isPresented: $confirmFree, titleVisibility: .visible) {
             Button("Free Up Space", role: .destructive) {
                 if let repo = freeCandidate { Task { await store.action(repo, .free) } }
@@ -103,14 +107,20 @@ struct ContentView: View {
             }
 
             if !store.owners.isEmpty {
-                ReachEyebrow(text: "Owners").padding(.horizontal, 22).padding(.top, 30).padding(.bottom, 12)
+                ReachEyebrow(text: "Repository groups").padding(.horizontal, 22).padding(.top, 30).padding(.bottom, 12)
                 ScrollView {
                     VStack(spacing: 0) {
                         ForEach(store.owners, id: \.self) { owner in
-                            sidebarRow(owner, symbol: "building.2", count: store.repositories.filter { $0.owner == owner }.count, selected: store.ownerFilter == owner) {
+                            sidebarRow(owner, symbol: "building.2", count: store.repositories.filter { $0.owner.caseInsensitiveCompare(owner) == .orderedSame }.count, selected: store.ownerFilter?.caseInsensitiveCompare(owner) == .orderedSame) {
                                 filter = .all
                                 store.ownerFilter = owner
                                 store.selectedRepositoryID = nil
+                            }
+                            .contextMenu {
+                                Button(store.isOwnerEnabled(owner) ? "Hide Group from Finder" : "Show Group in Finder") {
+                                    Task { await store.setOrganizationEnabled(owner, !store.isOwnerEnabled(owner)) }
+                                }
+                                .disabled(store.isBusy || store.demoMode || store.isOwnerWorking(owner))
                             }
                         }
                     }
@@ -176,14 +186,29 @@ struct ContentView: View {
     private var header: some View {
         HStack(alignment: .center, spacing: 18) {
             VStack(alignment: .leading, spacing: 8) {
-                ReachEyebrow(text: store.ownerFilter ?? "Your GitHub, on your Mac")
+                ReachEyebrow(text: store.ownerFilter ?? "Your repositories, on your Mac")
                 Text(store.ownerFilter ?? "All your repositories.")
                     .font(ReachTheme.heading(29))
                 Text("Within reach. Download only what you need.")
                     .foregroundStyle(ReachTheme.muted)
                     .font(.system(size: 12))
+                if let owner = store.ownerFilter {
+                    Toggle("Show group in Finder", isOn: Binding(get: { store.isOwnerEnabled(owner) }, set: { enabled in
+                        Task { await store.setOrganizationEnabled(owner, enabled) }
+                    }))
+                    .toggleStyle(.checkbox)
+                    .font(.system(size: 11))
+                    .disabled(store.isBusy || store.demoMode || store.isOwnerWorking(owner))
+                    .help("Hiding a group pauses downloads and retains its cached data and local work")
+                }
             }
             Spacer(minLength: 10)
+            Button { showingAdoption = true } label: {
+                Label("Add Repository", systemImage: "plus")
+            }
+            .buttonStyle(ReachButtonStyle(kind: .primary, compact: true))
+            .disabled(store.isBusy || store.demoMode || !store.serviceRunning)
+            .accessibilityIdentifier("adopt-repository")
             Button {
                 Task { await store.discover() }
             } label: {
@@ -318,10 +343,27 @@ struct ContentView: View {
         }
         stateBadge(repo)
         ReachDivider()
+        Toggle("Show repository in Finder", isOn: Binding(get: { !repo.disabled }, set: { enabled in
+            Task { await store.setRepositoryEnabled(repo, enabled) }
+        }))
+        .toggleStyle(.checkbox)
+        .font(.system(size: 12))
+        .disabled(store.isRepositoryWorking(repo) || store.isBusy || store.demoMode || operation(for: repo)?.isRunning == true)
+        .accessibilityIdentifier("repository-visibility")
+        if !store.isOwnerEnabled(repo.owner) {
+            Text("This group is hidden. Enable it to show this repository in Finder.")
+                .font(.system(size: 11)).foregroundStyle(ReachTheme.muted).lineSpacing(3)
+            Button("Enable Group") { Task { await store.setOrganizationEnabled(repo.owner, true) } }
+                .buttonStyle(ReachButtonStyle(compact: true)).disabled(store.isBusy || store.demoMode || store.isOwnerWorking(repo.owner))
+        } else if repo.disabled {
+            Text("Its folder is hidden and background downloads are paused. Cached data and local work stay on your Mac.")
+                .font(.system(size: 11)).foregroundStyle(ReachTheme.muted).lineSpacing(3)
+        }
         VStack(spacing: 13) {
+            detailValue("Source", value: repo.isManual ? "Added directly" : "GitHub discovery")
             detailValue("Default branch", value: repo.defaultBranch)
             detailValue("Local downloads", value: ReachTheme.bytes(repo.downloadedBytes))
-            detailValue("Visibility", value: repo.privateRepository ? "Private" : "Public")
+            detailValue("Visibility", value: repo.isManual ? "Not provided" : repo.privateRepository ? "Private" : "Public")
         }
         if let error = repo.error, !error.isEmpty {
             Text(error).font(.system(size: 12)).foregroundStyle(ReachTheme.danger).textSelection(.enabled)
@@ -341,7 +383,7 @@ struct ContentView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
             .buttonStyle(ReachButtonStyle(kind: .primary))
-            .disabled(store.status?.mounted != true || repo.isWorking || store.demoMode)
+            .disabled(store.status?.mounted != true || store.isRepositoryWorking(repo) || store.demoMode || !store.isRepositoryEnabled(repo))
             .accessibilityIdentifier("open-repository")
 
             if !repo.pinned {
@@ -352,7 +394,7 @@ struct ContentView: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 .buttonStyle(ReachButtonStyle())
-                .disabled(repo.isWorking || store.isBusy || store.demoMode)
+                .disabled(store.isRepositoryWorking(repo) || store.isBusy || store.demoMode || !store.isRepositoryEnabled(repo))
                 .accessibilityIdentifier("keep-repository")
             }
             Button {
@@ -363,7 +405,7 @@ struct ContentView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
             .buttonStyle(ReachButtonStyle())
-            .disabled(repo.isWorking || store.isBusy || store.demoMode || (!repo.pinned && repo.downloadedBytes == 0))
+            .disabled(store.isRepositoryWorking(repo) || store.isBusy || store.demoMode || (!repo.pinned && repo.downloadedBytes == 0))
             .accessibilityIdentifier("free-repository")
 
             Button {
@@ -373,14 +415,14 @@ struct ContentView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
             .buttonStyle(ReachButtonStyle(kind: .quiet, compact: true))
-            .disabled(repo.isWorking || store.isBusy || store.demoMode)
+            .disabled(store.isRepositoryWorking(repo) || store.isBusy || store.demoMode || !store.isRepositoryEnabled(repo))
             .padding(.leading, -11)
         }
         Text(repo.pinned ? "The current checkout is kept for offline use." : "Opening files downloads their contents as needed.")
             .font(.system(size: 11)).foregroundStyle(ReachTheme.muted).lineSpacing(3)
         if let url = URL(string: repo.htmlURL), url.scheme == "https" {
             Link(destination: url) {
-                Label("View on GitHub", systemImage: "arrow.up.right")
+                Label("View Repository", systemImage: "arrow.up.right")
                     .font(.system(size: 12, weight: .medium))
             }
             .foregroundStyle(ReachTheme.accent)
@@ -398,8 +440,8 @@ struct ContentView: View {
 
     private func stateBadge(_ repo: RepositoryRecord) -> some View {
         HStack(spacing: 5) {
-            Circle().fill(repo.error != nil ? ReachTheme.danger : repo.pinned ? ReachTheme.success : ReachTheme.muted).frame(width: 5, height: 5)
-            Text(repo.displayState).font(.system(size: 10, weight: .medium))
+            Circle().fill(!store.isRepositoryEnabled(repo) ? ReachTheme.muted : repo.error != nil ? ReachTheme.danger : repo.pinned ? ReachTheme.success : ReachTheme.muted).frame(width: 5, height: 5)
+            Text(store.isRepositoryEnabled(repo) ? repo.displayState : "Hidden from Finder").font(.system(size: 10, weight: .medium))
         }
         .foregroundStyle(repo.error != nil ? ReachTheme.danger : ReachTheme.muted)
         .padding(.horizontal, 7).padding(.vertical, 5)
@@ -433,11 +475,16 @@ struct ContentView: View {
                 Image(systemName: "folder.badge.plus").font(.system(size: 42, weight: .ultraLight)).foregroundStyle(ReachTheme.accent)
                 VStack(alignment: .leading, spacing: 12) {
                     Text("Your projects, without the pile-up.").font(ReachTheme.heading(31))
-                    Text("Connect GitHub to find the repositories you can access. RepoReach puts them in a folder you choose, ready when you need them.")
+                    Text("Add a Git remote or existing checkout, or connect GitHub to discover repositories. RepoReach puts them in a folder you choose, ready when you need them.")
                         .font(.system(size: 13)).foregroundStyle(ReachTheme.muted).lineSpacing(5).frame(maxWidth: 480, alignment: .leading)
                 }
                 VStack(alignment: .leading, spacing: 18) {
-                    setupStep(number: "01", title: "Connect your GitHub account", detail: "Private repositories stay private. GitHub's official CLI handles sign-in and credential storage.") {
+                    setupStep(number: "01", title: "Bring a Git repository", detail: "Use a Git remote or existing checkout. GitHub sign-in is optional.") {
+                        Button("Add Repository") { showingAdoption = true }
+                            .buttonStyle(ReachButtonStyle(kind: .primary, compact: true))
+                            .disabled(store.isBusy || store.demoMode || !store.serviceRunning)
+                    }
+                    setupStep(number: "OR", title: "Connect GitHub for discovery", detail: "Private repositories stay private. GitHub's official CLI handles sign-in and credential storage.") {
                         Button(store.status?.account == nil ? "Connect GitHub" : "Discover Repositories") {
                             Task {
                                 if store.status?.account == nil { await store.signIn() }
@@ -621,6 +668,7 @@ struct ContentView: View {
         case .all: return "square.grid.2x2"
         case .kept: return "arrow.down.to.line"
         case .active: return "arrow.triangle.2.circlepath"
+        case .hidden: return "eye.slash"
         }
     }
 
@@ -629,6 +677,7 @@ struct ContentView: View {
         case .all: return store.repositories.count
         case .kept: return store.repositories.filter(\.pinned).count
         case .active: return store.repositories.filter { $0.isWorking || operation(for: $0)?.isRunning == true }.count
+        case .hidden: return store.repositories.filter { !store.isRepositoryEnabled($0) }.count
         }
     }
 }
@@ -647,13 +696,28 @@ struct SettingsView: View {
                 settingSection("Repository folder", symbol: "folder") {
                     Text(store.status?.mountRoot ?? "Loading folder location…")
                         .font(.system(size: 12)).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
-                    Text("Choose an empty folder. RepoReach groups repositories by their GitHub owner inside it.")
+                    Text("Choose an empty folder. RepoReach groups repositories by their owner or chosen group inside it.")
                         .font(.system(size: 12)).foregroundStyle(ReachTheme.muted).lineSpacing(3)
                     HStack(spacing: 10) {
                         Button("Choose Folder…") { store.chooseMountFolder() }
                             .buttonStyle(ReachButtonStyle(compact: true)).disabled(store.isBusy || store.demoMode)
                         Button("Open Folder") { store.openFolder() }
                             .buttonStyle(ReachButtonStyle(compact: true)).disabled(store.status?.mounted != true || store.demoMode)
+                    }
+                }
+                if !store.organizations.isEmpty {
+                    settingSection("Owners & organizations", symbol: "building.2") {
+                        Text("Choose which groups appear in Finder. Hiding a group pauses its background downloads and retains cached data and local work.")
+                            .font(.system(size: 12)).foregroundStyle(ReachTheme.muted).lineSpacing(3)
+                        ForEach(store.organizations) { group in
+                            Toggle(group.name, isOn: Binding(get: { store.isOwnerEnabled(group.name) }, set: { enabled in
+                                Task { await store.setOrganizationEnabled(group.name, enabled) }
+                            }))
+                            .toggleStyle(.checkbox)
+                            .font(.system(size: 12))
+                            .disabled(store.isBusy || store.demoMode || store.isOwnerWorking(group.name))
+                            .accessibilityIdentifier("group-visibility-\(group.name)")
+                        }
                     }
                 }
                 settingSection("Background & startup", symbol: "power") {
@@ -681,7 +745,7 @@ struct SettingsView: View {
                         .font(.system(size: 12)).foregroundStyle(ReachTheme.accent)
                 }
                 settingSection("Private by design", symbol: "lock") {
-                    Text("GitHub's official CLI handles credentials using macOS Keychain when available. Repository operations connect directly to GitHub; your repository contents are not sent to Enough Tools.")
+                    Text("GitHub's official CLI handles credentials using macOS Keychain when available. Repositories use Git directly with your existing Git and SSH credentials. Your repository contents are not sent to Enough Tools.")
                         .font(.system(size: 12)).foregroundStyle(ReachTheme.muted).lineSpacing(3)
                     Text("Free Up Space checks for local work before removing downloaded data. Keep Downloaded covers your current checkout, not all Git history.")
                         .font(.system(size: 12)).foregroundStyle(ReachTheme.muted).lineSpacing(3)

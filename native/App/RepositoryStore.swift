@@ -32,10 +32,24 @@ final class RepositoryStore: ObservableObject {
     }
 
     var repositories: [RepositoryRecord] { status?.repositories ?? [] }
-    var owners: [String] { Array(Set(repositories.map(\.owner))).sorted { $0.localizedStandardCompare($1) == .orderedAscending } }
+    var organizations: [OrganizationRecord] {
+        (status?.organizations ?? []).sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+    }
+    func isRepositoryEnabled(_ repository: RepositoryRecord) -> Bool { repository.isEnabled(in: organizations) }
+    func isOwnerEnabled(_ owner: String) -> Bool { organizations.first(where: { $0.name.caseInsensitiveCompare(owner) == .orderedSame })?.enabled ?? true }
+    func isRepositoryWorking(_ repository: RepositoryRecord) -> Bool {
+        repository.isWorking || status?.operations.contains(where: { $0.repositoryID == repository.id && $0.isRunning }) == true
+    }
+    func isOwnerWorking(_ owner: String) -> Bool { repositories.contains { $0.owner.caseInsensitiveCompare(owner) == .orderedSame && isRepositoryWorking($0) } }
+    var owners: [String] {
+        var seen = Set<String>()
+        return (organizations.map(\.name) + repositories.map(\.owner))
+            .filter { seen.insert($0.lowercased()).inserted }
+            .sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+    }
     var filteredRepositories: [RepositoryRecord] {
         repositories.filter { repository in
-            (ownerFilter == nil || repository.owner == ownerFilter) &&
+            (ownerFilter == nil || repository.owner.caseInsensitiveCompare(ownerFilter ?? "") == .orderedSame) &&
             (search.isEmpty || repository.id.localizedCaseInsensitiveContains(search) || repository.description.localizedCaseInsensitiveContains(search))
         }.sorted { lhs, rhs in
             if lhs.pinned != rhs.pinned { return lhs.pinned }
@@ -115,8 +129,8 @@ final class RepositoryStore: ObservableObject {
         serviceRunning = true
         if !service.isIsolated { UserDefaults.standard.set(loaded.mountRoot, forKey: "mountRoot") }
         if let selectedRepositoryID, !loaded.repositories.contains(where: { $0.id == selectedRepositoryID }) { self.selectedRepositoryID = nil }
-        if let ownerFilter, !owners.contains(ownerFilter) { self.ownerFilter = nil }
-        let snapshot = FinderStatusSnapshot(mountRoot: loaded.mountRoot, repositories: loaded.repositories.map {
+        if let ownerFilter, !owners.contains(where: { $0.caseInsensitiveCompare(ownerFilter) == .orderedSame }) { self.ownerFilter = nil }
+        let snapshot = FinderStatusSnapshot(mountRoot: loaded.mountRoot, repositories: loaded.repositories.filter { $0.isEnabled(in: loaded.organizations) }.map {
             FinderRepositoryStatus(id: $0.id, state: $0.state, pinned: $0.pinned, error: $0.error)
         })
         if snapshot != finderSnapshot {
@@ -130,6 +144,43 @@ final class RepositoryStore: ObservableObject {
             } catch {
                 // Finder status is a convenience; a failed cache write must not interrupt Git work.
             }
+        }
+    }
+
+    func adoptRepository(remoteURL: String, owner: String?, name: String?, branch: String?) async -> Bool {
+        guard !demoMode else { return false }
+        var accepted = false
+        await perform {
+            let validated = try RepositoryInput.validateRemoteURL(remoteURL)
+            let previousIDs = Set(self.repositories.map(\.id))
+            let request = RepositoryAdoptionRequest(remoteURL: validated, owner: owner, name: name, branch: branch)
+            let loaded: EngineStatus = try await self.service.client.request("POST", path: "/v1/repositories/adopt", body: request, timeout: 125)
+            self.apply(loaded)
+            if let added = loaded.repositories.first(where: { !previousIDs.contains($0.id) }) {
+                self.selectedRepositoryID = added.id
+            }
+            self.ownerFilter = nil
+            self.search = ""
+            accepted = true
+        }
+        return accepted
+    }
+
+    func setOrganizationEnabled(_ owner: String, _ enabled: Bool) async {
+        guard !demoMode else { return }
+        await perform {
+            let request = OrganizationSettingsRequest(owner: owner, enabled: enabled)
+            let loaded: EngineStatus = try await self.service.client.request("POST", path: "/v1/organizations/settings", body: request)
+            self.apply(loaded)
+        }
+    }
+
+    func setRepositoryEnabled(_ repository: RepositoryRecord, _ enabled: Bool) async {
+        guard !demoMode else { return }
+        await perform {
+            let request = RepositoryVisibilityRequest(id: repository.id, enabled: enabled)
+            let loaded: EngineStatus = try await self.service.client.request("POST", path: "/v1/repositories/visibility", body: request)
+            self.apply(loaded)
         }
     }
 
@@ -192,7 +243,7 @@ final class RepositoryStore: ObservableObject {
         guard !demoMode else { return }
         let panel = NSOpenPanel()
         panel.title = "Choose your repository folder"
-        panel.message = "Choose an empty folder, or create a new one. RepoReach will display your GitHub repositories here."
+        panel.message = "Choose an empty folder, or create a new one. RepoReach will display your repositories here."
         panel.prompt = "Use Folder"; panel.canChooseDirectories = true; panel.canChooseFiles = false
         panel.canCreateDirectories = true; panel.allowsMultipleSelection = false
         if let current = status?.mountRoot { panel.directoryURL = URL(fileURLWithPath: current).deletingLastPathComponent() }
@@ -213,6 +264,7 @@ final class RepositoryStore: ObservableObject {
         guard status.mounted || demoMode else { errorMessage = "Connect your repository folder first."; return }
         var url = URL(fileURLWithPath: status.mountRoot, isDirectory: true)
         if let repository {
+            guard isRepositoryEnabled(repository) else { errorMessage = "Enable this repository and its group to show its folder in Finder."; return }
             guard ActionRoute.isValidRepositoryID(repository.id) else { return }
             url.appendPathComponent(repository.owner, isDirectory: true); url.appendPathComponent(repository.name, isDirectory: true)
         }
