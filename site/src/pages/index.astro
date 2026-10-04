@@ -6,15 +6,17 @@ import CardContent from "@enoughtools/ui-astro/card-content";
 import "@enoughtools/ui-astro/styles.css";
 import "../styles.css";
 import fs from "node:fs";
-const releasePath = new URL(
-  "../../public/releases/latest.json",
-  import.meta.url,
-);
+import { publicDir } from "astro:config/server";
+const releasePath = new URL("releases/latest.json", publicDir);
 let release: any = null;
 try {
   release = JSON.parse(fs.readFileSync(releasePath, "utf8"));
-} catch {
-  /* A development preview can precede packaging. */
+} catch (error) {
+  // A development preview can precede packaging. Invalid or unreadable
+  // metadata must fail the build rather than hide published downloads.
+  if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) {
+    throw error;
+  }
 }
 const artifacts = release?.artifacts ?? [];
 const firstDownload = artifacts.find(
@@ -275,7 +277,7 @@ const faqs = [
             ArtifactFS. Free to use, inspect, and contribute to.
           </p><a
             class="text-link"
-            href="https://github.com/enoughtools/reporeach#readme"
+            href="https://github.com/enoughtools/reporeach/blob/main/docs/reporeach/user-guide.md"
             >Read the setup guide</a
           >
         </div>
@@ -311,7 +313,6 @@ const faqs = [
             macOS 13+ · <a
               href="https://github.com/enoughtools/reporeach/blob/main/docs/reporeach/platform-setup.md"
               >macFUSE kernel backend required</a
-            >
             >
           </p>
           <div class="download-links">
