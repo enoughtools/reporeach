@@ -3,8 +3,10 @@
 package fusefs
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -12,6 +14,7 @@ import (
 	"time"
 
 	"github.com/cloudflare/artifact-fs/internal/model"
+	overlaystore "github.com/cloudflare/artifact-fs/internal/overlay"
 	"github.com/jacobsa/fuse/fuseops"
 )
 
@@ -721,3 +724,108 @@ func (f *fakeLookupHydrator) ReadBlob(_ context.Context, _ model.RepoConfig, _ m
 }
 
 func (f *fakeLookupHydrator) QueueDepth(model.RepoID) int { return 0 }
+
+// The kernel may retain a looked-up inode after its logical path is removed or
+// replaced. Opening it must report a missing path rather than an I/O failure.
+func TestOpenFileReportsMissingNamespaceAfterLookup(t *testing.T) {
+	for _, deletedOverlay := range []bool{false, true} {
+		t.Run(fmt.Sprintf("deleted_overlay_%t", deletedOverlay), func(t *testing.T) {
+			repo := model.RepoConfig{ID: "repo"}
+			snap := &fakeSnapshot{nodes: map[string]model.BaseNode{"value.txt": {RepoID: repo.ID, Path: "value.txt", Type: "file", Mode: 0o644, SizeState: "known", SizeBytes: 1}}}
+			ov := &fakeOverlay{entries: map[string]model.OverlayEntry{}}
+			resolver := newResolver(snap, ov)
+			engine := &Engine{Resolver: resolver, Repo: repo, Overlay: ov}
+			fs := NewArtifactFuse(repo, resolver, engine)
+			lookup := &fuseops.LookUpInodeOp{Parent: fuseops.RootInodeID, Name: "value.txt"}
+			if err := fs.LookUpInode(context.Background(), lookup); err != nil {
+				t.Fatal(err)
+			}
+			if deletedOverlay {
+				ov.entries["value.txt"] = model.OverlayEntry{Path: "value.txt", Kind: model.OverlayKindDelete}
+			} else {
+				delete(snap.nodes, "value.txt")
+			}
+			if err := fs.OpenFile(context.Background(), &fuseops.OpenFileOp{Inode: lookup.Entry.Child}); err != syscall.ENOENT {
+				t.Fatalf("open stale looked-up path: %v, want ENOENT", err)
+			}
+			if len(fs.fileHandles) != 0 {
+				t.Fatal("failed open retained a handle")
+			}
+		})
+	}
+}
+
+func TestInterruptedFilesystemRequestsPreserveNamespaceAndBacking(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	repo := model.RepoConfig{ID: "repo", OverlayDBPath: filepath.Join(root, "overlay.db"), OverlayDir: filepath.Join(root, "overlay")}
+	ov, err := overlaystore.New(ctx, repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ov.Close() })
+	if err := ov.Mkdir(ctx, "source", 0o755); err != nil {
+		t.Fatal(err)
+	}
+	entry, err := ov.CreateFile(ctx, "source/value.bin", 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	contents := []byte{0, 0xff, 1, 2}
+	if _, err := ov.WriteFile(ctx, entry.Path, 0, contents); err != nil {
+		t.Fatal(err)
+	}
+	resolver := &Resolver{Snapshot: &fakeSnapshot{}, Overlay: ov}
+	resolver.SetGeneration(1)
+	fs := NewArtifactFuse(repo, resolver, &Engine{Repo: repo, Resolver: resolver, Overlay: ov})
+	source := &fuseops.LookUpInodeOp{Parent: fuseops.RootInodeID, Name: "source"}
+	if err := fs.LookUpInode(ctx, source); err != nil {
+		t.Fatal(err)
+	}
+	value := &fuseops.LookUpInodeOp{Parent: source.Entry.Child, Name: "value.bin"}
+	if err := fs.LookUpInode(ctx, value); err != nil {
+		t.Fatal(err)
+	}
+	interrupted, cancel := context.WithCancel(ctx)
+	cancel()
+	if err := fs.OpenFile(interrupted, &fuseops.OpenFileOp{Inode: value.Entry.Child}); err != syscall.EINTR {
+		t.Fatalf("interrupted open: %v, want EINTR", err)
+	}
+	if err := fs.OpenDir(interrupted, &fuseops.OpenDirOp{Inode: source.Entry.Child}); err != syscall.EINTR {
+		t.Fatalf("interrupted opendir: %v, want EINTR", err)
+	}
+	if len(fs.fileHandles) != 0 || len(fs.dirHandles) != 0 {
+		t.Fatal("interrupted open retained a filesystem handle")
+	}
+	rename := &fuseops.RenameOp{OldParent: fuseops.RootInodeID, OldName: "source", NewParent: fuseops.RootInodeID, NewName: "destination"}
+	if err := fs.Rename(interrupted, rename); err != syscall.EINTR {
+		t.Fatalf("interrupted rename: %v, want EINTR", err)
+	}
+	if _, err := resolver.ResolvePath("source/value.bin"); err != nil {
+		t.Fatalf("interrupted rename lost source: %v", err)
+	}
+	if _, err := resolver.ResolvePath("destination"); !os.IsNotExist(err) {
+		t.Fatalf("interrupted rename published destination: %v", err)
+	}
+	data, err := os.ReadFile(entry.BackingPath)
+	if err != nil || !bytes.Equal(data, contents) {
+		t.Fatalf("interrupted rename changed backing contents: %x %v", data, err)
+	}
+	// Namespace removal and missing backing data are different failures. Keep
+	// EIO when metadata still points at a file that has disappeared from disk.
+	if err := os.Remove(entry.BackingPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := fs.OpenFile(ctx, &fuseops.OpenFileOp{Inode: value.Entry.Child}); err != syscall.EIO {
+		t.Fatalf("missing backing data: %v, want EIO", err)
+	}
+}
+
+func TestFilesystemErrorsPreserveWrappedCancellationAndDeadline(t *testing.T) {
+	if got := fuseOperationError("test", fmt.Errorf("read metadata: %w", context.Canceled)); got != syscall.EINTR {
+		t.Fatalf("wrapped cancellation: %v, want EINTR", got)
+	}
+	if got := fuseOperationError("test", fmt.Errorf("fetch blob: %w", context.DeadlineExceeded)); got != syscall.ETIMEDOUT {
+		t.Fatalf("wrapped deadline: %v, want ETIMEDOUT", got)
+	}
+}

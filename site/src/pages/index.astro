@@ -1,0 +1,421 @@
+---
+import Button from "@enoughtools/ui-astro/button";
+import Badge from "@enoughtools/ui-astro/badge";
+import Card from "@enoughtools/ui-astro/card";
+import CardContent from "@enoughtools/ui-astro/card-content";
+import "@enoughtools/ui-astro/styles.css";
+import "../styles.css";
+import fs from "node:fs";
+const releasePath = new URL(
+  "../../public/releases/latest.json",
+  import.meta.url,
+);
+let release: any = null;
+try {
+  release = JSON.parse(fs.readFileSync(releasePath, "utf8"));
+} catch {
+  /* A development preview can precede packaging. */
+}
+const artifacts = release?.artifacts ?? [];
+const firstDownload = artifacts.find(
+  (a: any) => a.architecture === "arm64" && a.format === "dmg",
+);
+const faqs = [
+  [
+    "Are these real files?",
+    "They appear in Finder, your editor, and the terminal through a mounted filesystem. RepoReach downloads committed contents when needed; previews and file metadata checks can also trigger downloads. Edits live on your Mac and use ordinary Git commits and pushes.",
+  ],
+  [
+    "What does Keep Downloaded mean?",
+    "Keep Downloaded makes the current checkout available offline. Other branches, historical file versions, Git LFS objects, and submodules may still require a connection.",
+  ],
+  [
+    "Will closing RepoReach remove my folders?",
+    "Closing the management window leaves the background service running. Reopen RepoReach whenever you want to manage your repositories. You can explicitly stop the service and unmount the catalogue.",
+  ],
+  [
+    "Does it upload every file I save?",
+    "No. RepoReach preserves normal Git behavior. Saving a file changes your local work; committing and pushing publishes it. Your repositories connect directly to GitHub.",
+  ],
+  [
+    "How does Free Up Space protect my work?",
+    "RepoReach checks for local-only work before reclaiming a repository. If it finds edits, unpushed commits, stashes, or files that could be lost, it leaves the repository in place and explains what needs attention.",
+  ],
+  [
+    "What does the beta need?",
+    "macOS 13 or later, Git, and macFUSE's kernel backend. Apple Silicon setup can require Recovery approval and Reduced Security. Review the setup guide and release notes before installing the beta.",
+  ],
+];
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="Your GitHub repositories in Finder. Browse on demand, keep the ones you need downloaded, and reclaim space. RepoReach is an open-source Mac app by Enough Tools."
+    />
+    <meta name="theme-color" content="#3b4fe4" />
+    <meta property="og:title" content="RepoReach — Every repo, within reach." />
+    <meta
+      property="og:description"
+      content="Your GitHub repositories in Finder. An open-source Mac app by Enough Tools."
+    />
+    <meta property="og:url" content="https://reporeach.reb.run" />
+    <meta property="og:type" content="website" />
+    <link rel="canonical" href="https://reporeach.reb.run" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link
+      rel="preload"
+      href="/brand/SpaceGrotesk-Variable.woff2"
+      as="font"
+      type="font/woff2"
+      crossorigin
+    />
+    <title>RepoReach — Every repo, within reach.</title>
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to content</a>
+    <header class="site-header">
+      <a class="product-brand" href="/" aria-label="RepoReach home"
+        ><img
+          class="repo-mark"
+          src="/favicon.svg"
+          alt=""
+          width="36"
+          height="36"
+        /><span>RepoReach</span></a
+      >
+      <nav aria-label="Main navigation">
+        <a href="#how-it-works">How it works</a><a href="#questions"
+          >Questions</a
+        ><a href="https://github.com/enoughtools/reporeach">Source</a><Button
+          href="#download"
+          variant="accent"
+          size="sm">Download beta</Button
+        >
+      </nav>
+    </header>
+    <main id="main">
+      <section class="hero" aria-labelledby="hero-title">
+        <div class="hero-copy">
+          <div class="eyebrow">
+            <span>A Mac app by Enough Tools</span><Badge variant="outline"
+              >Open source</Badge
+            >
+          </div>
+          <h1 id="hero-title">Every repo,<br /><em>within reach.</em></h1>
+          <p class="hero-description">
+            Your GitHub repositories belong in Finder. Browse them on demand,
+            keep the ones you need downloaded, and give the rest their space
+            back.
+          </p>
+          <div class="hero-actions">
+            <Button href="#download" variant="accent" size="lg"
+              >Download for Mac</Button
+            ><Button
+              href="https://github.com/enoughtools/reporeach"
+              variant="outline"
+              size="lg">Explore the source</Button
+            >
+          </div>
+          <p class="hero-note">
+            Early beta · Apple Silicon and Intel · Your GitHub account
+          </p>
+        </div>
+        <div
+          class="catalog-demo"
+          aria-label="Interactive demonstration of repository download states"
+        >
+          <div class="demo-chrome">
+            <div class="window-controls" aria-hidden="true">
+              <i></i><i></i><i></i>
+            </div><span>RepoReach</span><span class="demo-label"
+              >Interactive demo</span
+            >
+          </div>
+          <div class="demo-path">
+            <span aria-hidden="true">▱</span> Home / Code / GitHub
+          </div>
+          <div class="demo-columns">
+            <span>Repository</span><span>Availability</span>
+          </div>
+          <div class="demo-owner">enoughtools</div>
+          <div class="demo-row">
+            <span class="demo-file"
+              ><span class="folder" aria-hidden="true">▰</span><span
+                >enough-ui<small>Components and design tokens</small></span
+              ></span
+            ><button
+              class="demo-action"
+              data-demo-repo="enough-ui"
+              data-pinned="false"
+              aria-label="Demonstrate keeping enough-ui downloaded"
+              ><span aria-hidden="true">☁</span> Keep downloaded</button
+            >
+          </div>
+          <div class="demo-row">
+            <span class="demo-file"
+              ><span class="folder" aria-hidden="true">▰</span><span
+                >reporeach<small>The app you're looking at</small></span
+              ></span
+            ><button
+              class="demo-action"
+              data-demo-repo="reporeach"
+              data-pinned="true"
+              aria-label="Demonstrate freeing space for reporeach"
+              ><span aria-hidden="true">✓</span> Downloaded</button
+            >
+          </div>
+          <div class="demo-owner">your-organization</div>
+          <div class="demo-row">
+            <span class="demo-file"
+              ><span class="folder" aria-hidden="true">▰</span><span
+                >website<small>Ready when you need it</small></span
+              ></span
+            ><button
+              class="demo-action"
+              data-demo-repo="website"
+              data-pinned="false"
+              aria-label="Demonstrate keeping website downloaded"
+              ><span aria-hidden="true">☁</span> Keep downloaded</button
+            >
+          </div>
+          <div class="demo-bottom">
+            <span id="demo-status" aria-live="polite"
+              >Try keeping a repository downloaded.</span
+            ><span>3 repositories</span>
+          </div>
+        </div>
+      </section>
+      <section class="principles" aria-label="RepoReach principles">
+        <span>All your repositories</span><span>Your chosen folder</span><span
+          >Normal Git workflow</span
+        ><span>Less disk space</span>
+      </section>
+      <section
+        class="workflow section"
+        id="how-it-works"
+        aria-labelledby="workflow-title"
+      >
+        <div class="section-heading">
+          <p class="eyebrow">A place for your whole catalogue</p><h2
+            id="workflow-title"
+          >
+            Keep your projects close.<br /><em>Keep your disk clear.</em>
+          </h2>
+        </div>
+        <div class="steps">
+          <Card class="step"
+            ><CardContent
+              ><span class="step-number">01</span><h3>Connect GitHub.</h3><p>
+                Discover the repositories you can access, including your
+                organizations. They appear together, organized by owner.
+              </p></CardContent
+            ></Card
+          >
+          <Card class="step"
+            ><CardContent
+              ><span class="step-number">02</span><h3>
+                Make yourself at home.
+              </h3><p>
+                Choose your catalogue folder. Open projects in Finder, your
+                editor, or the terminal. Contents arrive as you need them.
+              </p></CardContent
+            ></Card
+          >
+          <Card class="step"
+            ><CardContent
+              ><span class="step-number">03</span><h3>Choose what stays.</h3><p>
+                Keep a checkout downloaded for offline work. Free up space when
+                a project is safely recoverable from GitHub.
+              </p></CardContent
+            ></Card
+          >
+        </div>
+      </section>
+      <section class="quiet section" aria-labelledby="quiet-title">
+        <div>
+          <p class="eyebrow">A little app. A useful background service.</p><h2
+            id="quiet-title"
+          >
+            Close the window.<br /><em>Your repos stay.</em>
+          </h2><p>
+            RepoReach works quietly in the background. Finder actions handle the
+            everyday things; the app is there for sign-in, settings, and
+            managing your catalogue.
+          </p>
+        </div>
+        <div class="action-list">
+          <div>
+            <span>Keep Downloaded</span><span
+              >Make this checkout available offline</span
+            >
+          </div><div>
+            <span>Free Up Space</span><span
+              >Reclaim recoverable repository data</span
+            >
+          </div><div>
+            <span>Refresh</span><span>Check GitHub for updates</span>
+          </div><p>Available from a repository's Finder context menu.</p>
+        </div>
+      </section>
+      <section
+        class="download section"
+        id="download"
+        aria-labelledby="download-title"
+      >
+        <div>
+          <p class="eyebrow">Start with the beta</p><h2 id="download-title">
+            A home for<br /><em>every repository.</em>
+          </h2><p>
+            Built in the open by Enough Tools, on the foundation of Cloudflare's
+            ArtifactFS. Free to use, inspect, and contribute to.
+          </p><a
+            class="text-link"
+            href="https://github.com/enoughtools/reporeach#readme"
+            >Read the setup guide</a
+          >
+        </div>
+        <div class="download-panel">
+          <div class="download-title">
+            <span>RepoReach for macOS</span><Badge variant="outline"
+              >{release?.version ?? "Beta in development"}</Badge
+            >
+          </div>
+          <label for="architecture">Your Mac</label><select id="architecture"
+            ><option value="arm64">Apple Silicon (M1 and later)</option><option
+              value="x86_64">Intel</option
+            ></select
+          >
+          <Button
+            id="download-button"
+            href={firstDownload?.url ?? "#download"}
+            disabled={!firstDownload}
+            variant="accent"
+            size="lg"
+            >{
+              firstDownload ? "Download disk image" : "Build being prepared"
+            }</Button
+          >
+          <p id="download-detail">
+            {
+              firstDownload
+                ? `${firstDownload.signature === "developer-id" ? "Developer ID signed" : "Unsigned beta"}${firstDownload.notarized ? " · Notarized by Apple" : " · Not yet notarized"}`
+                : "The first downloadable build will appear here after verification."
+            }
+          </p>
+          <p class="requirements">
+            macOS 13+ · <a
+              href="https://github.com/enoughtools/reporeach/blob/main/docs/reporeach/platform-setup.md"
+              >macFUSE kernel backend required</a
+            >
+            >
+          </p>
+          <div class="download-links">
+            <a
+              id="zip-download"
+              href={artifacts.find(
+                (a: any) => a.architecture === "arm64" && a.format === "zip",
+              )?.url ?? "https://github.com/enoughtools/reporeach/releases"}
+              >ZIP alternative</a
+            ><a href="https://github.com/enoughtools/reporeach/releases"
+              >Release notes</a
+            ><a
+              id="checksums"
+              href={release
+                ? `/releases/${release.version}/SHA256SUMS`
+                : "https://github.com/enoughtools/reporeach"}>Checksums</a
+            >
+          </div>
+          <p class="release-note">
+            An early beta for deliberate testing. Keep backups of important
+            local work.
+          </p>
+        </div>
+      </section>
+      <section
+        class="faq section"
+        id="questions"
+        aria-labelledby="questions-title"
+      >
+        <div class="section-heading">
+          <p class="eyebrow">A few useful details</p><h2 id="questions-title">
+            Before you move in.
+          </h2>
+        </div><div class="faq-list">
+          {
+            faqs.map(([question, answer]) => (
+              <details>
+                <>
+                  <summary>
+                    {question}
+                    <span aria-hidden="true">+</span>
+                  </summary>
+                  <p>{answer}</p>
+                </>
+              </details>
+            ))
+          }
+        </div>
+      </section>
+    </main>
+    <footer>
+      <a class="enough-brand" href="https://enoughtools.com"
+        ><img src="/brand/mark-ink.svg" width="32" height="32" alt="" /><span
+          >Enough Tools</span
+        ></a
+      ><p>Good tools. Enough to build on.</p><div>
+        <a href="https://github.com/enoughtools/reporeach">GitHub</a><a
+          href="https://ui.enoughtools.com">Made with Enough UI</a
+        ><a href="https://github.com/enoughtools/reporeach/blob/main/LICENSE"
+          >Apache 2.0</a
+        >
+      </div>
+    </footer>
+    <script define:vars={{ artifacts }}>
+      document.querySelectorAll("[data-demo-repo]").forEach((button) =>
+        button.addEventListener("click", () => {
+          const pinned = button.dataset.pinned !== "true";
+          button.dataset.pinned = String(pinned);
+          button.textContent = pinned ? "✓ Downloaded" : "☁ Keep downloaded";
+          button.setAttribute(
+            "aria-label",
+            `Demonstrate ${pinned ? "freeing space for" : "keeping downloaded"} ${button.dataset.demoRepo}`,
+          );
+          document.getElementById("demo-status").textContent =
+            `${button.dataset.demoRepo}: ${pinned ? "kept for offline work" : "available on demand"}. This is a demonstration.`;
+        }),
+      );
+      document
+        .getElementById("architecture")
+        .addEventListener("change", (event) => {
+          const arch = event.target.value;
+          const dmg = artifacts.find(
+            (a) => a.architecture === arch && a.format === "dmg",
+          );
+          const zip = artifacts.find(
+            (a) => a.architecture === arch && a.format === "zip",
+          );
+          const button = document.getElementById("download-button");
+          if (dmg) {
+            button.href = dmg.url;
+            button.removeAttribute("aria-disabled");
+            button.removeAttribute("tabindex");
+            button.classList.remove("pointer-events-none", "opacity-50");
+            button.textContent = "Download disk image";
+          } else {
+            button.removeAttribute("href");
+            button.setAttribute("aria-disabled", "true");
+            button.textContent = "Build being prepared";
+          }
+          document.getElementById("download-detail").textContent = dmg
+            ? `${dmg.signature === "developer-id" ? "Developer ID signed" : "Unsigned beta"} · ${dmg.notarized ? "Notarized by Apple" : "Not yet notarized"}`
+            : "A build for this architecture is being prepared.";
+          if (zip) document.getElementById("zip-download").href = zip.url;
+        });
+    </script>
+  </body>
+</html>

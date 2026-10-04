@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -182,6 +183,7 @@ func TestE2E(t *testing.T) {
 		cancel()
 		t.Fatal("FUSE mount did not appear within timeout")
 	}
+	primeMountedFilePolling(t, mountPath)
 	t.Logf("mount active at %s", mountPath)
 
 	// ---- Filesystem read operations ----
@@ -565,8 +567,73 @@ func TestE2EFilesystemDirectoryRenamePersistsAcrossRestart(t *testing.T) {
 
 func TestE2EFilesystemDirectoryRenameConcurrentAccess(t *testing.T) {
 	repo := newMountedE2ERepo(t)
-	left := filepath.Join(repo.mountPath, "concurrent-left")
-	right := filepath.Join(repo.mountPath, "concurrent-right")
+	runMountedFilesystemWorker(t, "concurrent-directory-rename", repo.mountPath)
+}
+
+// Run filesystem clients in a separate process, as editors and Git run in
+// production. On Linux, Go registers newly opened files with epoll using a raw
+// syscall (https://go.dev/issue/21014). The observed kernel wait was epoll_ctl
+// calling fuse_file_poll.
+// If that file is served by this process's FUSE mount, epoll can wait for a FUSE
+// response while the runtime waits for that thread to stop for garbage
+// collection. Keeping the server and its clients in separate processes avoids
+// that runtime deadlock without changing filesystem semantics or disabling GC.
+func runMountedFilesystemWorker(t *testing.T, workload, mountPath string) {
+	t.Helper()
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, executable, "-test.run=^TestMountedFilesystemWorker$", "-test.v", "-test.timeout=90s")
+	cmd.Env = append(os.Environ(), "AFS_E2E_CLIENT_WORKLOAD="+workload, "AFS_E2E_CLIENT_MOUNT="+mountPath)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("external filesystem workload %s: %v\n%s", workload, err, output)
+	}
+	t.Logf("external filesystem workload: %s", output)
+}
+
+// Linux caches ArtifactFS's unsupported POLL response for the whole mount:
+// https://github.com/torvalds/linux/blob/v6.12/fs/fuse/file.c#L2723-L2762
+// Ask from an external Go process first so
+// subsequent test-side byte I/O cannot enter the raw-epoll/GC deadlock described
+// above. The synthetic .git pointer has no repository blob to hydrate. Directory
+// enumeration uses Go's kindNoPoll and does not need this step, which lets async
+// gate and metadata-only catalogue assertions run before repository preparation.
+func primeMountedFilePolling(t *testing.T, mountPath string) {
+	t.Helper()
+	if runtime.GOOS == "linux" {
+		runMountedFilesystemWorker(t, "prime-file-polling", mountPath)
+	}
+}
+
+func TestMountedFilesystemWorker(t *testing.T) {
+	workload := os.Getenv("AFS_E2E_CLIENT_WORKLOAD")
+	if workload == "" {
+		t.Skip("invoked by a mounted filesystem integration test")
+	}
+	mountPath := os.Getenv("AFS_E2E_CLIENT_MOUNT")
+	if !filepath.IsAbs(mountPath) {
+		t.Fatalf("invalid filesystem client mount path %q", mountPath)
+	}
+	switch workload {
+	case "prime-file-polling":
+		data, err := os.ReadFile(filepath.Join(mountPath, ".git"))
+		if err != nil || !bytes.HasPrefix(data, []byte("gitdir: ")) {
+			t.Fatalf("synthetic Git directory pointer: %q %v", data, err)
+		}
+	case "concurrent-directory-rename":
+		testConcurrentDirectoryRenameClient(t, mountPath)
+	default:
+		t.Fatalf("unknown filesystem client workload %q", workload)
+	}
+}
+
+func testConcurrentDirectoryRenameClient(t *testing.T, mountPath string) {
+	left := filepath.Join(mountPath, "concurrent-left")
+	right := filepath.Join(mountPath, "concurrent-right")
 	if err := os.MkdirAll(filepath.Join(left, "nested"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -629,8 +696,15 @@ func TestE2EFilesystemDirectoryRenameConcurrentAccess(t *testing.T) {
 				return
 			default:
 			}
-			cmd := exec.Command("git", "status", "--porcelain=v1", "--untracked-files=all")
-			cmd.Dir = repo.mountPath
+			cmd := exec.Command("git", gitArgsWithSafeDirectory(mountPath, "status", "--porcelain=v1", "--untracked-files=all")...)
+			cmd.Dir = mountPath
+			// Only this test's direct child is a filesystem client worker. Git's
+			// fsmonitor subprocess must not inherit that dispatch instruction.
+			for _, value := range os.Environ() {
+				if !strings.HasPrefix(value, "AFS_E2E_CLIENT_WORKLOAD=") && !strings.HasPrefix(value, "AFS_E2E_CLIENT_MOUNT=") {
+					cmd.Env = append(cmd.Env, value)
+				}
+			}
 			if output, err := cmd.CombinedOutput(); err != nil {
 				report(fmt.Errorf("git status during rename: %w: %s", err, output))
 				return
@@ -642,7 +716,9 @@ func TestE2EFilesystemDirectoryRenameConcurrentAccess(t *testing.T) {
 	current, next := left, right
 	var renameErr error
 	for range 40 {
-		if renameErr = unix.Rename(current, next); renameErr != nil {
+		// os.Rename retries a syscall interrupted by a signal. Each iteration
+		// still requires a completed rename and rejects every other error.
+		if renameErr = os.Rename(current, next); renameErr != nil {
 			break
 		}
 		current, next = next, current
@@ -1147,6 +1223,7 @@ func TestE2EVerifiedSource(t *testing.T) {
 		_ = firstSvc.Close()
 		t.Fatal("verified-source FUSE mount did not appear within timeout")
 	}
+	primeMountedFilePolling(t, mountPath)
 	firstStopped := false
 	defer func() {
 		if !firstStopped {
@@ -1240,6 +1317,7 @@ func TestE2EVerifiedSource(t *testing.T) {
 		_ = secondSvc.Close()
 		t.Fatal("verified-source FUSE mount did not reappear after restart")
 	}
+	primeMountedFilePolling(t, mountPath)
 	defer stopE2EDaemon(t, secondSvc, secondCancel, secondErrCh, mountPath)
 
 	assertVerifiedSourceStatus(t, secondSvc, requiredCommit)

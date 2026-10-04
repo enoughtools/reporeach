@@ -12,6 +12,7 @@ import (
 )
 
 var ErrRepoChanged = errors.New("repo config changed")
+var ErrRepoNotFound = errors.New("repo not found")
 
 var migrations = []string{
 	`CREATE TABLE IF NOT EXISTS repos (
@@ -263,7 +264,7 @@ func scanRepo(s scanner) (model.RepoConfig, error) {
 	var acquiredAtNS int64
 	if err := s.Scan(&cfg.ID, &cfg.Name, &cfg.MountRoot, &cfg.MountPath, &cfg.RemoteURL, &cfg.RemoteURLRedacted, &cfg.Branch, &refresh, &refreshNS, &cfg.GitDir, &cfg.OverlayDir, &cfg.BlobCacheDir, &cfg.MetaDBPath, &cfg.OverlayDBPath, &enabled, &preparedGitDir, &cfg.FetchRef, &cfg.PrepareState, &cfg.PrepareError, &cfg.RequiredCommit, &cfg.HistoryDepth, &refreshDisabled, &cfg.AcquiredRef, &cfg.AcquiredCommit, &acquiredAtNS, &cfg.ConfigVersion); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return cfg, fmt.Errorf("repo not found")
+			return cfg, ErrRepoNotFound
 		}
 		return cfg, err
 	}

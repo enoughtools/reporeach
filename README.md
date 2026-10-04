@@ -1,385 +1,62 @@
-<p align="center">
-  <img src="artifact-fs.png" alt="ArtifactFS" width="720">
-</p>
+# RepoReach
 
-# ArtifactFS
+**Every repo, within reach.** An open source Mac app by [Enough Tools](https://enoughtools.com).
 
-[![Build & Test](https://github.com/cloudflare/artifact-fs/actions/workflows/build-test.yml/badge.svg)](https://github.com/cloudflare/artifact-fs/actions/workflows/build-test.yml)
+RepoReach puts the GitHub repositories you can access in a folder you choose, grouped by owner. Browse the catalogue without cloning every repository. Open a repository to prepare its Git metadata, then download committed file contents as you read them. Keep a checkout downloaded for offline use, or reclaim its storage when it is recoverable from GitHub.
 
-> This is a beta release of ArtifactFS. Your mileage may vary.
+The app has a native SwiftUI management window, a background service, and Finder contextual actions. Closing the window keeps the service running; there is no menu-bar app.
 
-ArtifactFS is a Git-backed filesystem daemon (FUSE driver) in Go that mounts repositories as normal working trees while avoiding eager blob downloads.
+[Website and downloads](https://reporeach.reb.run) · [Setup guide](docs/reporeach/user-guide.md) · [Architecture](docs/reporeach/architecture.md) · [Contributing](CONTRIBUTING.md)
 
-It exposes the tree quickly, then hydrates file contents on demand. That makes it useful for sandboxes, agents, and other short-lived environments where waiting for a full clone is too expensive.
+![RepoReach's native management window in explicit demo mode](docs/assets/reporeach.png)
 
-In practice:
+## Beta status
 
-* The operating system sees the full tree almost immediately, while the FUSE driver fetches file contents in the background. It prioritizes package manifests, dependency manifests, and source files ahead of large blobs.
-* ArtifactFS is part of [Cloudflare Artifacts](http://workers.cloudflare.com/product/artifacts), a versioned filesystem that speaks git, but it also works with any git repo.
-* ArtifactFS is optional. You can clone an Artifact repo directly, but larger repos still take time to clone. ArtifactFS lets you mount the repo and fetch blob contents as they are needed.
+RepoReach is an early beta built on a focused fork of [Cloudflare ArtifactFS](https://github.com/cloudflare/artifact-fs). Use disposable repositories first and keep backups of valuable local work. macOS 13 or later, Git, and a separately installed [macFUSE](https://macfuse.github.io/) kernel backend are required. Apple Silicon setup can require Recovery approval and Reduced Security; read the [platform setup guide](docs/reporeach/platform-setup.md) first. The download manifest identifies each build's signature, notarization status, source revision, and checksum.
 
-## What are Cloudflare Artifacts?
+See the [beta validation record](docs/reporeach/validation.md) for tested environments and remaining macOS installation checks. The initial release supports:
 
-[Cloudflare Artifacts](https://workers.cloudflare.com/product/artifacts) is a versioned filesystem that speaks git. It is built for agent toolchains, sandboxes, and CI/CD systems that need fast access to code repositories.
+- GitHub sign-in through the bundled official GitHub CLI and discovery of accessible personal, collaborator, and organization repositories.
+- One catalogue at a chosen mount folder, with lazy repository preparation and file hydration.
+- A writable Git working tree backed by ArtifactFS, with ordinary commits and pushes.
+- **Keep Downloaded**, **Free Up Space**, and explicit **Refresh** actions in the app and Finder extension.
+- Persistent catalogue and pin state, progress reporting, and conservative checks before storage reclamation.
 
-ArtifactFS is the optional FUSE driver -- it lets you mount an Artifact (or any git repo) as a local filesystem without waiting for a full clone.
+Keep Downloaded covers the current checkout. It does not promise complete offline history, every branch, Git LFS payloads, or submodule contents. Filesystem indexing and previews can read files and trigger downloads. RepoReach does not automatically commit or push your edits. Discovery reflects what your GitHub credential is authorized to access; organization restrictions may require additional authorization.
 
-## Build and Install
+Free Up Space is intentionally conservative. The service checks the overlay, Git state, local refs, stashes, hooks, and other local data before reclaiming a repository. When it cannot establish that the repository is recoverable, it refuses the operation and reports the reason. It is not a backup system.
 
-Requires Go 1.26+ and a FUSE implementation:
+## Building from source
 
-- **macOS** -- [macFUSE](https://osxfuse.github.io/)
-- **Linux** -- `fuse3` (`apt install fuse3` on Debian/Ubuntu, `dnf install fuse3` on Fedora)
+The filesystem engine requires Go 1.26 or later:
 
-Install the CLI from the module:
-
-```bash
-go install github.com/cloudflare/artifact-fs/cmd/artifact-fs@latest
-```
-
-Or build it directly from the module path:
-
-```bash
-go build -o artifact-fs github.com/cloudflare/artifact-fs/cmd/artifact-fs
-```
-
-Quick start against a public repo:
-
-```bash
-export ARTIFACT_FS_ROOT=/tmp/artifact-fs-test
-
-# Register, clone, and build the initial snapshot
-./artifact-fs add-repo \
-  --name workers-sdk \
-  --remote https://github.com/cloudflare/workers-sdk.git \
-  --ref refs/heads/main \
-  --mount-root /tmp
-
-# Start the daemon (mounts via FUSE, blocks until killed)
-./artifact-fs daemon --root /tmp &
-DAEMON_PID=$!
-
-# Use the repo
-ls /tmp/workers-sdk/
-cat /tmp/workers-sdk/README.md
-git -C /tmp/workers-sdk log --oneline -5
-
-# Cleanup
-kill $DAEMON_PID
-```
-
-## Monitoring hydration and repo status
-
-Check the state of a mounted repo with `status`:
-
-```bash
-./artifact-fs status --name workers-sdk
-# repo=workers-sdk state=mounted head=d4c61587... ref=main source_ref=refs/heads/main required_commit=none acquisition=not_required base_commit=d4c61587... remote_refresh=enabled ahead=0 behind=0 diverged=false last_fetch=2026-03-27T12:00:00Z result=ok prepare_error=none hydrated_blobs=42 hydrated_bytes=131072 overlay_dirty=false
-```
-
-| Field | Meaning |
-|-------|---------|
-| `state` | `mounted`, `unmounted`, `preparing`, or `failed` |
-| `head` / `ref` | Backward-compatible aliases for the current base commit and Git HEAD ref |
-| `source_ref` | Canonical remote ref selected during acquisition |
-| `required_commit` | Required source commit, or `none` |
-| `acquisition` | Historical acquisition evidence: `not_required`, `pending`, or `verified` |
-| `base_commit` | Commit backing the currently published filesystem generation |
-| `remote_refresh` | Whether daemon and manual remote refreshes are enabled |
-| `ahead` / `behind` / `diverged` | Currently zero/false in one-shot CLI status output |
-| `prepare_error` | Last redacted preparation error, if any |
-| `hydrated_blobs` / `hydrated_bytes` | Blob count and bytes present in the local hydration cache |
-| `overlay_dirty` | `true` if the overlay contains created or modified files; delete-only overlays are not counted |
-| `last_fetch` / `result` | `FETCH_HEAD` modification time and `ok` when present; otherwise `never` |
-
-Hydration (blob downloading) is transparent: the file tree is visible immediately after mount, and reads block only until the requested blob is fetched. The daemon prioritizes code and manifests (`package.json`, `go.mod`, `README.md`) over binary files.
-
-Use `--hydration-concurrency` to control the number of parallel blob-fetch workers (default 4). Each worker maintains a persistent `git cat-file --batch` process, so higher values trade memory for faster bulk hydration:
-
-```bash
-./artifact-fs daemon --root /tmp --hydration-concurrency 8
-```
-
-## Logging
-
-ArtifactFS emits newline-delimited JSON to stderr. Preparation logs include the mode, source, attempt, phase, state, duration, and deadline. Clone and fetch operations retry known transient transport failures up to three total attempts. Preparation has a 30-minute timeout. Caller cancellation stops the active Git command and retry backoff; synchronous preparation records a redacted `prepare canceled` status, while daemon shutdown leaves async preparation queued for restart.
-
-Async existing-clone preparation reports remote configuration, fetch, and branch update as separate `configure_remote`, `fetch`, and `update_branch` phases.
-
-Successful `add-repo`:
-
-```json
-{"time":"2026-07-16T12:00:00Z","level":"INFO","msg":"repo preparation started","repo":"workers-sdk","mode":"sync","source":"fresh_clone","attempt":1,"phase":"validate","state":"started","duration_ms":0,"branch":"refs/heads/main","fetch_ref":"main","deadline_set":true,"timeout_ms":1799999}
-{"time":"2026-07-16T12:00:04Z","level":"INFO","msg":"repo preparation completed","repo":"workers-sdk","mode":"sync","source":"fresh_clone","attempt":1,"phase":"complete","state":"completed","duration_ms":4217,"deadline_set":true,"timeout_ms":1799999,"head_oid":"d4c61587...","head_ref":"main","snapshot_generation":1}
-```
-
-Transient network failure followed by recovery:
-
-```json
-{"time":"2026-07-16T12:01:00Z","level":"WARN","msg":"git operation attempt failed","operation":"clone","repo":"workers-sdk","attempt":1,"max_attempts":3,"retryable":true,"duration_ms":842,"timed_out":false,"canceled":false,"error":"HTTP 503: unexpected disconnect"}
-{"time":"2026-07-16T12:01:00Z","level":"INFO","msg":"retrying transient git operation failure","operation":"clone","repo":"workers-sdk","attempt":1,"next_attempt":2,"backoff_ms":214}
-{"time":"2026-07-16T12:01:02Z","level":"INFO","msg":"git operation recovered","operation":"clone","repo":"workers-sdk","attempts":2,"duration_ms":2087}
-```
-
-Preparation timeout:
-
-```json
-{"time":"2026-07-16T12:30:00Z","level":"ERROR","msg":"repo preparation failed","repo":"workers-sdk","mode":"sync","source":"fresh_clone","attempt":1,"phase":"clone","state":"failed","duration_ms":1800000,"deadline_set":true,"timeout_ms":1799999,"timed_out":true,"canceled":false,"error":"git clone failed after 1 attempt; caller context: context deadline exceeded"}
-```
-
-Diagnostics are bounded and redact credentials and complete remote references. To follow preparation and network activity:
-
-```bash
-./artifact-fs daemon --root /tmp 2>/tmp/daemon.log &
-tail -f /tmp/daemon.log | grep -Ei 'prepar|git operation'
-```
-
-## Async repo preparation
-
-By default, `add-repo` waits for the blobless clone and initial snapshot before returning. Use `--async` when the daemon should prepare the repo in the background:
-
-```bash
-./artifact-fs add-repo \
-  --name workers-sdk \
-  --remote https://github.com/cloudflare/workers-sdk.git \
-  --ref refs/heads/main \
-  --mount-root /tmp \
-  --async
-```
-
-The daemon mounts a placeholder immediately. Operations inside that repo mount, such as `ls`, `less`, or `git -C /tmp/workers-sdk status`, wait until the clone/fetch and snapshot publish have completed. If preparation fails, those operations return an I/O error until preparation is retried:
-
-```bash
-./artifact-fs status --name workers-sdk
-./artifact-fs prepare --name workers-sdk
-```
-
-Async HTTPS remotes must use ambient credentials, such as a configured Git credential helper or repo-local Git config. Inline credentials in the remote URL are rejected for async repositories.
-
-For workflows that create the gitdir separately, `--prepared-gitdir` makes the async step fetch and prepare an existing gitdir instead of running `git clone`:
-
-```bash
-git init --separate-git-dir /tmp/workers-sdk.git --initial-branch main /tmp/workers-sdk
-git -C /tmp/workers-sdk remote add origin https://github.com/cloudflare/workers-sdk.git
-
-./artifact-fs add-repo \
-  --name workers-sdk \
-  --ref refs/heads/main \
-  --mount-root /tmp \
-  --async \
-  --prepared-gitdir \
-  --git-dir /tmp/workers-sdk.git \
-  --fetch-ref main
-```
-
-## Verified shallow sources
-
-Use a verified source when a job must inspect the exact revision selected for a deployment:
-
-```bash
-artifact-fs add-repo \
-  --name workers-sdk-check \
-  --remote https://github.com/cloudflare/workers-sdk.git \
-  --ref refs/heads/main \
-  --require-commit "$DEPLOY_SHA" \
-  --depth 1 \
-  --refresh never \
-  --mount-root /tmp
-```
-
-These options express three independent policies: `--require-commit` asserts what the canonical source ref must resolve to, `--depth` bounds transferred history, and `--refresh never` disables daemon and manual remote refreshes. The required commit must be a full 40- or 64-character object ID. If the fetched ref resolves to a different commit, preparation fails before any filesystem generation is published.
-
-ArtifactFS fetches the canonical ref into a private candidate ref, verifies its peeled commit, and publishes directly from that commit rather than ambient `HEAD`. A successful acquisition receipt is persisted and reported as `acquisition=verified`. Verified acquisition is historical evidence, not a continuously re-evaluated boolean.
-
-A required source commit fixes the published base generation: ArtifactFS does not start its HEAD watcher for that repository, so later local Git ref changes are not adopted by the mount. The mounted filesystem remains writable through the overlay, and blob hydration may still contact the promisor remote. This is therefore a **verified source**, not an immutable filesystem.
-
-The remote must advertise Git partial-clone filtering for file contents to hydrate over the network on demand. If it does not, Git downloads the selected revision's blobs eagerly, but depth 1 still prevents historical commits and obsolete blob versions from being transferred.
-
-`--prepared-gitdir` is not supported with `--require-commit` because verified acquisition atomically installs a private Git directory.
-
-## Sandboxes and Containers
-
-See the [generic container example](examples/README.md) for Docker-compatible runtimes or the [Cloudflare Sandbox SDK example](examples/cloudflare-sandbox-sdk/README.md) for Workers and Containers.
-
-## Architecture
-
-ArtifactFS has two distinct phases: a one-shot **setup** (`add-repo`) that registers and usually prepares a fast blobless clone, and a long-running **daemon** that mounts it via FUSE and serves file operations. With `add-repo --async`, setup only registers the repo; the daemon performs clone/fetch and snapshot publishing while FUSE operations wait behind a readiness gate.
-
-```
-                         ┌─────────────────────────────────────────────────┐
-                         │                    Daemon                       │
-                         │                                                 │
-  ┌──────────┐  clone    │  ┌──────────┐    ls-tree      ┌──────────────┐  │
-  │  Remote  │◄──────────┼──│ GitStore │────────────────►│   Snapshot   │  │
-  │   repo   │  fetch    │  │          │  cat-file       │   (SQLite)   │  │
-  └──────────┘           │  │ batch    │  --batch-check  │              │  │
-                         │  │ pool     │                 │  base_nodes  │  │
-                         │  └────┬─────┘                 │  per gen     │  │
-                         │       │ cat-file              └──────┬───────┘  │
-                         │       │ --batch                      │          │
-                         │       ▼                              ▼          │
-                         │  ┌──────────┐                 ┌──────────────┐  │
-                         │  │  Blob    │                 │   Resolver   │  │
-                         │  │  Cache   │                 │              │  │
-                         │  │  (disk)  │◄────hydrate─────│ snap + ovl   │  │
-                         │  └──────────┘                 │  merged view │  │
-                         │       ▲                       └──────┬───────┘  │
-                         │       │                              │          │
-                         │  ┌────┴─────┐   prefetch       ┌─────┴────────┐ │
-                         │  │ Hydrator │◄─────────────────│    Engine    │ │
-                         │  │          │                  │              │ │
-                         │  │ priority │   ensureOverlay  │ read / write │ │
-                         │  │ queue    │   copy-on-write  │ create / rm  │ │
-                         │  └──────────┘                  └─────┬────────┘ │
-                         │                                      │          │
-                         │  ┌──────────┐                 ┌──────┴───────┐  │
-                         │  │ Overlay  │◄────────────────│  FUSE Layer  │  │
-                         │  │ (SQLite  │  write ops      │  (macFUSE /  │  │
-                         │  │  + upper │                 │   /dev/fuse) │  │
-                         │  │  dir)    │                 └──────┬───────┘  │
-                         │  └──────────┘                        │          │
-                         │                                      │          │
-                         │  ┌──────────┐  HEAD poll       ┌─────┴────────┐ │
-                         │  │ Watcher  │─────────────────►│ Mount point  │ │
-                         │  │ (500ms)  │  re-index +      │ /tmp/myrepo  │ │
-                         │  └──────────┘  reconcile       └──────────────┘ │
-                         └─────────────────────────────────────────────────┘
-```
-
-### Data flow
-
-1. **Clone/fetch** -- `add-repo` runs a blobless clone or verified source acquisition. `--depth` controls transferred history independently. Verified acquisition fetches the canonical source ref into a private candidate ref and checks `--require-commit` before atomically installing the Git directory. When the remote advertises partial-clone filtering, only commits, trees, and refs are fetched initially; otherwise Git falls back to downloading blobs eagerly.
-
-2. **Index** -- `git ls-tree -r -t -z <selected-commit>` enumerates every path in the selected tree. Sizes are resolved locally via `git cat-file --batch-check` with `GIT_NO_LAZY_FETCH=1` to avoid network round-trips. The result is bulk-inserted into a SQLite `base_nodes` table as a new generation.
-
-3. **Mount** -- The FUSE layer exposes the tree immediately. A synthesized `.git` gitfile points at the real gitdir so git commands work inside the mount.
-
-4. **Read** -- The Resolver merges the snapshot (base tree) with the overlay (local writes). For base files, reads block until the Hydrator fetches the blob via a persistent `git cat-file --batch` process and streams it to the blob cache.
-
-5. **Write** -- The Engine promotes base files to the overlay via copy-on-write (hydrate, then copy to the `upper/` directory). Subsequent reads come from the overlay. Deletes are recorded as whiteouts.
-
-6. **Background** -- For ordinary workspaces, a watcher polls HEAD/refs every 500ms and republishes HEAD changes. Repositories with `--require-commit` do not run this watcher, so their verified base commit remains fixed. Remote polling is controlled separately by `--refresh`.
-
-### Subsystems
-
-| Package | Role |
-|---------|------|
-| `daemon` | Orchestrates repo lifecycle, refresh loop, watcher callbacks |
-| `fusefs` | FUSE adapter (inode management, op dispatch), Resolver (merged view), Engine (read/write logic) |
-| `gitstore` | Git CLI wrapper: clone, fetch, ls-tree, batch pool for `cat-file --batch` |
-| `snapshot` | SQLite store for `base_nodes` keyed by `(generation, path)` |
-| `overlay` | SQLite metadata + `upper/` directory for local writes, whiteouts, reconciliation |
-| `hydrator` | Priority queue with deduped waiters; workers block on a `workReady` channel |
-| `watcher` | Polls gitdir mtimes (HEAD, index, refs) at 500ms intervals |
-| `registry` | SQLite-backed repo config persistence |
-| `model` | Shared types and canonical interfaces (`GitStore`, `SnapshotStore`, `OverlayStore`, `Hydrator`) |
-
-## Supported git operations
-
-Work in progress. The table reflects operations exercised by the FUSE E2E suite; some were also tested against [cloudflare/workers-sdk](https://github.com/cloudflare/workers-sdk) mounted via macFUSE.
-
-### Filesystem operations
-
-| Operation | Status | Notes |
-|-----------|--------|-------|
-| `ls` (root and subdirectories) | Supported | Includes synthesized `.git` gitfile |
-| `cat` / read file | Supported | Triggers on-demand hydration for unhydrated blobs |
-| `stat` (file size, mode) | Supported | Sizes resolved via `git cat-file --batch-check` |
-| `mkdir` | Supported | Persisted in writable overlay |
-| Create new file | Supported | Persisted in writable overlay |
-| Write / append to file | Supported | Copy-on-write for tracked files |
-| Rename file | Supported | Works for both overlay and tracked (snapshot-only) files |
-| Rename directory | Supported | Moves tracked and overlay-created directory trees |
-| Delete file (`rm`) | Supported | Whiteout recorded in overlay |
-| `rmdir` | Supported | Checks directory is empty first |
-| Truncate | Supported | Hydrates blob before truncating |
-| `chmod` | Supported | Preserves executable-bit changes across commits |
-| Create symlink (`ln -s`) | Supported | Stores the target in the writable overlay |
-| Rename symlink | Supported | Preserves the target and reconciles after commit |
-| Symlink read (`readlink`) | Supported | Symlink target read from blob content |
-
-### Git operations
-
-| Operation | Status | Notes |
-|-----------|--------|-------|
-| `git log` | Supported | Reads from pack objects |
-| `git branch` | Supported | |
-| `git rev-parse HEAD` | Supported | |
-| `git show` | Supported | |
-| `git remote -v` | Supported | Credentials stripped from output |
-| `git stash` | Supported | Includes push/pop with untracked files |
-| `git status` | Supported | ~7s on 5800-entry repo |
-| `git diff` | Supported | Shows correct unified diff for modified files |
-| `git add` | Supported | Stages modified files |
-| `git reset --hard` | Supported | Restores content, modes, and staged creates |
-| `git clean -fd` | Supported | Removes untracked files and directory trees |
-| `git commit` | Supported | Reconciles content, executable-bit, symlink, rename, and delete changes |
-| `git checkout` | Supported | Re-indexes tree, reconciles overlay, refreshes git index |
-| `git merge --no-ff` | Supported | Publishes merge commits and reconciles the merged worktree |
-| `git rebase` | Supported | Reconciles rewritten commits and branch state |
-| `git fetch` | Supported | Background refresh loop fetches periodically |
-| `git pull --ff-only` | Supported | Publishes the fast-forwarded snapshot and reconciles the overlay |
-| `git push` | Supported | Uses the configured upstream and ambient credentials |
-
-### Known limitations
-
-| Issue | Impact |
-|-------|--------|
-| Git submodules are not initialized | Gitlink paths appear as empty directories so status stays clean |
-| Checkout filters and EOL transforms are not applied to snapshot-only reads | Files use canonical blob bytes until Git writes a transformed overlay |
-| `git status` takes ~7s on large repos (5800+ entries) | Performance -- full tree walk through FUSE |
-| `git reset` takes ~6.5s for index refresh | Performance -- same root cause as `git status` |
-
-## Testing
-
-Unit tests:
-
-```bash
+```sh
+go build ./cmd/artifact-fs
+go vet ./...
 go test ./...
 ```
 
-End-to-end tests mount a git repo via FUSE and exercise filesystem + git operations (including commit and overlay reconciliation). They require a FUSE implementation (macFUSE on macOS, `fuse3` on Linux) and are off by default.
+The native app requires macOS, Xcode 16 or later, and XcodeGen. The build script creates an architecture-specific app, ZIP, and disk image, including a checksum-verified official GitHub CLI and dependency license notices:
 
-By default, e2e tests create a local bare repo -- no network required. Set `AFS_E2E_REPO` to test against a real remote.
-
-```bash
-# Run e2e tests (uses a local test repo by default)
-AFS_RUN_E2E_TESTS=1 go test -v -run TestE2E -count=1 -timeout 10m .
-
-# Run against a specific remote repo
-AFS_RUN_E2E_TESTS=1 \
-  AFS_E2E_REPO=https://github.com/cloudflare/workers-sdk.git \
-  go test -v -run TestE2E -count=1 -timeout 10m .
+```sh
+./scripts/build-macos.sh --arch arm64 --unsigned
+./scripts/build-macos.sh --arch x86_64 --unsigned
 ```
 
-### Environment variables
+Apple Silicon builds use an ad-hoc signature when `--unsigned` is selected. Developer ID signing and optional notarization are documented in the [release guide](docs/reporeach/releasing.md).
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `AFS_RUN_E2E_TESTS` | `0` | Set to `1` to enable end-to-end tests |
-| `AFS_E2E_REPO` | local bare repo | Git remote URL for e2e tests. Use an ambient Git credential helper for authenticated HTTPS remotes. |
-| `ARTIFACT_FS_ROOT` | `~/.local/share/artifact-fs` (macOS) or `/var/lib/artifact-fs` (Linux) | Runtime data root for the daemon and CLI |
+The marketing site uses the published [Enough UI](https://github.com/enoughtools/enough-ui) Astro components:
 
-## Contributing
+```sh
+cd site
+npm ci
+npm run build
+```
 
-Contributions are welcome, but not all contributions will be accepted. As guidance:
+See [CONTRIBUTING.md](CONTRIBUTING.md) for native tests, actual FUSE tests, and the development workflow. The original upstream CLI remains available at `cmd/artifact-fs`; its [original documentation](docs/upstream/README.md) is retained for reference. RepoReach's desktop commands extend that same binary.
 
-1. **Ensure you open an issue describing your change** - why it's a problem, how to reproduce it (if it's a bug)
-2. **Your PR should be clear and concise** - including why it should be upstreamed.
-3. **You are expected to have self-reviewed** - any PRs that are straight from automation with glaring issues, that don't build, or don't add good tests are likely to be closed.
+## Security and licensing
 
-AI/LLM submissions are welcome, but overall issue/PR quality is ultimately the responsibility of the submitter, and the codebase is the responsibility (and long term maintenance burden) of the maintainers.
+Repository contents and credentials connect directly to GitHub. The desktop control API uses a private local Unix socket. See [privacy and authentication](docs/reporeach/privacy-auth.md) and [SECURITY.md](SECURITY.md).
 
-See [AGENTS.md](AGENTS.md) for build commands, architecture details, and conventions. Run `go test ./...` and `go vet ./...` before submitting changes.
-
-## Credits
-
-The ArtifactFS FUSE driver takes inspiration from and draws from implementation details in:
-
-* [TigrisFS](https://github.com/tigrisdata/tigrisfs/)
-* [gitfs](https://github.com/presslabs/gitfs)
-* [SlothFS](https://gerrit.googlesource.com/gitfs/)
-
-## License
-
-(c) Cloudflare, 2026. Apache-2.0 licensed.
+RepoReach and the ArtifactFS foundation are licensed under [Apache 2.0](LICENSE). Bundled GitHub CLI, Go dependency notices, Enough UI assets, and font licenses retain their respective licenses. GitHub, Cloudflare, Apple, and macFUSE are independent projects; RepoReach is an Enough Tools project.

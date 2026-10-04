@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -32,6 +33,7 @@ func Run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer)
 	app.Metadata = map[string]any{"ctx": ctx, "root": root}
 
 	app.Commands = []ucli.Command{
+		desktopCommand(ctx, stdout, stderr),
 		{
 			Name:  "daemon",
 			Usage: "start the artifact-fs daemon",
@@ -242,6 +244,10 @@ func Run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer)
 	}
 
 	if err := app.Run(append([]string{"artifact-fs"}, args...)); err != nil {
+		var printed *desktopJSONError
+		if errors.As(err, &printed) {
+			return 1
+		}
 		fmt.Fprintln(stderr, err)
 		return 1
 	}

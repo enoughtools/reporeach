@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	iofs "io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/cloudflare/artifact-fs/internal/auth"
 	"github.com/cloudflare/artifact-fs/internal/model"
 	"github.com/jacobsa/fuse"
 	"github.com/jacobsa/fuse/fuseops"
@@ -52,16 +54,18 @@ type InodeRef struct {
 	Mode    uint32
 	Gen     int64
 	Refcnt  int64
+	DirRefs int64 // directory handles retaining READDIR-only identities
 	IsRoot  bool
 	Overlay bool
 	Stale   bool
 }
 
 type DirHandle struct {
-	inode      *InodeRef
-	gen        int64
-	commitTime int64
-	entries    []ReaddirEntry
+	inode        *InodeRef
+	gen          int64
+	commitTime   int64
+	entries      []ReaddirEntry
+	direntInodes map[fuseops.InodeID]struct{}
 }
 
 type FileHandle struct {
@@ -150,7 +154,7 @@ func (fs *ArtifactFuse) dropInodeLookup(id fuseops.InodeID) {
 	ref, ok := fs.inodes[id]
 	if ok {
 		ref.Refcnt--
-		if ref.Refcnt <= 0 && !ref.IsRoot {
+		if ref.Refcnt <= 0 && ref.DirRefs == 0 && !ref.IsRoot {
 			delete(fs.inodes, id)
 			if fs.pathToInode[ref.Path] == id {
 				delete(fs.pathToInode, ref.Path)
@@ -451,7 +455,7 @@ func (fs *ArtifactFuse) LookUpInode(ctx context.Context, op *fuseops.LookUpInode
 		if errors.Is(err, iofs.ErrNotExist) {
 			return syscall.ENOENT
 		}
-		return syscall.EIO
+		return fuseOperationError("lookup", err)
 	}
 
 	fs.mu.Lock()
@@ -497,7 +501,7 @@ func (fs *ArtifactFuse) GetInodeAttributes(ctx context.Context, op *fuseops.GetI
 		if errors.Is(err, iofs.ErrNotExist) {
 			return syscall.ENOENT
 		}
-		return syscall.EIO
+		return fuseOperationError("getattr", err)
 	}
 	op.Attributes = inodeAttrs(mode, uint64(size), typ, mtime, ctime)
 	op.AttributesExpiration = attrExpiry(time.Second)
@@ -552,7 +556,7 @@ func (fs *ArtifactFuse) SetInodeAttributes(ctx context.Context, op *fuseops.SetI
 	if op.Size != nil {
 		fs.closeCachedFilesForPath(ref.Path)
 		if err := fs.engine.Truncate(ctx, ref.Path, int64(*op.Size)); err != nil {
-			return syscall.EIO
+			return fuseOperationError("truncate", err)
 		}
 		fs.closeCachedFilesForPath(ref.Path)
 	}
@@ -564,7 +568,7 @@ func (fs *ArtifactFuse) SetInodeAttributes(ctx context.Context, op *fuseops.SetI
 			if errors.Is(err, iofs.ErrNotExist) {
 				return syscall.ENOENT
 			}
-			return syscall.EIO
+			return fuseOperationError("chmod", err)
 		}
 	}
 	// Handle mtime updates (e.g., from touch)
@@ -574,13 +578,13 @@ func (fs *ArtifactFuse) SetInodeAttributes(ctx context.Context, op *fuseops.SetI
 			if errors.Is(err, iofs.ErrInvalid) {
 				return syscall.ENOTSUP
 			}
-			return syscall.EIO
+			return fuseOperationError("set mtime", err)
 		}
 		fs.closeCachedFilesForPath(ref.Path)
 	}
 	mode, size, typ, mtime, ctime, err := fs.resolver.Getattr(ref.Path)
 	if err != nil {
-		return syscall.EIO
+		return fuseOperationError("getattr after update", err)
 	}
 	op.Attributes = inodeAttrs(mode, uint64(size), typ, mtime, ctime)
 	op.AttributesExpiration = attrExpiry(time.Second)
@@ -592,7 +596,7 @@ func (fs *ArtifactFuse) ForgetInode(_ context.Context, op *fuseops.ForgetInodeOp
 	ref, ok := fs.inodes[op.Inode]
 	if ok {
 		ref.Refcnt -= int64(op.N)
-		if ref.Refcnt <= 0 && !ref.IsRoot {
+		if ref.Refcnt <= 0 && ref.DirRefs == 0 && !ref.IsRoot {
 			delete(fs.inodes, op.Inode)
 			if fs.pathToInode[ref.Path] == op.Inode {
 				delete(fs.pathToInode, ref.Path)
@@ -613,7 +617,10 @@ func (fs *ArtifactFuse) OpenDir(ctx context.Context, op *fuseops.OpenDirOp) erro
 	// Eagerly load children at open time to avoid races on concurrent ReadDir.
 	entries, gen, commitTime, err := fs.resolver.ReaddirSnapshot(ctx, ref.Path)
 	if err != nil {
-		return syscall.EIO
+		if errors.Is(err, iofs.ErrNotExist) {
+			return syscall.ENOENT
+		}
+		return fuseOperationError("opendir", err)
 	}
 	if ref.IsRoot {
 		entries = append([]ReaddirEntry{{Name: ".git", Type: "file", Mode: 0o644, SizeBytes: int64(len(fs.gitfileContent)), SizeState: "known"}}, entries...)
@@ -629,7 +636,16 @@ func (fs *ArtifactFuse) OpenDir(ctx context.Context, op *fuseops.OpenDirOp) erro
 	return nil
 }
 
-func (fs *ArtifactFuse) ReadDir(_ context.Context, op *fuseops.ReadDirOp) error {
+func (fs *ArtifactFuse) ReadDir(ctx context.Context, op *fuseops.ReadDirOp) error {
+	return fs.ReadDirWithInodeMapping(ctx, op, nil)
+}
+
+// ReadDirWithInodeMapping lets a containing filesystem translate the child
+// filesystem's inode namespace. The mapper must not acquire lookup references:
+// ordinary READDIR does not grant the kernel an inode lookup reference.
+func (fs *ArtifactFuse) ReadDirWithInodeMapping(_ context.Context, op *fuseops.ReadDirOp, mapInode func(fuseops.InodeID) fuseops.InodeID) error {
+	fs.handleOps.RLock()
+	defer fs.handleOps.RUnlock()
 	dh, err := fs.dirHandle(op.Handle)
 	if err != nil {
 		return err
@@ -648,12 +664,45 @@ func (fs *ArtifactFuse) ReadDir(_ context.Context, op *fuseops.ReadDirOp) error 
 		if n == 0 {
 			break
 		}
+		if mapInode != nil {
+			// A catalogue needs genuine, nonzero child IDs: libc readdir skips
+			// d_ino=0 entries, and a shared placeholder aliases all siblings.
+			// READDIR grants no lookup references, so retain a zero-reference
+			// identity until a later lookup/forget establishes its lifetime.
+			path := model.CleanPath(filepath.Join(dh.inode.Path, e.Name))
+			fs.mu.Lock()
+			var ref *InodeRef
+			if id, ok := fs.pathToInode[path]; ok {
+				ref = fs.inodes[id]
+			}
+			if ref == nil {
+				ref = fs.allocInode(path, e.Type, e.Mode, dh.gen)
+				ref.Refcnt = 0
+			}
+			if dh.direntInodes == nil {
+				dh.direntInodes = make(map[fuseops.InodeID]struct{})
+			}
+			if _, retained := dh.direntInodes[ref.ID]; !retained {
+				dh.direntInodes[ref.ID] = struct{}{}
+				ref.DirRefs++
+			}
+			local := ref.ID
+			fs.mu.Unlock()
+			dirent.Inode = mapInode(local)
+			n = fuseutil.WriteDirent(op.Dst[op.BytesRead:], dirent)
+		}
 		op.BytesRead += n
 	}
 	return nil
 }
 
-func (fs *ArtifactFuse) ReadDirPlus(_ context.Context, op *fuseops.ReadDirPlusOp) error {
+func (fs *ArtifactFuse) ReadDirPlus(ctx context.Context, op *fuseops.ReadDirPlusOp) error {
+	return fs.ReadDirPlusWithInodeMapping(ctx, op, nil)
+}
+
+// ReadDirPlusWithInodeMapping translates only entries actually returned to the
+// kernel. Each mapper call represents one lookup reference, just as LookUpInode.
+func (fs *ArtifactFuse) ReadDirPlusWithInodeMapping(_ context.Context, op *fuseops.ReadDirPlusOp, mapInode func(fuseops.InodeID) fuseops.InodeID) error {
 	fs.handleOps.RLock()
 	defer fs.handleOps.RUnlock()
 	dh, err := fs.dirHandle(op.Handle)
@@ -670,7 +719,7 @@ func (fs *ArtifactFuse) ReadDirPlus(_ context.Context, op *fuseops.ReadDirPlusOp
 			if errors.Is(err, iofs.ErrNotExist) {
 				return syscall.ENOENT
 			}
-			return syscall.EIO
+			return fuseOperationError("readdirplus", err)
 		}
 		dirent := fuseutil.DirentPlus{
 			Dirent: fuseutil.Dirent{
@@ -681,10 +730,17 @@ func (fs *ArtifactFuse) ReadDirPlus(_ context.Context, op *fuseops.ReadDirPlusOp
 			},
 			Entry: entry,
 		}
+		// Check capacity before mapping so an entry that does not fit does not
+		// leak a lookup reference in the containing filesystem.
 		n := fuseutil.WriteDirentPlus(op.Dst[op.BytesRead:], dirent)
 		if n == 0 {
 			fs.dropInodeLookup(entry.Child)
 			break
+		}
+		if mapInode != nil {
+			dirent.Entry.Child = mapInode(entry.Child)
+			dirent.Dirent.Inode = dirent.Entry.Child
+			n = fuseutil.WriteDirentPlus(op.Dst[op.BytesRead:], dirent)
 		}
 		op.BytesRead += n
 	}
@@ -729,6 +785,21 @@ func readdirAttrs(e ReaddirEntry, gen, commitTime int64) (mode uint32, size int6
 
 func (fs *ArtifactFuse) ReleaseDirHandle(_ context.Context, op *fuseops.ReleaseDirHandleOp) error {
 	fs.mu.Lock()
+	if dh := fs.dirHandles[op.Handle]; dh != nil {
+		for id := range dh.direntInodes {
+			ref := fs.inodes[id]
+			if ref == nil {
+				continue
+			}
+			ref.DirRefs--
+			if ref.Refcnt <= 0 && ref.DirRefs == 0 && !ref.IsRoot {
+				delete(fs.inodes, id)
+				if fs.pathToInode[ref.Path] == id {
+					delete(fs.pathToInode, ref.Path)
+				}
+			}
+		}
+	}
 	delete(fs.dirHandles, op.Handle)
 	fs.mu.Unlock()
 	return nil
@@ -744,21 +815,26 @@ func (fs *ArtifactFuse) OpenFile(ctx context.Context, op *fuseops.OpenFileOp) er
 	fh := &FileHandle{inode: ref, path: ref.Path}
 	if ref.Path != ".git" {
 		if ov, ok, err := fs.engine.Overlay.Lookup(ctx, ref.Path); err != nil {
-			return syscall.EIO
-		} else if ok && !ov.IsDeleted() {
+			return fuseOperationError("open overlay metadata", err)
+		} else if ok && ov.IsDeleted() {
+			return syscall.ENOENT
+		} else if ok {
 			f, err := os.OpenFile(ov.BackingPath, os.O_RDWR, 0)
 			if err != nil {
 				f, err = os.Open(ov.BackingPath)
 			}
 			if err != nil {
-				return syscall.EIO
+				return fuseOperationError("open overlay data", err)
 			}
 			fh.cacheFile = f
 			fh.cacheGeneration = -1
 		} else {
 			f, gen, base, err := fs.engine.BaseCacheFile(ctx, ref.Path)
 			if err != nil {
-				return syscall.EIO
+				if errors.Is(err, iofs.ErrNotExist) {
+					return syscall.ENOENT
+				}
+				return fuseOperationError("open base data", err)
 			}
 			if base {
 				fh.cacheFile = f
@@ -804,7 +880,7 @@ func (fs *ArtifactFuse) ReadFile(ctx context.Context, op *fuseops.ReadFileOp) er
 		if os.IsNotExist(err) {
 			return syscall.ENOENT
 		}
-		return syscall.EIO
+		return fuseOperationError("read", err)
 	}
 	op.Data = [][]byte{data}
 	op.BytesRead = len(data)
@@ -826,7 +902,7 @@ func (fs *ArtifactFuse) WriteFile(ctx context.Context, op *fuseops.WriteFileOp) 
 			return syscall.EIO
 		}
 		if _, err := f.WriteAt(op.Data, op.Offset); err != nil {
-			return syscall.EIO
+			return fuseOperationError("write detached data", err)
 		}
 		return nil
 	}
@@ -835,7 +911,7 @@ func (fs *ArtifactFuse) WriteFile(ctx context.Context, op *fuseops.WriteFileOp) 
 	fs.closeCachedFilesForPath(path)
 	n, err := fs.engine.Write(ctx, path, op.Offset, op.Data)
 	if err != nil {
-		return syscall.EIO
+		return fuseOperationError("write", err)
 	}
 	if n != len(op.Data) {
 		return syscall.EIO
@@ -852,7 +928,7 @@ func (fs *ArtifactFuse) CreateFile(ctx context.Context, op *fuseops.CreateFileOp
 		return err
 	}
 	if err := fs.engine.Create(ctx, childPath, uint32(op.Mode)); err != nil {
-		return syscall.EIO
+		return fuseOperationError("create", err)
 	}
 	fs.mu.Lock()
 	ref := fs.allocInode(childPath, "file", uint32(op.Mode), fs.resolver.Generation())
@@ -881,7 +957,7 @@ func (fs *ArtifactFuse) CreateSymlink(ctx context.Context, op *fuseops.CreateSym
 		return syscall.ENAMETOOLONG
 	}
 	if err := fs.engine.Symlink(ctx, childPath, op.Target); err != nil {
-		return syscall.EIO
+		return fuseOperationError("symlink", err)
 	}
 	fs.mu.Lock()
 	ref := fs.allocInode(childPath, "symlink", 0o120000, fs.resolver.Generation())
@@ -902,7 +978,7 @@ func (fs *ArtifactFuse) MkDir(ctx context.Context, op *fuseops.MkDirOp) error {
 		return err
 	}
 	if err := fs.engine.Mkdir(ctx, childPath, uint32(op.Mode)); err != nil {
-		return syscall.EIO
+		return fuseOperationError("mkdir", err)
 	}
 	fs.mu.Lock()
 	ref := fs.allocInode(childPath, "dir", uint32(op.Mode), fs.resolver.Generation())
@@ -926,7 +1002,7 @@ func (fs *ArtifactFuse) RmDir(ctx context.Context, op *fuseops.RmDirOp) error {
 		if os.IsExist(err) {
 			return syscall.ENOTEMPTY
 		}
-		return syscall.EIO
+		return fuseOperationError("rmdir", err)
 	}
 	return nil
 }
@@ -939,13 +1015,13 @@ func (fs *ArtifactFuse) Unlink(ctx context.Context, op *fuseops.UnlinkOp) error 
 		return err
 	}
 	if err := fs.engine.ensureOverlay(ctx, childPath); err != nil {
-		return syscall.EIO
+		return fuseOperationError("prepare unlink", err)
 	}
 	if err := fs.pinOpenHandles(childPath); err != nil {
-		return syscall.EIO
+		return fuseOperationError("pin unlink handles", err)
 	}
 	if err := fs.engine.Unlink(ctx, childPath); err != nil {
-		return syscall.EIO
+		return fuseOperationError("unlink", err)
 	}
 	fs.detachOpenHandles(childPath)
 	return nil
@@ -966,7 +1042,10 @@ func (fs *ArtifactFuse) Rename(ctx context.Context, op *fuseops.RenameOp) error 
 	newPath := cleanChildPath(newParent.Path, op.NewName)
 	source, err := fs.resolver.ResolvePath(oldPath)
 	if err != nil {
-		return syscall.ENOENT
+		if errors.Is(err, iofs.ErrNotExist) {
+			return syscall.ENOENT
+		}
+		return fuseOperationError("resolve rename source", err)
 	}
 	sourceType := resolvedNodeType(source)
 	if oldPath == newPath {
@@ -986,17 +1065,17 @@ func (fs *ArtifactFuse) Rename(ctx context.Context, op *fuseops.RenameOp) error 
 	}
 	if sourceType != "dir" {
 		if err := fs.engine.ensureOverlay(ctx, oldPath); err != nil {
-			return syscall.EIO
+			return fuseOperationError("prepare rename source", err)
 		}
 		if err := fs.pinOpenHandles(oldPath); err != nil {
-			return syscall.EIO
+			return fuseOperationError("pin rename source handles", err)
 		}
 		if _, err := fs.resolver.ResolvePath(newPath); err == nil {
 			if err := fs.engine.ensureOverlay(ctx, newPath); err != nil {
-				return syscall.EIO
+				return fuseOperationError("prepare rename destination", err)
 			}
 			if err := fs.pinOpenHandles(newPath); err != nil {
-				return syscall.EIO
+				return fuseOperationError("pin rename destination handles", err)
 			}
 		}
 	}
@@ -1010,12 +1089,27 @@ func (fs *ArtifactFuse) Rename(ctx context.Context, op *fuseops.RenameOp) error 
 		if errors.Is(err, iofs.ErrNotExist) {
 			return syscall.ENOENT
 		}
-		return syscall.EIO
+		return fuseOperationError("rename", err)
 	}
 	fs.moveInodePath(oldPath, newPath)
 	fs.detachOpenHandles(newPath)
 	fs.moveOpenHandles(oldPath, newPath)
 	return nil
+}
+
+func fuseOperationError(operation string, err error) error {
+	// The kernel may interrupt an in-flight request, including for a caller's
+	// signal. Report the interrupted syscall so clients can retry; EIO would
+	// incorrectly describe a failed disk read or corrupted backing state.
+	// https://docs.kernel.org/filesystems/fuse/fuse.html#interrupting-filesystem-operations
+	if errors.Is(err, context.Canceled) {
+		return syscall.EINTR
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return syscall.ETIMEDOUT
+	}
+	slog.Error("filesystem operation failed", "operation", operation, "error", auth.RedactString(err.Error()))
+	return syscall.EIO
 }
 
 func (fs *ArtifactFuse) ReadSymlink(ctx context.Context, op *fuseops.ReadSymlinkOp) error {
@@ -1045,7 +1139,7 @@ func (fs *ArtifactFuse) ReadSymlink(ctx context.Context, op *fuseops.ReadSymlink
 			if errors.Is(err, model.ErrBlobTooLarge) {
 				return syscall.ENAMETOOLONG
 			}
-			return syscall.EIO
+			return fuseOperationError("read symlink", err)
 		}
 		op.Target = string(data)
 		return nil
@@ -1093,7 +1187,7 @@ func (fs *ArtifactFuse) SyncFile(ctx context.Context, op *fuseops.SyncFileOp) er
 	}
 	fh.mu.Unlock()
 	if err := fs.engine.Sync(ctx, path); err != nil {
-		return syscall.EIO
+		return fuseOperationError("sync", err)
 	}
 	return nil
 }

@@ -1,0 +1,136 @@
+import Foundation
+
+/// Compile with App/Models.swift and App/EngineClient.swift, then pass the built
+/// Go executable as the first argument. Uses a fake gh, no GitHub/network data.
+@main
+struct ControlSmoke {
+    static func main() async {
+        do { try await run() }
+        catch {
+            fputs("FAIL: \(error.localizedDescription)\n", stderr)
+            exit(1)
+        }
+    }
+
+    static func run() async throws {
+        guard CommandLine.arguments.count == 2 else { fatalError("Pass the built artifact-fs executable") }
+        let engine = URL(fileURLWithPath: CommandLine.arguments[1])
+        let root = URL(fileURLWithPath: "/tmp/rr-native-" + String(UUID().uuidString.prefix(8)), isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        defer { try? FileManager.default.removeItem(at: root) }
+        let gh = root.appendingPathComponent("gh")
+        let release = root.appendingPathComponent("release")
+        let signed = root.appendingPathComponent("signed")
+        let script = #"""
+        #!/bin/sh
+        case "$*" in
+          'api --hostname github.com user')
+            [ -f "$REPOREACH_FIXTURE_SIGNED" ] || exit 4
+            printf '%s\n' '{"login":"fixture-account"}'
+            ;;
+          'auth login --hostname github.com --git-protocol https --web')
+            printf '%s\n' '! First copy your one-time code: AB12-CD34' >&2
+            printf '%s\n' 'Open https://github.com/login/device?token=fixture-only-do-not-forward' >&2
+            while [ ! -f "$REPOREACH_FIXTURE_RELEASE" ]; do sleep 0.05; done
+            touch "$REPOREACH_FIXTURE_SIGNED"
+            ;;
+          'api --hostname github.com --paginate user/repos?per_page=100&visibility=all&affiliation=owner,collaborator,organization_member&sort=full_name&direction=asc')
+            printf '%s\n' '[{"name":"fixture-repo","owner":{"login":"fixture-account"},"description":"Synthetic test metadata","default_branch":"main","private":true}]'
+            ;;
+          *) exit 1 ;;
+        esac
+        """#
+        try Data(script.utf8).write(to: gh)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: gh.path)
+        let state = root.appendingPathComponent("state", isDirectory: true)
+        let socket = root.appendingPathComponent("s.sock")
+        let mount = root.appendingPathComponent("mount", isDirectory: true)
+        let service = Process()
+        service.executableURL = engine
+        service.arguments = ["desktop", "serve", "--state-dir", state.path, "--mount-root", mount.path, "--socket", socket.path, "--gh", gh.path]
+        var environment = ProcessInfo.processInfo.environment
+        for key in ["GH_TOKEN", "GITHUB_TOKEN", "GH_HOST", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"] { environment.removeValue(forKey: key) }
+        environment["REPOREACH_FIXTURE_RELEASE"] = release.path
+        environment["REPOREACH_FIXTURE_SIGNED"] = signed.path
+        environment["GH_CONFIG_DIR"] = root.appendingPathComponent("gh-config").path
+        environment["GIT_CONFIG_GLOBAL"] = "/dev/null"
+        service.environment = environment
+        let null = FileHandle(forWritingAtPath: "/dev/null")!
+        service.standardOutput = null; service.standardError = null
+        try service.run()
+        defer { if service.isRunning { service.terminate(); service.waitUntilExit() } }
+        let client = EngineClient(executable: engine, socket: socket)
+        var initial: EngineStatus?
+        for _ in 0..<100 {
+            initial = try? await client.request("GET", path: "/v1/status", timeout: 3)
+            if initial != nil { break }
+            try await Task.sleep(nanoseconds: 100_000_000)
+        }
+        try expect(initial?.repositories.isEmpty == true && initial?.mounted == false, "initial status")
+        let duplicate = try await CommandRunner.run(executable: engine, arguments: service.arguments!, timeout: 4)
+        try expect(duplicate.status != 0, "duplicate service is refused")
+        let session: AuthSession = try await client.request("POST", path: "/v1/auth/start")
+        try expect(session.pending, "auth flow is asynchronous")
+        var pending: AuthSession?
+        for _ in 0..<50 {
+            pending = try await client.request("GET", path: "/v1/auth/status")
+            if pending?.deviceCode != nil { break }
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        try expect(pending?.deviceCode == "AB12-CD34", "device code contract")
+        try expect(pending?.authorizationURL == "https://github.com/login/device", "authorization URL normalized")
+        try Data().write(to: release)
+        var authenticated: AuthSession?
+        for _ in 0..<50 {
+            authenticated = try await client.request("GET", path: "/v1/auth/status")
+            if authenticated?.authenticated == true { break }
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        try expect(authenticated?.account?.login == "fixture-account" && authenticated?.deviceCode == nil, "completed auth contract")
+        let discovered: EngineStatus = try await client.request("POST", path: "/v1/discover")
+        try expect(discovered.repositories.count == 1 && discovered.repositories[0].privateRepository, "discovery/private repo contract")
+        let moved = root.appendingPathComponent("moved", isDirectory: true)
+        let changed: EngineStatus = try await client.request("POST", path: "/v1/settings", body: ["mountRoot": moved.path])
+        try expect(changed.mountRoot == moved.path, "settings migration")
+        var rootRefused = false
+        do {
+            let _: EmptyResponse = try await client.request("POST", path: "/v1/settings", body: ["mountRoot": "/"])
+        } catch let failure as EngineFailure {
+            rootRefused = true
+            try expect(!failure.message.isEmpty, "settings structured error")
+        }
+        try expect(rootRefused, "unsafe mount root refused")
+        do {
+            let _: EmptyResponse = try await client.request("POST", path: "/v1/repositories/action", body: ["id": "missing/repo", "action": "keep"])
+            throw EngineFailure(message: "Unregistered repo was accepted")
+        } catch let failure as EngineFailure {
+            try expect(failure.message.contains("catalogue"), "action structured error")
+        }
+        let _: EmptyResponse = try await client.request("POST", path: "/v1/repositories/action", body: ["id": "fixture-account/fixture-repo", "action": "free"])
+        var operation: EngineOperation?
+        for _ in 0..<50 {
+            let status: EngineStatus = try await client.request("GET", path: "/v1/status")
+            operation = status.operations.last
+            if operation?.isRunning == false { break }
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        try expect(operation?.repositoryID == "fixture-account/fixture-repo" && operation?.action == "free" && operation?.isRunning == false, "async operation contract")
+        if initial?.dependencyReady == false {
+            var mountRefused = false
+            do {
+                let _: EmptyResponse = try await client.request("POST", path: "/v1/mount")
+            } catch let failure as EngineFailure {
+                mountRefused = true
+                try expect(failure.message.localizedCaseInsensitiveContains("fuse"), "mount dependency error")
+            }
+            try expect(mountRefused, "mount refused without dependency")
+        }
+        service.terminate(); service.waitUntilExit()
+        try expect(!FileManager.default.fileExists(atPath: socket.path), "graceful shutdown removes socket")
+        print("PASS: status, duplicate startup, device auth, discovery, settings, operation/error decoding, dependency failure, graceful shutdown")
+    }
+
+    static func expect(_ condition: Bool, _ message: String) throws {
+        guard condition else { throw EngineFailure(message: "Smoke failed: " + message) }
+    }
+}

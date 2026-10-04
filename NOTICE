@@ -1,0 +1,15 @@
+RepoReach
+An open source project by Enough Tools.
+Copyright 2026 Enough Tools.
+
+This product includes software developed by Cloudflare:
+ArtifactFS — https://github.com/cloudflare/artifact-fs
+Licensed under the Apache License, Version 2.0.
+
+The macOS distribution includes the official GitHub CLI:
+https://github.com/cli/cli — MIT license.
+Dependency license notices are included in the app's Resources/Licenses folder.
+
+The website uses Enough UI components and brand assets under MIT,
+Space Grotesk and Libre Caslon Text fonts under the SIL Open Font License.
+Their notices are retained in site/public/brand and dependency packages.

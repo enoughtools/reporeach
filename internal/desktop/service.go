@@ -1,0 +1,946 @@
+package desktop
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"io"
+	"log/slog"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"sort"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/cloudflare/artifact-fs/internal/auth"
+	"github.com/cloudflare/artifact-fs/internal/catalogfs"
+	"github.com/cloudflare/artifact-fs/internal/daemon"
+	"github.com/cloudflare/artifact-fs/internal/fusefs"
+	"github.com/cloudflare/artifact-fs/internal/model"
+)
+
+type Options struct {
+	StateDir  string
+	MountRoot string
+	Socket    string
+	GHPath    string
+	Logger    *slog.Logger
+}
+
+// Service owns the catalogue, daemon runtimes, and background operations.
+// Closing its control window does not affect its lifetime.
+type Service struct {
+	ctx              context.Context
+	cancel           context.CancelFunc
+	opts             Options
+	logger           *slog.Logger
+	github           *GitHub
+	engine           *daemon.Service
+	mu               sync.Mutex
+	state            persistedState
+	message          string
+	ops              []Operation
+	cancels          map[string]context.CancelFunc
+	locks            map[string]chan struct{}
+	pins             map[string]string
+	closing          bool
+	maintenance      bool
+	recoveryRequired bool
+	workers          sync.WaitGroup
+	// lifecycle protects mount changes. Repository operations never hold mu
+	// while waiting on FUSE or invoking git.
+	lifecycle       sync.Mutex
+	catalog         *catalogfs.FileSystem
+	mounted         fusefs.MountedFS
+	dependencyReady func() bool
+	mountCatalogue  func(context.Context, string, *catalogfs.FileSystem) (fusefs.MountedFS, error)
+}
+
+func New(ctx context.Context, opts Options) (*Service, error) {
+	if !filepath.IsAbs(opts.StateDir) {
+		return nil, errors.New("state directory must be absolute")
+	}
+	if err := validateMountRoot(opts.MountRoot); err != nil {
+		return nil, err
+	}
+	if err := privateDirectory(opts.StateDir, true); err != nil {
+		return nil, err
+	}
+	if opts.Logger == nil {
+		opts.Logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+	}
+	if opts.GHPath == "" {
+		var err error
+		opts.GHPath, err = exec.LookPath("gh")
+		if err != nil {
+			return nil, errors.New("the bundled GitHub CLI is missing")
+		}
+	}
+	if !filepath.IsAbs(opts.GHPath) {
+		return nil, errors.New("GitHub CLI path must be absolute")
+	}
+	state, err := readState(filepath.Join(opts.StateDir, "catalogue.json"), opts.MountRoot)
+	if err != nil {
+		return nil, err
+	}
+	if pathsOverlap(state.MountRoot, opts.StateDir) {
+		return nil, errors.New("mount folder and state directory must be separate")
+	}
+	engine, err := daemon.New(ctx, filepath.Join(opts.StateDir, "engine"), opts.Logger)
+	if err != nil {
+		return nil, err
+	}
+	if err := engine.RecoverStorageTransactions(ctx); err != nil {
+		_ = engine.Close()
+		return nil, fmt.Errorf("recover repository storage: %w", err)
+	}
+	engine.SetMountRoot(state.MountRoot)
+	serviceCtx, cancel := context.WithCancel(ctx)
+	s := &Service{
+		ctx: serviceCtx, cancel: cancel, opts: opts, logger: opts.Logger,
+		github: NewGitHub(opts.GHPath), engine: engine, state: state,
+		ops: []Operation{}, cancels: map[string]context.CancelFunc{},
+		locks: map[string]chan struct{}{}, pins: map[string]string{},
+		dependencyReady: platformDependencyReady, mountCatalogue: catalogfs.Mount,
+	}
+	if err := s.recoverRootMigration(ctx); err != nil {
+		_ = engine.Close()
+		cancel()
+		return nil, fmt.Errorf("recover mount folder: %w", err)
+	}
+	// Reconcile UI state with durable engine registration after interrupted work.
+	configs, err := engine.ListRepos(ctx)
+	if err != nil {
+		_ = engine.Close()
+		cancel()
+		return nil, err
+	}
+	prepared := map[string]bool{}
+	for _, cfg := range configs {
+		prepared[cfg.Name] = cfg.PrepareState == "" || cfg.PrepareState == model.PrepareStateReady
+	}
+	for i := range s.state.Repositories {
+		repo := &s.state.Repositories[i]
+		if prepared[engineName(repo.ID)] {
+			repo.State = "available"
+		} else {
+			repo.State = "virtual"
+		}
+		// Pin intent survives a restart, but stays available until verified again.
+		repo.Error = ""
+	}
+	if err := s.persistLocked(); err != nil {
+		_ = engine.Close()
+		cancel()
+		return nil, err
+	}
+	return s, nil
+}
+
+func (s *Service) Close() error {
+	s.mu.Lock()
+	if s.closing {
+		s.mu.Unlock()
+		return nil
+	}
+	s.closing = true
+	s.cancel()
+	for _, cancel := range s.cancels {
+		cancel()
+	}
+	s.mu.Unlock()
+	s.github.Close()
+	s.workers.Wait()
+	s.lifecycle.Lock()
+	defer s.lifecycle.Unlock()
+	if err := s.detachLocked(); err != nil {
+		return err
+	}
+	return s.engine.Close()
+}
+
+func (s *Service) Restore() {
+	s.mu.Lock()
+	desired := s.state.MountDesired
+	s.mu.Unlock()
+	if desired {
+		if err := s.Mount(s.ctx); err != nil {
+			s.mu.Lock()
+			s.message = safeError(err)
+			s.mu.Unlock()
+		}
+	}
+	s.mu.Lock()
+	if s.closing {
+		s.mu.Unlock()
+		return
+	}
+	s.workers.Add(1)
+	s.mu.Unlock()
+	go s.pinLoop()
+}
+
+func (s *Service) Status() Status {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	repos := append([]Repository(nil), s.state.Repositories...)
+	if repos == nil {
+		repos = []Repository{}
+	}
+	operations := append([]Operation(nil), s.ops...)
+	if operations == nil {
+		operations = []Operation{}
+	}
+	var account *Account
+	if s.state.Account != nil {
+		copyAccount := *s.state.Account
+		account = &copyAccount
+	}
+	return Status{Version: Version, MountRoot: s.state.MountRoot,
+		Mounted: s.mounted != nil, DependencyReady: s.dependencyReady(),
+		Account: account, Repositories: repos, Operations: operations, Message: s.message}
+}
+
+func (s *Service) Discover(ctx context.Context) (Status, error) {
+	repos, account, err := s.github.Discover(ctx)
+	if err != nil {
+		return Status{}, err
+	}
+	for _, repo := range repos {
+		if err := validateRepository(repo); err != nil {
+			return Status{}, err
+		}
+	}
+	s.lifecycle.Lock()
+	defer s.lifecycle.Unlock()
+	s.mu.Lock()
+	if s.closing {
+		s.mu.Unlock()
+		return Status{}, errors.New("service is closing")
+	}
+	previous := s.state
+	old := map[string]Repository{}
+	for _, repo := range s.state.Repositories {
+		old[strings.ToLower(repo.ID)] = repo
+	}
+	for i := range repos {
+		repo := &repos[i]
+		if existing, ok := old[strings.ToLower(repo.ID)]; ok {
+			repo.State, repo.Pinned, repo.DownloadedBytes, repo.Error = existing.State, existing.Pinned, existing.DownloadedBytes, existing.Error
+			delete(old, strings.ToLower(repo.ID))
+		} else {
+			repo.State = "virtual"
+		}
+	}
+	// An access change must not orphan local edits or pinned data. Keep previous
+	// entries until the user explicitly frees them, and report the access change.
+	for _, repo := range old {
+		repo.Error = "Repository was not returned by GitHub. Local data has been retained."
+		repos = append(repos, repo)
+	}
+	sort.Slice(repos, func(i, j int) bool { return strings.ToLower(repos[i].ID) < strings.ToLower(repos[j].ID) })
+	s.state.Repositories, s.state.Account = repos, account
+	err = s.persistLocked()
+	if err != nil {
+		s.state = previous
+	}
+	catalog := s.catalog
+	entries := s.entriesLocked()
+	s.mu.Unlock()
+	if err != nil {
+		return Status{}, err
+	}
+	if catalog != nil {
+		if err := catalog.SetEntries(entries); err != nil {
+			return Status{}, err
+		}
+	}
+	return s.Status(), nil
+}
+
+func (s *Service) Mount(ctx context.Context) error {
+	s.lifecycle.Lock()
+	defer s.lifecycle.Unlock()
+	if err := s.mountLocked(ctx); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.state.MountDesired = true
+	s.message = ""
+	return s.persistLocked()
+}
+
+func (s *Service) mountLocked(ctx context.Context) error {
+	s.mu.Lock()
+	if s.closing {
+		s.mu.Unlock()
+		return errors.New("service is closing")
+	}
+	if s.recoveryRequired {
+		s.mu.Unlock()
+		return errors.New("restart RepoReach to recover an interrupted storage operation")
+	}
+	if s.mounted != nil {
+		s.mu.Unlock()
+		return nil
+	}
+	root, entries := s.state.MountRoot, s.entriesLocked()
+	s.mu.Unlock()
+	if !s.dependencyReady() {
+		return errors.New("install macFUSE to mount repositories in Finder")
+	}
+	if err := safeMountDirectory(root); err != nil {
+		return err
+	}
+	fs, err := catalogfs.New(entries, func(ctx context.Context, entry catalogfs.Entry) (*fusefs.ArtifactFuse, error) {
+		unlock, err := s.lockRepo(ctx, entry.ID)
+		if err != nil {
+			return nil, err
+		}
+		defer unlock()
+		return s.ensureRepository(ctx, entry.ID)
+	})
+	if err != nil {
+		return err
+	}
+	mounted, err := s.mountCatalogue(ctx, root, fs)
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	if s.closing {
+		s.mu.Unlock()
+		cleanupErr := mounted.Unmount()
+		drainCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if cleanupErr == nil {
+			cleanupErr = mounted.Join(drainCtx)
+		}
+		if cleanupErr != nil {
+			// Keep ownership so Close can retry detachment without closing the
+			// stores referenced by a filesystem that is still in use.
+			s.mu.Lock()
+			s.catalog, s.mounted = fs, mounted
+			s.mu.Unlock()
+		}
+		return errors.Join(errors.New("service is closing"), cleanupErr)
+	}
+	s.catalog, s.mounted = fs, mounted
+	// Join observes unexpected unmounts without keeping a second mount alive.
+	s.workers.Add(1)
+	s.mu.Unlock()
+	go func() {
+		defer s.workers.Done()
+		err := mounted.Join(s.ctx)
+		s.mu.Lock()
+		if s.mounted == mounted && !s.closing {
+			s.mounted, s.catalog = nil, nil
+			s.message = "The repository folder was unmounted. Open RepoReach to mount it again."
+			if err != nil && !errors.Is(err, context.Canceled) {
+				s.message = safeError(err)
+			}
+		}
+		s.mu.Unlock()
+	}()
+	return nil
+}
+
+func (s *Service) Unmount(ctx context.Context) error {
+	s.lifecycle.Lock()
+	defer s.lifecycle.Unlock()
+	s.mu.Lock()
+	closing := s.closing
+	s.mu.Unlock()
+	if closing {
+		return errors.New("service is closing")
+	}
+	if err := s.detachLocked(); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.state.MountDesired = false
+	return s.persistLocked()
+}
+
+func (s *Service) detachLocked() error {
+	s.mu.Lock()
+	mounted := s.mounted
+	s.mu.Unlock()
+	if mounted == nil {
+		return nil
+	}
+	if err := mounted.Unmount(); err != nil {
+		return fmt.Errorf("unmount repository folder: %w", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := mounted.Join(ctx); err != nil {
+		return fmt.Errorf("drain repository folder: %w", err)
+	}
+	s.mu.Lock()
+	if s.mounted == mounted {
+		s.mounted, s.catalog = nil, nil
+	}
+	s.mu.Unlock()
+	return nil
+}
+
+func (s *Service) Settings(ctx context.Context, root string) error {
+	if err := validateMountRoot(root); err != nil {
+		return err
+	}
+	s.lifecycle.Lock()
+	defer s.lifecycle.Unlock()
+	s.mu.Lock()
+	if s.closing {
+		s.mu.Unlock()
+		return errors.New("service is closing")
+	}
+	if len(s.cancels) > 0 || s.maintenance {
+		s.mu.Unlock()
+		return errors.New("wait for repository operations to finish before changing the folder")
+	}
+	oldRoot := s.state.MountRoot
+	if model.CleanPath(root) == model.CleanPath(oldRoot) {
+		s.mu.Unlock()
+		return nil
+	}
+	// Reject nested or enclosing destinations before resolving symlinks or
+	// opening a directory. The old root may be served by this very Go process;
+	// opening our own FUSE directories can deadlock Go's runtime poller.
+	if pathsLexicallyOverlap(root, oldRoot) {
+		s.mu.Unlock()
+		return errors.New("choose a folder outside the current repository folder")
+	}
+	s.maintenance = true
+	desired := s.state.MountDesired
+	s.mu.Unlock()
+	blocked := false
+	defer func() {
+		s.mu.Lock()
+		s.maintenance = blocked
+		s.recoveryRequired = blocked
+		s.mu.Unlock()
+	}()
+	if pathsOverlap(root, oldRoot) {
+		return errors.New("choose a folder outside the current repository folder")
+	}
+	if pathsOverlap(root, s.opts.StateDir) {
+		return errors.New("mount folder and state directory must be separate")
+	}
+	if err := safeMountDirectory(root); err != nil {
+		return err
+	}
+	if err := s.detachLocked(); err != nil {
+		return err
+	}
+	configs, err := s.engine.ListRepos(ctx)
+	if err != nil {
+		return err
+	}
+	for _, cfg := range configs {
+		if err := s.engine.Unmount(ctx, cfg.Name); err != nil {
+			return err
+		}
+	}
+	err = s.migrateRoot(ctx, root)
+	if err != nil {
+		if errors.Is(err, errRootMigrationRecoveryNeeded) {
+			blocked = true
+			s.mu.Lock()
+			s.message = safeError(err)
+			s.mu.Unlock()
+			return err
+		}
+		if desired {
+			return errors.Join(err, s.mountLocked(s.ctx))
+		}
+		return err
+	}
+	if desired {
+		return s.mountLocked(ctx)
+	}
+	return nil
+}
+
+func (s *Service) ensureRepository(ctx context.Context, id string) (*fusefs.ArtifactFuse, error) {
+	s.mu.Lock()
+	if s.closing || s.recoveryRequired {
+		s.mu.Unlock()
+		return nil, errors.New("repository service is closing or needs recovery")
+	}
+	repo, ok := s.repositoryLocked(id)
+	root := s.state.MountRoot
+	s.mu.Unlock()
+	if !ok {
+		return nil, errors.New("repository is not in the catalogue")
+	}
+	configs, err := s.engine.ListRepos(ctx)
+	if err != nil {
+		return nil, err
+	}
+	name := engineName(repo.ID)
+	var config *model.RepoConfig
+	for i := range configs {
+		if configs[i].Name == name {
+			config = &configs[i]
+			break
+		}
+	}
+	if config == nil || config.PrepareError != "" || config.PrepareState == model.PrepareStateFailed || config.PrepareState == model.PrepareStateSyncPreparing {
+		s.setRepositoryState(id, "preparing", "")
+		cfg := model.RepoConfig{
+			ID: model.RepoID(name), Name: name, RemoteURL: repo.CloneURL,
+			Branch: "refs/heads/" + repo.DefaultBranch, Enabled: true,
+			MountRoot: root, MountPath: filepath.Join(root, repo.Owner, repo.Name),
+			RefreshInterval: 5 * time.Minute, RemoteRefreshDisabled: true,
+		}
+		if repo.DefaultBranch == "" {
+			return nil, errors.New("this repository has no default branch yet")
+		}
+		if err := s.engine.AddRepo(ctx, cfg); err != nil {
+			s.setRepositoryState(id, "error", safeError(err))
+			return nil, err
+		}
+	}
+	gitDir := filepath.Join(s.opts.StateDir, "engine", "repos", name, "git")
+	if err := configureRepositoryAuth(ctx, gitDir, s.opts.GHPath); err != nil {
+		s.setRepositoryState(id, "error", safeError(err))
+		return nil, err
+	}
+	fs, err := s.engine.OpenCatalogRepository(ctx, name)
+	if err != nil {
+		s.setRepositoryState(id, "error", safeError(err))
+		return nil, err
+	}
+	s.mu.Lock()
+	if index := s.repositoryIndexLocked(id); index >= 0 {
+		if s.state.Repositories[index].State != "pinned" {
+			s.state.Repositories[index].State = "available"
+		}
+		s.state.Repositories[index].Error = ""
+		_ = s.persistLocked()
+	}
+	s.mu.Unlock()
+	return fs, nil
+}
+
+func (s *Service) Action(id, action string) (Operation, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closing {
+		return Operation{}, errors.New("service is closing")
+	}
+	if s.maintenance {
+		return Operation{}, errors.New("wait for the folder change to finish")
+	}
+	if _, ok := s.repositoryLocked(id); !ok {
+		return Operation{}, errors.New("repository is not in the catalogue")
+	}
+	if action == "cancel" {
+		if cancel, ok := s.cancels[id]; ok {
+			cancel()
+			for i := len(s.ops) - 1; i >= 0; i-- {
+				if s.ops[i].RepositoryID == id && s.ops[i].Status == "running" {
+					return s.ops[i], nil
+				}
+			}
+		}
+		return Operation{}, errors.New("repository has no active operation")
+	}
+	if action != "keep" && action != "prepare" && action != "refresh" && action != "free" {
+		return Operation{}, errors.New("unsupported repository action")
+	}
+	if _, busy := s.cancels[id]; busy {
+		return Operation{}, errors.New("repository already has an active operation")
+	}
+	op := Operation{ID: fmt.Sprintf("%x", time.Now().UnixNano()), RepositoryID: id, Action: action, Status: "running"}
+	opCtx, cancel := context.WithCancel(s.ctx)
+	s.cancels[id] = cancel
+	s.ops = append(s.ops, op)
+	if len(s.ops) > 100 {
+		// Retain active operations even when there is a long history.
+		for i, previous := range s.ops {
+			if previous.Status != "running" {
+				s.ops = append(s.ops[:i], s.ops[i+1:]...)
+				break
+			}
+		}
+	}
+	s.workers.Add(1)
+	go s.runAction(opCtx, cancel, op)
+	return op, nil
+}
+
+func (s *Service) runAction(ctx context.Context, cancel context.CancelFunc, op Operation) {
+	defer s.workers.Done()
+	defer cancel()
+	unlock, err := s.lockRepo(ctx, op.RepositoryID)
+	if err == nil {
+		defer unlock()
+		if op.Action == "free" {
+			err = s.freeRepository(ctx, op.RepositoryID)
+		} else {
+			_, err = s.ensureRepository(ctx, op.RepositoryID)
+			if err == nil && op.Action == "refresh" {
+				err = s.engine.FetchCatalogUpdates(ctx, engineName(op.RepositoryID))
+			}
+			if err == nil && op.Action == "keep" {
+				err = s.download(ctx, op)
+			}
+		}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.cancels, op.RepositoryID)
+	for i := range s.ops {
+		if s.ops[i].ID == op.ID {
+			s.ops[i].Status = "complete"
+			if err != nil {
+				s.ops[i].Status = "failed"
+				s.ops[i].Error = safeError(err)
+				if errors.Is(err, context.Canceled) {
+					s.ops[i].Status = "canceled"
+				}
+			}
+			break
+		}
+	}
+	if i := s.repositoryIndexLocked(op.RepositoryID); i >= 0 && err != nil {
+		s.state.Repositories[i].Error = safeError(err)
+		// Cancellation leaves recoverable prepared data available.
+		if s.state.Repositories[i].State == "preparing" {
+			s.state.Repositories[i].State = "available"
+		}
+	}
+	if persistErr := s.persistLocked(); persistErr != nil {
+		s.message = "Could not save repository state: " + safeError(persistErr)
+	}
+}
+
+func (s *Service) download(ctx context.Context, op Operation) error {
+	s.setRepositoryState(op.RepositoryID, "preparing", "")
+	result, err := s.engine.DownloadCurrentTree(ctx, engineName(op.RepositoryID), func(progress daemon.DownloadProgress) {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		for i := range s.ops {
+			if s.ops[i].ID == op.ID {
+				s.ops[i].CompletedBlobs, s.ops[i].TotalBlobs = progress.CompletedBlobs, progress.TotalBlobs
+				s.ops[i].DownloadedBytes, s.ops[i].TotalBytes = progress.DownloadedBytes, progress.TotalBytes
+				s.ops[i].CurrentPath = progress.CurrentPath
+				break
+			}
+		}
+	})
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if i := s.repositoryIndexLocked(op.RepositoryID); i >= 0 {
+		s.state.Repositories[i].State = "pinned"
+		s.state.Repositories[i].Pinned = true
+		s.state.Repositories[i].DownloadedBytes = result.DownloadedBytes
+		s.pins[op.RepositoryID] = result.HeadOID
+	}
+	return s.persistLocked()
+}
+
+func (s *Service) freeRepository(ctx context.Context, id string) error {
+	s.lifecycle.Lock()
+	defer s.lifecycle.Unlock()
+	s.mu.Lock()
+	wasMounted := s.mounted != nil
+	repo, exists := s.repositoryLocked(id)
+	if !exists {
+		s.mu.Unlock()
+		return errors.New("repository is not in the catalogue")
+	}
+	// Persist unpin intent before releasing storage. A crash after the engine
+	// commits removal must not cause the pin worker to download it all again.
+	i := s.repositoryIndexLocked(id)
+	s.state.Repositories[i].Pinned = false
+	if err := s.persistLocked(); err != nil {
+		s.state.Repositories[i].Pinned = repo.Pinned
+		s.mu.Unlock()
+		return err
+	}
+	s.mu.Unlock()
+	// No filesystem callback can touch this repository while the safety check
+	// and storage removal run. If unmount is busy, refuse rather than force it.
+	if err := s.detachLocked(); err != nil {
+		s.mu.Lock()
+		if i := s.repositoryIndexLocked(id); i >= 0 {
+			s.state.Repositories[i].Pinned = repo.Pinned
+		}
+		_ = s.persistLocked()
+		s.mu.Unlock()
+		return err
+	}
+	configs, err := s.engine.ListRepos(ctx)
+	registered := false
+	for _, cfg := range configs {
+		if cfg.Name == engineName(id) {
+			registered = true
+			break
+		}
+	}
+	if err == nil && registered {
+		err = s.engine.FreeRepositorySpace(ctx, engineName(id))
+	}
+	if err == nil {
+		s.mu.Lock()
+		if i := s.repositoryIndexLocked(id); i >= 0 {
+			repo := &s.state.Repositories[i]
+			repo.State, repo.Pinned, repo.DownloadedBytes, repo.Error = "virtual", false, 0, ""
+			delete(s.pins, id)
+		}
+		persistErr := s.persistLocked()
+		s.mu.Unlock()
+		if persistErr != nil {
+			err = persistErr
+		}
+	} else {
+		s.mu.Lock()
+		if i := s.repositoryIndexLocked(id); i >= 0 {
+			s.state.Repositories[i].Pinned = repo.Pinned
+		}
+		err = errors.Join(err, s.persistLocked())
+		s.mu.Unlock()
+		recoveryCtx, recoveryCancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+		recoveryErr := s.engine.RecoverStorageTransactions(recoveryCtx)
+		recoveryCancel()
+		if recoveryErr != nil {
+			s.mu.Lock()
+			s.maintenance, s.recoveryRequired = true, true
+			s.message = "Restart RepoReach to recover retained repository data: " + safeError(recoveryErr)
+			s.mu.Unlock()
+			return errors.Join(err, recoveryErr)
+		}
+	}
+	if wasMounted {
+		if mountErr := s.mountLocked(s.ctx); mountErr != nil {
+			err = errors.Join(err, mountErr)
+		}
+	}
+	return err
+}
+
+func (s *Service) pinLoop() {
+	defer s.workers.Done()
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-s.ctx.Done():
+			return
+		case <-ticker.C:
+			s.mu.Lock()
+			var pinned []Repository
+			for _, repo := range s.state.Repositories {
+				if repo.Pinned {
+					pinned = append(pinned, repo)
+				}
+			}
+			s.mu.Unlock()
+			for _, repo := range pinned {
+				st, err := s.engine.Status(s.ctx, engineName(repo.ID))
+				s.mu.Lock()
+				knownHead := s.pins[repo.ID]
+				s.mu.Unlock()
+				if err == nil && st.CurrentHEADOID != "" && st.CurrentHEADOID == knownHead {
+					continue
+				}
+				_, _ = s.Action(repo.ID, "keep")
+			}
+		}
+	}
+}
+
+func (s *Service) lockRepo(ctx context.Context, id string) (func(), error) {
+	s.mu.Lock()
+	lock := s.locks[id]
+	if lock == nil {
+		lock = make(chan struct{}, 1)
+		lock <- struct{}{}
+		s.locks[id] = lock
+	}
+	s.mu.Unlock()
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-lock:
+		return func() { lock <- struct{}{} }, nil
+	}
+}
+
+func (s *Service) setRepositoryState(id, state, message string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if i := s.repositoryIndexLocked(id); i >= 0 {
+		s.state.Repositories[i].State, s.state.Repositories[i].Error = state, message
+		if err := s.persistLocked(); err != nil {
+			s.message = "Could not save repository state: " + safeError(err)
+		}
+	}
+}
+
+func (s *Service) repositoryIndexLocked(id string) int {
+	for i := range s.state.Repositories {
+		if s.state.Repositories[i].ID == id {
+			return i
+		}
+	}
+	return -1
+}
+
+func (s *Service) repositoryLocked(id string) (Repository, bool) {
+	if i := s.repositoryIndexLocked(id); i >= 0 {
+		return s.state.Repositories[i], true
+	}
+	return Repository{}, false
+}
+
+func (s *Service) entriesLocked() []catalogfs.Entry {
+	entries := make([]catalogfs.Entry, 0, len(s.state.Repositories))
+	for _, repo := range s.state.Repositories {
+		entries = append(entries, catalogfs.Entry{ID: repo.ID, Owner: repo.Owner, Name: repo.Name})
+	}
+	return entries
+}
+
+func (s *Service) persistLocked() error {
+	return writeState(filepath.Join(s.opts.StateDir, "catalogue.json"), s.state)
+}
+
+func engineName(id string) string {
+	hash := sha256.Sum256([]byte(strings.ToLower(id)))
+	return "repo-" + hex.EncodeToString(hash[:])
+}
+
+func safeError(err error) string {
+	if err == nil {
+		return ""
+	}
+	return auth.RedactLogString(err.Error())
+}
+
+func pathsOverlap(a, b string) bool {
+	physicalA, errA := resolveDirectoryPath(a)
+	physicalB, errB := resolveDirectoryPath(b)
+	if errA != nil || errB != nil {
+		// Failure to prove separation must not expose the private engine state.
+		return true
+	}
+	return pathsLexicallyOverlap(physicalA, physicalB)
+}
+
+func pathsLexicallyOverlap(a, b string) bool {
+	for _, pair := range [][2]string{{a, b}, {b, a}} {
+		rel, err := filepath.Rel(pair[0], pair[1])
+		if err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+			return true
+		}
+	}
+	return false
+}
+
+// resolveDirectoryPath resolves existing ancestors even when the chosen mount
+// folder has not been created. This is path resolution, not repository-key
+// normalization; repository keys always use model.CleanPath.
+func resolveDirectoryPath(path string) (string, error) {
+	parent := path
+	for {
+		resolved, err := filepath.EvalSymlinks(parent)
+		if err == nil {
+			rel, err := filepath.Rel(parent, path)
+			if err != nil {
+				return "", err
+			}
+			return filepath.Join(resolved, rel), nil
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			return "", err
+		}
+		next := filepath.Dir(parent)
+		if next == parent {
+			return "", err
+		}
+		parent = next
+	}
+}
+
+func safeMountDirectory(root string) error {
+	info, err := os.Lstat(root)
+	if errors.Is(err, os.ErrNotExist) {
+		return os.MkdirAll(root, 0o755)
+	}
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return errors.New("mount folder must be a real directory")
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return err
+	}
+	if len(entries) != 0 {
+		return errors.New("choose an empty folder so RepoReach does not hide existing files")
+	}
+	return nil
+}
+
+func platformDependencyReady() bool {
+	if runtime.GOOS == "darwin" {
+		info, err := os.Stat("/Library/Filesystems/macfuse.fs/Contents/Resources/mount_macfuse")
+		return err == nil && !info.IsDir() && info.Mode()&0o111 != 0
+	}
+	if runtime.GOOS == "linux" {
+		_, err := os.Stat("/dev/fuse")
+		return err == nil
+	}
+	return false
+}
+
+func shellQuote(value string) string { return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'" }
+
+func GitCredentialEnvironment(ghPath string) []string {
+	return []string{
+		"GIT_TERMINAL_PROMPT=0", "GH_TELEMETRY=false", "GIT_CONFIG_COUNT=2",
+		"GIT_CONFIG_KEY_0=credential.helper", "GIT_CONFIG_VALUE_0=",
+		"GIT_CONFIG_KEY_1=credential.https://github.com.helper",
+		"GIT_CONFIG_VALUE_1=" + githubCredentialHelper(ghPath),
+	}
+}
+
+func configureRepositoryAuth(ctx context.Context, gitDir, ghPath string) error {
+	// This configuration belongs only to RepoReach's private clone. Git commands
+	// launched by an editor can then use the same official Keychain-backed helper.
+	return gitConfig(ctx, gitDir, "credential.https://github.com.helper", githubCredentialHelper(ghPath))
+}
+
+func githubCredentialHelper(ghPath string) string {
+	// Editors and terminal Git commands do not inherit the service environment.
+	return "!GH_TELEMETRY=false " + shellQuote(ghPath) + " auth git-credential"
+}
+
+func configureGitWorktree(ctx context.Context, gitDir, path string) error {
+	return gitConfig(ctx, gitDir, "core.worktree", path)
+}
+
+func gitConfig(ctx context.Context, gitDir, key, value string) error {
+	cmd := exec.CommandContext(ctx, "git", "--git-dir", gitDir, "config", "--local", key, value)
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("configure repository Git integration: %w", err)
+	}
+	return nil
+}

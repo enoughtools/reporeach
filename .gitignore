@@ -27,6 +27,20 @@ Thumbs.db
 # Debug
 __debug_bin*
 *.prof
+*.log
+
+# RepoReach native, release, and website output
+/build/
+/dist/
+/native/*.xcodeproj/
+/native/**/*.xcuserstate
+/native/**/xcuserdata/
+/site/node_modules/
+/site/dist/
+/site/.astro/
+/site/public/releases/
+__pycache__/
+*.pyc
 
 # Environment / secrets
 .env

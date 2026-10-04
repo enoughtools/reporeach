@@ -93,6 +93,7 @@ func newMountedE2ERepo(t *testing.T) *mountedE2ERepo {
 		_ = svc.Close()
 		t.Fatal("FUSE mount did not appear within timeout")
 	}
+	primeMountedFilePolling(t, mountPath)
 
 	repo := &mountedE2ERepo{
 		root:      root,
@@ -174,6 +175,7 @@ func (r *mountedE2ERepo) restart(t *testing.T) {
 		_ = svc.Close()
 		t.Fatal("FUSE mount did not reappear after restart")
 	}
+	primeMountedFilePolling(t, r.mountPath)
 	r.svc = svc
 	r.cancel = cancel
 	r.errCh = errCh
@@ -470,7 +472,11 @@ func TestE2EGitMergeAndRebase(t *testing.T) {
 	if preRebaseHEAD == featureHEAD {
 		t.Fatal("feature branch did not advance before rebase")
 	}
-	gitCmd(t, repo.mountPath, "rebase", "main")
+	gitCmd(t, repo.mountPath,
+		"-c", "user.name=E2E Test",
+		"-c", "user.email=e2e@test",
+		"rebase", "main",
+	)
 	waitForHeadAndStatus(t, repo.mountPath, preRebaseHEAD, map[string]string{})
 	if rebasedHEAD := strings.TrimSpace(gitCmd(t, repo.mountPath, "rev-parse", "HEAD")); rebasedHEAD == preRebaseHEAD {
 		t.Fatal("rebase did not rewrite the feature commit")
