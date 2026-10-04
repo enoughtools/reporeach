@@ -296,7 +296,11 @@ func (g *GitHub) api(ctx context.Context, timeout time.Duration, limit int64, ar
 	stop := context.AfterFunc(g.life, cancel)
 	defer func() { stop(); cancel() }()
 	cmd := g.command(requestCtx, args...)
-	cmd.Stderr = io.Discard
+	// nil connects the child's diagnostics directly to os.DevNull. An
+	// io.Discard writer makes os/exec create a pipe and copying goroutine;
+	// children retaining that pipe keep Wait blocked until WaitDelay expires,
+	// even after the stdout decoder has been canceled.
+	cmd.Stderr = nil
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return errGitHubUnavailable

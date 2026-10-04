@@ -232,8 +232,9 @@ func TestGitHubCanceledRequest(t *testing.T) {
 }
 
 func TestGitHubCanceledReadWithInheritedStdout(t *testing.T) {
-	// Closing only gh's parent leaves stdout open in its child. The decoder
-	// must still wake immediately when the caller's deadline expires.
+	// Killing gh's parent leaves stdout and stderr open in its children. Both
+	// decoding and subprocess Wait must finish promptly on cancellation; an
+	// os/exec stderr-copy pipe can otherwise add the complete WaitDelay.
 	client := fakeGitHub(t, `sleep 3 >&2 2>/dev/null &
 sleep 3 &
 wait`)

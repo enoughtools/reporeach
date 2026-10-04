@@ -19,6 +19,7 @@ This record describes the checks performed for RepoReach 0.1.0-beta.1 on October
 | Mounted stress | Twenty catalogue repetitions and twenty concurrent directory-rename repetitions pass. Each rename iteration completes 40 moves with concurrent reads and Git status, preserving content and inode identity. |
 | Native builds and tests | Apple Silicon and Intel compile; all 11 native XCTest cases pass. |
 | Swift and Go integration | The real local service and Swift client pass status, duplicate-start refusal, fixture device authorization, discovery, folder migration, operation/error decoding, missing-driver handling, and shutdown cleanup. |
+| Linux process cancellation | Ten inherited-output regression repetitions finish in 30–40 ms without changing their timeout assertions; the full Linux desktop race suite passes. Child diagnostics connect directly to the null device so orphaned processes cannot retain an internal stderr-copy pipe. |
 | Background lifecycle | An isolated live native app keeps its service responding after the window closes, restores the window on reopening, and cleans up its owned service/socket after explicit Quit. |
 | Website | Locked build, formatting check, desktop/mobile visual inspection, and interactive demo controls. |
 | Engine vulnerability scan | `govulncheck` 1.8.0 on Go 1.26.8 reports no known vulnerabilities in the engine source's reachable code. |
