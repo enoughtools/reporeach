@@ -9,7 +9,7 @@ Use Go 1.26.8, full Xcode 16 or later and its command-line tools, Python 3, and 
 Check out a specific source revision and record your Xcode, macOS, Go, and XcodeGen versions. Keep the checkout clean when creating a release. For development packages:
 
 ```sh
-release_version=0.1.0-beta.2
+release_version=0.1.0-beta.3
 scripts/build-macos.sh --arch arm64 --version "$release_version" --unsigned
 scripts/build-macos.sh --arch x86_64 --version "$release_version" --unsigned
 python3 scripts/release-manifest.py manifest \
@@ -33,10 +33,10 @@ The scripts make source builds repeatable by using committed Go dependency check
 Use a Developer ID Application identity already available in your Keychain. Pass its name or hash, not a private key or password:
 
 ```sh
-release_version=0.1.0-beta.2
+release_version=0.1.0-beta.3
 export REPOREACH_SIGN_IDENTITY='Developer ID Application: Your Organization (TEAMID)'
 export REPOREACH_NOTARY_PROFILE='reporeach-notary'
-export REPOREACH_BUILD_NUMBER=2
+export REPOREACH_BUILD_NUMBER=3
 scripts/build-macos.sh --arch arm64 --version "$release_version" --notarize
 scripts/build-macos.sh --arch x86_64 --version "$release_version" --notarize
 python3 scripts/release-manifest.py manifest \
@@ -54,7 +54,7 @@ The manifest records source repository/revision, dirty-checkout status, artifact
 To stage verified downloads for the website:
 
 ```sh
-release_version=0.1.0-beta.2
+release_version=0.1.0-beta.3
 python3 scripts/release-manifest.py stage \
   --directory "dist/releases/$release_version" --version "$release_version"
 npm ci --prefix site

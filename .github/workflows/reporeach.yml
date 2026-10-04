@@ -10,7 +10,7 @@ on:
       version:
         description: Release version
         required: true
-        default: 0.1.0-beta.2
+        default: 0.1.0-beta.3
       publish:
         description: Publish a GitHub release after checks pass
         type: boolean
@@ -34,7 +34,7 @@ jobs:
       - run: go build ./cmd/artifact-fs
       - run: go vet ./...
       - run: go test ./...
-      - run: go test -race ./internal/gitstore ./internal/daemon ./internal/fusefs ./internal/overlay ./internal/catalogfs ./internal/desktop
+      - run: go test -race ./internal/gitstore ./internal/hydrator ./internal/daemon ./internal/fusefs ./internal/overlay ./internal/catalogfs ./internal/desktop
 
   filesystem:
     runs-on: ubuntu-24.04
@@ -77,7 +77,7 @@ jobs:
       matrix:
         architecture: [arm64, x86_64]
     env:
-      REPOREACH_BUILD_NUMBER: "2"
+      REPOREACH_BUILD_NUMBER: "3"
       MACOS_DEVELOPER_ID_CERTIFICATE: ${{ secrets.MACOS_DEVELOPER_ID_CERTIFICATE }}
       MACOS_DEVELOPER_ID_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_DEVELOPER_ID_CERTIFICATE_PASSWORD }}
       APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
@@ -93,7 +93,7 @@ jobs:
         env:
           INPUT_VERSION: ${{ inputs.version }}
         run: |
-          version="${INPUT_VERSION:-0.1.0-beta.2}"
+          version="${INPUT_VERSION:-0.1.0-beta.3}"
           if [[ "$GITHUB_REF" == refs/tags/reporeach-v* ]]; then version="${GITHUB_REF#refs/tags/reporeach-v}"; fi
           case "$version" in *[!A-Za-z0-9.+-]*|"") exit 2 ;; esac
           echo "version=$version" >> "$GITHUB_OUTPUT"

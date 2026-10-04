@@ -2,7 +2,7 @@
 
 This record describes the checks performed for RepoReach 0.1.0-beta.1 on October 4, 2026. It distinguishes source, integration, and packaging checks from installation acceptance. The release manifest records the exact source revision, toolchains, artifact hashes, and signing status.
 
-The beta.1 checks below are historical. Manual source adoption and repository/owner visibility controls are covered separately in the [beta.2 source validation](#beta2-source-validation) appended below.
+The beta.1 checks below are historical. Manual source adoption and repository/owner visibility controls are covered separately in the historical [beta.2 source validation](#beta2-source-validation). The [beta.3 record](#beta3-corrective-release-validation) covers the subsequent hydrator correction and its source validation.
 
 ## Development environment
 
@@ -69,3 +69,21 @@ Release completion still requires packaging verification against the frozen sour
 The signed-out integration uses local Git fixtures. It does not establish real HTTPS/SSH credential acceptance against a private server, real GitHub OAuth, or first private-repository acquisition. No macFUSE driver or host security-policy change was made. A real macOS mount, installed Finder extension behavior, clean-Mac Gatekeeper launch, and runtime coverage across supported macOS versions/architectures remain unverified, as listed above.
 
 Beta.2 is intended to be Developer ID signed and unnotarized. Final artifact hashes, source revision, signatures, and notarization flags must be checked in its release manifest; source tests and native compilation do not establish those packaging facts.
+
+## Beta.3 corrective release validation
+
+`0.1.0-beta.3`, build 3, is planned from a new frozen source revision. Beta.2's source, tag, and release artifacts remain immutable. The successful beta.2 checks above are historical results; they are not rewritten as failures or reused as evidence for the new source.
+
+A repeated tag-triggered CI run on the beta.2 source exposed a pre-existing race in hydrator verification deduplication. Main-branch CI had passed on that same source revision. Focused repetitions reproduced the failure 24 times in 1,000 runs before the correction.
+
+The race occurs when one reader observes that a cached blob has not yet been verified, another reader completes its verification flight, and the first reader then enters `verifyBlobOnce` without an atomic recheck of the verified state. This can cause duplicate local verification. The observed defect does not bypass the blob's integrity check. The correction rechecks verified state under the verification mutex before starting another flight and adds a deterministic regression for the interleaving.
+
+| Check | Status for the new beta.3 source |
+| --- | --- |
+| Hydrator correction and deterministic regression | The regression fails before the correction and passes after it. The original concurrent test and deterministic regression both pass with `-count=10000` in 7.091 seconds. Cancellation, stopped-service, and replacement-file identity checks are preserved; the regression uses a simulated verifier and is deduplication coverage rather than a new cryptographic-integrity test. Independent review of the correction is clean. |
+| Final engine build, vet, and package tests | Pass in required order on the new source: `go build ./cmd/artifact-fs`, `go vet ./...`, and `go test ./...`, using Go 1.26.8 and Git 2.53.0. |
+| Race detection | Both verification regressions pass with `-race -count=1000` on macOS in 2.678 seconds and pinned Linux in 1.409 seconds. The complete hydrator package race suite passes in 1.214 seconds. |
+| Actual Linux FUSE suite | In the disposable pinned Go 1.26.8 environment with a real `/dev/fuse`, the mount smoke passes in 0.862 seconds. All 26 functional end-to-end tests and 33 filesystem/Git subtests pass in 37.648 seconds; the benchmark is skipped. The external-service manual adoption/visibility case passes in 1.42 seconds. These are Linux runtime results. |
+| Rebuilt packages and provenance | Pending for build 3 against the new frozen source revision, including both architecture artifacts, signatures, hashes, and manifest flags. |
+
+The macOS mount, installed Finder extension, real credential authorization, and clean-Mac acceptance limits above remain in force. This corrective release does not add a new product feature or establish those runtime checks.

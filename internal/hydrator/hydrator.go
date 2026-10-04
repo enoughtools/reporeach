@@ -414,6 +414,15 @@ func (s *Service) verifyBlobOnce(ctx context.Context, key string, file os.FileIn
 		s.mu.Unlock()
 		return false, ErrStopped
 	}
+	// A verification can finish after the caller's cache check but before it
+	// enrolls here. Recheck while holding the same lock used to publish results.
+	if previous, ok := s.verified[key]; ok && sameFileInfo(previous, file) {
+		s.mu.Unlock()
+		if err := ctx.Err(); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
 	ch := make(chan verifyResult, 1)
 	first := s.verifying.add(key, ch)
 	if first {

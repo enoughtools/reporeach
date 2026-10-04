@@ -10,10 +10,10 @@ mechanism without replacing the host's Go installation.
 From the repository root:
 
 ```sh
-scripts/build-macos.sh --arch arm64 --version 0.1.0-beta.2 --unsigned
-scripts/build-macos.sh --arch x86_64 --version 0.1.0-beta.2 --unsigned
+scripts/build-macos.sh --arch arm64 --version 0.1.0-beta.3 --unsigned
+scripts/build-macos.sh --arch x86_64 --version 0.1.0-beta.3 --unsigned
 python3 scripts/release-manifest.py stage \
-  --directory dist/releases/0.1.0-beta.2 --version 0.1.0-beta.2
+  --directory dist/releases/0.1.0-beta.3 --version 0.1.0-beta.3
 npm ci --prefix site
 npm run build --prefix site
 npx --yes wrangler@4.147.0 deploy --config wrangler.jsonc
@@ -30,7 +30,7 @@ release metadata, including for development builds.
 The manifest also records each architecture's Go, Xcode, and XcodeGen versions.
 Signed archives include Apple signing timestamps, so repeated builds reproduce
 the packaging process rather than identical archive bytes.
-Beta 2 defaults to app and Finder extension build number `2`. Set
+Beta 3 defaults to app and Finder extension build number `3`. Set
 `REPOREACH_BUILD_NUMBER` when packaging a later release.
 ArtifactFS and GitHub CLI dependency notices are bundled. The GitHub CLI
 collector reads the official binary's Go build metadata, downloads those exact

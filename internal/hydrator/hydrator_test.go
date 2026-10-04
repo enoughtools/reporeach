@@ -241,6 +241,81 @@ func TestEnsureHydratedJoinsActiveFetch(t *testing.T) {
 	}
 }
 
+func TestVerifyBlobOnceReusesVerificationCompletedBeforeEnrollment(t *testing.T) {
+	t.Parallel()
+	cfg := model.RepoConfig{ID: "repo", BlobCacheDir: t.TempDir()}
+	node := model.BaseNode{RepoID: cfg.ID, ObjectOID: "blob", SizeState: "unknown"}
+	cachePath := filepath.Join(cfg.BlobCacheDir, node.ObjectOID)
+	if err := os.WriteFile(cachePath, []byte("content"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fetcher := &fakeBlobFetcher{verifyOK: true}
+	h := New(fetcher)
+	defer h.Stop()
+	key := taskKey(cfg.ID, node.ObjectOID)
+	file, err := os.Stat(cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The delayed reader has checked the cache, but has not enrolled in a
+	// verification yet. Another reader completes that verification first.
+	if h.isVerified(key, file) {
+		t.Fatal("new cache file was already verified")
+	}
+	if _, _, err := h.EnsureHydrated(context.Background(), cfg, node); err != nil {
+		t.Fatal(err)
+	}
+	verify := func(ctx context.Context) (bool, error) {
+		return fetcher.VerifyBlob(ctx, cfg, node.ObjectOID, cachePath)
+	}
+	if ok, err := h.verifyBlobOnce(context.Background(), key, file, cachePath, verify); err != nil || !ok {
+		t.Fatalf("delayed verification = (%t, %v), want (true, nil)", ok, err)
+	}
+	if got := fetcher.VerifyCalls(); got != 1 {
+		t.Fatalf("verify calls = %d, want 1", got)
+	}
+
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := h.verifyBlobOnce(canceled, key, file, cachePath, verify); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled verification err = %v, want context.Canceled", err)
+	}
+	if got := fetcher.VerifyCalls(); got != 1 {
+		t.Fatalf("verify calls after cancellation = %d, want 1", got)
+	}
+
+	// A different inode must still be verified, even when size and mtime match.
+	replacement := filepath.Join(cfg.BlobCacheDir, "replacement")
+	if err := os.WriteFile(replacement, []byte("changed"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(replacement, file.ModTime(), file.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(replacement, cachePath); err != nil {
+		t.Fatal(err)
+	}
+	replacedFile, err := os.Stat(cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replacedFile.Size() != file.Size() || !replacedFile.ModTime().Equal(file.ModTime()) || os.SameFile(file, replacedFile) {
+		t.Fatal("fixture must replace the inode while preserving size and mtime")
+	}
+	if ok, err := h.verifyBlobOnce(context.Background(), key, replacedFile, cachePath, verify); err != nil || !ok {
+		t.Fatalf("replacement verification = (%t, %v), want (true, nil)", ok, err)
+	}
+	if got := fetcher.VerifyCalls(); got != 2 {
+		t.Fatalf("verify calls after replacement = %d, want 2", got)
+	}
+
+	h.Stop()
+	if _, err := h.verifyBlobOnce(context.Background(), key, replacedFile, cachePath, verify); !errors.Is(err, ErrStopped) {
+		t.Fatalf("verification after Stop err = %v, want ErrStopped", err)
+	}
+}
+
 func TestEnqueueDedupesAndUpgradesPriority(t *testing.T) {
 	t.Parallel()
 	h := New(&fakeBlobFetcher{})
