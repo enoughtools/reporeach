@@ -5,6 +5,8 @@ Module downloads run outside the application module with checksum-database
 verification enabled. Every source ZIP is also independently hashed using Go's
 h1 algorithm and checked against the binary's build information before copying.
 No root go.mod/go.sum or application compiler settings are changed.
+Notice bytes are unchanged, but every copied resource ends in .txt so notices
+whose upstream names end in .go cannot become buildable application packages.
 """
 
 import argparse
@@ -22,6 +24,36 @@ import zipfile
 
 
 NOTICE_NAME = re.compile(r"^(?:licen[cs]e|notice|copying|copyright)(?:$|[._ -])", re.I)
+VERIFICATION = "Go checksum database plus independent module ZIP h1 verification"
+
+
+def resource_path(source_path):
+    """Keep the source path reversible while making every notice inert."""
+    return source_path.with_name(source_path.name + ".txt")
+
+
+def publish_notices(staging, destination):
+    """Replace only output owned by this collector, including stale .go files."""
+    owned_names = ("modules", "go-standard-library", "dependencies.json")
+    existing = [destination / name for name in owned_names
+                if (destination / name).exists() or (destination / name).is_symlink()]
+    if existing:
+        manifest_path = destination / "dependencies.json"
+        if not manifest_path.is_file() or manifest_path.is_symlink():
+            raise RuntimeError(f"Refusing to replace unrecognized notice output in {destination}.")
+        previous = json.loads(manifest_path.read_text())
+        if (previous.get("verification") != VERIFICATION
+                or previous.get("checksum_database") != "sum.golang.org"
+                or not isinstance(previous.get("modules"), list)
+                or not isinstance(previous.get("go_standard_library"), list)):
+            raise RuntimeError(f"Refusing to replace unrecognized notice output in {destination}.")
+    destination.mkdir(parents=True, exist_ok=True)
+    for target in existing:
+        if target.is_dir() and not target.is_symlink():
+            shutil.rmtree(target)
+        else:
+            target.unlink()
+    shutil.copytree(staging, destination, dirs_exist_ok=True)
 
 
 def run_go(arguments, cwd, environment):
@@ -92,11 +124,12 @@ def audit_module(module, staging, cwd, environment):
                 raise RuntimeError(f"Unsafe source ZIP path: {name}")
             if name.endswith("/") or not NOTICE_NAME.match(relative.name):
                 continue
-            target = staging / module_folder / relative
+            bundled = resource_path(relative)
+            target = staging / module_folder / bundled
             target.parent.mkdir(parents=True, exist_ok=True)
             with archive.open(name) as source, target.open("wb") as destination:
                 shutil.copyfileobj(source, destination)
-            notices.append({"path": str(relative),
+            notices.append({"source_path": str(relative), "path": str(bundled),
                             "sha256": hashlib.sha256(target.read_bytes()).hexdigest()})
     if not notices:
         raise RuntimeError(f"No license/notice/copying/copyright file found: {identifier}; review before distribution.")
@@ -106,7 +139,8 @@ def audit_module(module, staging, cwd, environment):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binary", required=True, type=pathlib.Path)
-    parser.add_argument("--destination", required=True, type=pathlib.Path)
+    parser.add_argument("--destination", required=True, type=pathlib.Path,
+                        help="Dedicated notice directory; existing collector output is replaced")
     arguments = parser.parse_args()
     binary = arguments.binary.resolve(strict=True)
     destination = arguments.destination.resolve()
@@ -143,21 +177,22 @@ def main():
             if not source.is_file():
                 raise RuntimeError(f"Missing Go standard-library license: {source}")
             relative = source.relative_to(go_root)
-            target = staging / "go-standard-library" / relative
+            bundled = resource_path(relative)
+            target = staging / "go-standard-library" / bundled
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(source, target)
-            standard_library.append({"path": str(relative),
+            standard_library.append({"source_path": str(relative), "path": str(bundled),
                                      "sha256": hashlib.sha256(target.read_bytes()).hexdigest()})
         manifest = {"binary_sha256": hashlib.sha256(binary.read_bytes()).hexdigest(),
                     "binary_hash_scope": "Official input executable before RepoReach code signing",
                     "toolchain": toolchain, "checksum_database": "sum.golang.org",
-                    "verification": "Go checksum database plus independent module ZIP h1 verification",
+                    "verification": VERIFICATION,
+                    "notice_resource_format": "Exact upstream bytes with .txt suffix; source_path retains original relative path",
                     "dependency_count": sum(not item["main"] for item in index),
                     "modules": sorted(index, key=lambda item: item["module"]),
                     "go_standard_library": standard_library}
         (staging / "dependencies.json").write_text(json.dumps(manifest, indent=2) + "\n")
-        destination.mkdir(parents=True, exist_ok=True)
-        shutil.copytree(staging, destination, dirs_exist_ok=True)
+        publish_notices(staging, destination)
         print(f"Preserved {len(index)} module notice sets ({manifest['dependency_count']} dependencies) "
               f"and {toolchain} standard-library notices in {destination}")
 

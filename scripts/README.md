@@ -34,8 +34,10 @@ ArtifactFS and GitHub CLI dependency notices are bundled. The GitHub CLI
 collector reads the official binary's Go build metadata, downloads those exact
 module versions, verifies their source hashes against both the binary metadata
 and Go's checksum database, and retains license and notice files. It also
-includes the corresponding Go standard library notices. This audits Go module
-notices; operating-system libraries are supplied by macOS and are not bundled.
+includes the corresponding Go standard library notices. Notice copies use
+inert text filenames and retain their original source paths in the manifest.
+This audits Go module notices; operating-system libraries are supplied by macOS
+and are not bundled.
 
 For Developer ID signing, pass `--sign-identity` with an identity already in the
 Keychain, or set `REPOREACH_SIGN_IDENTITY`. Nested helpers and the Finder extension

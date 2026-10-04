@@ -127,6 +127,14 @@ jobs:
             options+=(--notarize)
           fi
           scripts/build-macos.sh "${options[@]}"
+          python3 - <<'PY'
+          import os, pathlib
+          notices = pathlib.Path("build/package") / os.environ["ARCHITECTURE"] / "RepoReach.app/Contents/Resources/Licenses"
+          source_files = list(notices.rglob("*.go"))
+          if source_files:
+              raise SystemExit(f"Bundled notices must be inert text resources: {source_files}")
+          PY
+          go list ./... >/dev/null
           python3 scripts/release-manifest.py manifest --directory "dist/releases/$VERSION" --version "$VERSION"
       - name: Native unit tests
         run: |
