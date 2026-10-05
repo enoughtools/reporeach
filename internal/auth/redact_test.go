@@ -3,6 +3,7 @@ package auth
 import (
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func TestRedactRemoteURL(t *testing.T) {
@@ -314,6 +315,135 @@ func TestRedactRemoteURL(t *testing.T) {
 	if containsAny(out, []string{"alice", "ghp_secret"}) {
 		t.Fatalf("scheme-less delimiter-split userinfo leaked in output: %s", out)
 	}
+}
+
+func TestRedactStringRemoteAfterDiagnosticSeparator(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{
+			name:  "OS diagnostic token shape",
+			input: "label,http://example.invalid/path",
+			want:  "label,http://example.invalid/path",
+		},
+		{
+			name:  "comma before authenticated URL",
+			input: "diagnostic: (field,remote=https://fixture-user:fixture-secret@example.test/repo.git) failed",
+			want:  "diagnostic: (field,remote=https://REDACTED@example.test/repo.git) failed",
+		},
+		{
+			name:  "semicolon before authenticated URL",
+			input: "diagnostic: [field;ssh://fixture-user:fixture-secret@example.test/repo.git] failed",
+			want:  "diagnostic: [field;ssh://REDACTED@example.test/repo.git] failed",
+		},
+		{
+			name:  "multiple diagnostic fields",
+			input: "diagnostic: field,other;https://fixture-user:fixture-secret@example.test/repo.git failed",
+			want:  "diagnostic: field,other;https://REDACTED@example.test/repo.git failed",
+		},
+		{
+			name:  "separator immediately before scheme",
+			input: "diagnostic: ,https://fixture-user:fixture-secret@example.test/repo.git failed",
+			want:  "diagnostic: ,https://REDACTED@example.test/repo.git failed",
+		},
+		{
+			name:  "missing slash after diagnostic field",
+			input: "diagnostic: field,https:/fixture-user:fixture-secret@example.test/repo.git failed",
+			want:  "diagnostic: field,REDACTED@example.test/repo.git failed",
+		},
+		{
+			name:  "SCP remote with sensitive query",
+			input: "diagnostic: field,git@example.test:repo.git?sig=fixture-secret failed",
+			want:  "diagnostic: field,git@example.test:repo.git?REDACTED failed",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := RedactString(tt.input); got != tt.want {
+				t.Fatalf("RedactString() = %q, want %q", got, tt.want)
+			}
+			if got := RedactLogString(tt.input); strings.Contains(got, "fixture-user") || strings.Contains(got, "fixture-secret") {
+				t.Fatalf("RedactLogString() retained synthetic credentials: %q", got)
+			}
+		})
+	}
+}
+
+func TestRedactorsPreserveOriginalByteOffsets(t *testing.T) {
+	const remote = "https://fixture-user:fixture-secret@example.test/repo.git"
+	const redacted = "https://REDACTED@example.test/repo.git"
+	for _, prefix := range []string{
+		strings.Repeat("Ⱥ", 64), // Lowercasing expands each rune from two bytes to three.
+		"K",                     // Lowercasing contracts this rune from three bytes to one.
+		"İ",                     // Lowercasing contracts this rune from two bytes to one.
+		" \t\u2003",             // Authority offsets must include leading whitespace.
+		"\xff",                  // Diagnostics may contain invalid UTF-8 bytes.
+	} {
+		t.Run(prefix, func(t *testing.T) {
+			input := prefix + remote
+			want := prefix + redacted
+			for name, redact := range map[string]func(string) string{
+				"remote": RedactRemoteURL,
+				"string": RedactString,
+			} {
+				if got := redact(input); got != want {
+					t.Fatalf("%s redactor = %q, want %q", name, got, want)
+				}
+			}
+			if got := RedactLogString(input); got != prefix+"REDACTED_REMOTE" {
+				t.Fatalf("log redactor = %q, want complete remote redaction", got)
+			}
+		})
+	}
+}
+
+func TestRedactorsPreserveUnicodePathBoundaries(t *testing.T) {
+	for _, tt := range []struct {
+		path string
+		want string
+	}{
+		{path: "ré", want: "r%C3%A9"},
+		{path: "r猫", want: "r%E7%8C%AB"},
+	} {
+		t.Run(tt.path, func(t *testing.T) {
+			input := "fatal: 'https://fixture-user:fixture-secret@example.test/" + tt.path + "' failed"
+			want := "fatal: 'https://REDACTED@example.test/" + tt.want + "' failed"
+			if got := RedactString(input); got != want || !utf8.ValidString(got) {
+				t.Fatalf("string redactor = %q, want %q with valid UTF-8", got, want)
+			}
+			if got := RedactLogString(input); got != "fatal: 'REDACTED_REMOTE' failed" || !utf8.ValidString(got) {
+				t.Fatalf("log redactor = %q, want complete remote redaction with valid UTF-8", got)
+			}
+		})
+	}
+}
+
+func FuzzRedactorsKeepValidStringBoundaries(f *testing.F) {
+	for _, seed := range []string{
+		"label,http://example.invalid/path",
+		"field;https://fixture-user:fixture-secret@example.test/repo.git",
+		strings.Repeat("Ⱥ", 64) + "https://fixture-user:fixture-secret@example.test/repo.git",
+		"Khttps://fixture-user:fixture-secret@example.test/ré",
+		"fatal: 'https://fixture-user:fixture-secret@example.test/r猫' failed",
+		"https:/user:pa,https://ss@example.test/repo.git",
+		"git@example.test:repo.git?sig=fixture-secret",
+	} {
+		f.Add(seed)
+	}
+	f.Fuzz(func(t *testing.T, input string) {
+		for name, redact := range map[string]func(string) string{
+			"remote": RedactRemoteURL,
+			"string": RedactString,
+			"log":    func(s string) string { return RedactLogString(s) },
+		} {
+			got := redact(input)
+			if utf8.ValidString(input) && !utf8.ValidString(got) {
+				t.Fatalf("%s redactor produced invalid UTF-8 for a valid input", name)
+			}
+		}
+	})
 }
 
 func TestHasInlineCredentials(t *testing.T) {

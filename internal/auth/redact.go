@@ -6,6 +6,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"unicode"
 )
 
 var tokenLike = regexp.MustCompile(`(?i)(access_token|token|password|passwd|secret|key|authorization|x-token-auth)=([^&\s]+)`)
@@ -115,16 +116,18 @@ func HasInlineCredentials(raw string) bool {
 }
 
 func malformedAuthorityStart(raw string) int {
-	lower := strings.ToLower(strings.TrimSpace(raw))
+	trimmed := strings.TrimSpace(raw)
+	leadingBytes := len(raw) - len(strings.TrimLeftFunc(raw, unicode.IsSpace))
+	lower := lowercaseASCII(trimmed)
 	if i := strings.Index(lower, "://"); i >= 0 {
-		return i + len("://")
+		return leadingBytes + i + len("://")
 	}
-	if schemeLessUserinfoStart(raw) >= 0 {
-		return 0
+	if schemeLessUserinfoStart(trimmed) >= 0 {
+		return leadingBytes
 	}
 	for _, prefix := range []string{"https://", "http://", "ssh://", "git://", "https:/", "http:/", "ssh:/", "git:/", "https//", "http//", "ssh//", "git//", "https:", "http:", "ssh:", "git:"} {
 		if strings.HasPrefix(lower, prefix) {
-			return len(prefix)
+			return leadingBytes + len(prefix)
 		}
 	}
 	return -1
@@ -364,15 +367,15 @@ func RedactLogString(s string, sensitiveValues ...string) string {
 			start := strings.IndexFunc(token, func(r rune) bool {
 				return !strings.ContainsRune("'\"([{<", r)
 			})
-			end := strings.LastIndexFunc(token, func(r rune) bool {
-				return !strings.ContainsRune("'\")]}>,.:", r)
-			})
-			if start < 0 || end < start {
+			end := len(strings.TrimRightFunc(token, func(r rune) bool {
+				return strings.ContainsRune("'\")]}>,.:", r)
+			}))
+			if start < 0 || end <= start {
 				continue
 			}
-			core := token[start : end+1]
+			core := token[start:end]
 			remoteStart := remoteStartIndex(core)
-			parts[i] = token[:start] + core[:remoteStart] + "REDACTED_REMOTE" + token[end+1:]
+			parts[i] = token[:start] + core[:remoteStart] + "REDACTED_REMOTE" + token[end:]
 		}
 		s = strings.Join(parts, " ")
 	}
@@ -408,14 +411,14 @@ func redactRemoteToken(token string) string {
 	if start < 0 {
 		return token
 	}
-	end := strings.LastIndexFunc(token, func(r rune) bool {
-		return !strings.ContainsRune("'\")]}>,.:", r)
-	})
-	if end < start {
+	end := len(strings.TrimRightFunc(token, func(r rune) bool {
+		return strings.ContainsRune("'\")]}>,.:", r)
+	}))
+	if end <= start {
 		return token
 	}
-	core := token[start : end+1]
-	return token[:start] + redactRemoteCore(core) + token[end+1:]
+	core := token[start:end]
+	return token[:start] + redactRemoteCore(core) + token[end:]
 }
 
 func redactRemoteCore(core string) string {
@@ -443,7 +446,8 @@ func separatorInsideUserinfo(core string, sep int) bool {
 	if strings.Contains(core[remoteStart:sep], "@") {
 		return false
 	}
-	authorityStart := authorityStartInCore(core, remoteStart)
+	// An authority beginning after the separator belongs to the next token.
+	authorityStart := authorityStartInCore(core[:sep], remoteStart)
 	if authorityStart < 0 {
 		return false
 	}
@@ -477,7 +481,7 @@ func completeURLBeforeSeparator(raw string) bool {
 }
 
 func authorityStartInCore(core string, remoteStart int) int {
-	rest := strings.ToLower(core[remoteStart:])
+	rest := core[remoteStart:]
 	for _, marker := range []string{"://", ":/", "//", ":"} {
 		if i := strings.Index(rest, marker); i >= 0 {
 			return remoteStart + i + len(marker)
@@ -528,10 +532,26 @@ func redactSingleRemoteCore(core string) string {
 	return core[:remoteStart] + RedactRemoteURL(core[remoteStart:])
 }
 
+// lowercaseASCII preserves byte offsets used to slice the original string.
+// URL scheme markers are ASCII; Unicode case folding can change byte lengths.
+func lowercaseASCII(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c >= 'A' && c <= 'Z' {
+			c += 'a' - 'A'
+		}
+		b.WriteByte(c)
+	}
+	return b.String()
+}
+
 func remoteStartIndex(s string) int {
+	lower := lowercaseASCII(s)
 	best := -1
 	for _, marker := range []string{"https://", "http://", "ssh://", "git://", "https:/", "http:/", "ssh:/", "git:/", "https//", "http//", "ssh//", "git//", "https:", "http:", "ssh:", "git:"} {
-		if i := strings.Index(strings.ToLower(s), marker); i >= 0 && (best < 0 || i < best) {
+		if i := strings.Index(lower, marker); i >= 0 && (best < 0 || i < best) {
 			best = i
 		}
 	}
