@@ -245,8 +245,11 @@ func mountSourceMatches(source, expected string) bool {
 		return true
 	}
 	resource, err := url.Parse(source)
+	// Parse discards an empty fragment and records an empty query in ForceQuery.
+	// Encoded '#' and '?' characters still belong to the resource's exact path.
 	return err == nil && resource.Scheme == "file" && (resource.Host == "" || resource.Host == "localhost") &&
-		resource.User == nil && resource.RawQuery == "" && resource.Fragment == "" && resource.Opaque == "" && resource.Path == expected
+		resource.User == nil && !resource.ForceQuery && resource.RawQuery == "" && !strings.Contains(source, "#") &&
+		resource.Opaque == "" && resource.Path == expected
 }
 
 type nativeFSKitMount struct {

@@ -36,6 +36,7 @@ jobs:
         with:
           go-version: 1.26.8
       - run: python3 scripts/test-fskit-packaging.py
+      - run: python3 scripts/test-local-fskit-signing.py
       - run: go build ./cmd/artifact-fs
       - run: go vet ./...
       - run: go test ./...

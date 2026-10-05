@@ -130,17 +130,89 @@ func TestNativeFSKitOSAvailability(t *testing.T) {
 }
 
 func TestNativeFSKitSourceIdentity(t *testing.T) {
-	path := "/Users/example/Library/Application Support/RepoReach/FSKit"
+	path := "/Users/example/Library/Application Support/RepoReach #1?check/FSKit"
 	fileURL := (&url.URL{Scheme: "file", Path: path}).String()
-	for _, source := range []string{path, fileURL, "file://localhost" + strings.TrimPrefix(fileURL, "file://")} {
-		if !mountSourceMatches(source, path) {
-			t.Errorf("rejected source %q", source)
-		}
+	for _, test := range []struct {
+		name, source string
+		want         bool
+	}{
+		{"exact path", path, true},
+		{"encoded file URL", fileURL, true},
+		{"localhost URL", "file://localhost" + strings.TrimPrefix(fileURL, "file://"), true},
+		{"different path", path + "-other", false},
+		{"different URL path", fileURL + "-other", false},
+		{"trailing slash", fileURL + "/", false},
+		{"query", fileURL + "?token=x", false},
+		{"empty query", fileURL + "?", false},
+		{"fragment", fileURL + "#fragment", false},
+		{"empty fragment", fileURL + "#", false},
+		{"empty query and fragment", fileURL + "?#", false},
+		{"userinfo", "file://user@localhost" + strings.TrimPrefix(fileURL, "file://"), false},
+		{"remote host", "file://other" + strings.TrimPrefix(fileURL, "file://"), false},
+		{"localhost port", "file://localhost:123" + strings.TrimPrefix(fileURL, "file://"), false},
+		{"different scheme", "https://example" + strings.TrimPrefix(fileURL, "file://"), false},
+		{"opaque file URL", "file:opaque", false},
+		{"malformed escape", fileURL + "%zz", false},
+		{"prefix substring", "unrelated " + fileURL, false},
+		{"unverified FSKit source decoration", "RepoReach -- " + fileURL, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := mountSourceMatches(test.source, path); got != test.want {
+				t.Fatalf("source %q matched=%v, want %v", test.source, got, test.want)
+			}
+		})
 	}
-	for _, source := range []string{path + "-other", fileURL + "?token=x", fileURL + "#fragment", "file://other" + path, "https://example" + path, "file:opaque"} {
-		if mountSourceMatches(source, path) {
-			t.Errorf("accepted different source %q", source)
+}
+
+func TestNativeFSKitURLSourceOwnsNormalLifecycle(t *testing.T) {
+	f := newFakeFSKitMount(t)
+	f.service.opts.StateDir = filepath.Join(f.service.opts.StateDir, "RepoReach #1?check")
+	f.command = func(_ context.Context, program string, _ ...string) error {
+		if program == "/sbin/mount" {
+			identity := f.ownIdentity()
+			identity.source = (&url.URL{Scheme: "file", Path: identity.source}).String()
+			f.setMounts(identity)
+		} else {
+			f.setMounts()
 		}
+		return nil
+	}
+	m := f.mount(t)
+	if !m.verified || f.bridge.closeCount() != 0 {
+		t.Fatal("encoded file URL was not retained as the live mount")
+	}
+	if err := m.Unmount(); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Join(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if f.commandCount() != 2 || f.bridge.closeCount() != 1 {
+		t.Fatalf("commands=%d drains=%d", f.commandCount(), f.bridge.closeCount())
+	}
+}
+
+func TestNativeFSKitExtraURLSyntaxDoesNotAuthorizeUnmount(t *testing.T) {
+	for _, suffix := range []string{"?", "?token=x", "#", "#fragment", "?#"} {
+		t.Run(suffix, func(t *testing.T) {
+			f := newFakeFSKitMount(t)
+			f.command = func(context.Context, string, ...string) error {
+				identity := f.ownIdentity()
+				identity.source = (&url.URL{Scheme: "file", Path: identity.source}).String() + suffix
+				f.setMounts(identity)
+				return nil
+			}
+			mounted, err := f.service.mountNativeFSKit(context.Background(), f.root, nil, f.ops)
+			if mounted == nil || !errors.Is(err, errFSKitMountOwnership) || f.bridge.closeCount() != 0 {
+				t.Fatalf("mounted=%v err=%v drains=%d", mounted, err, f.bridge.closeCount())
+			}
+			if err := mounted.Unmount(); !errors.Is(err, errFSKitMountOwnership) {
+				t.Fatal(err)
+			}
+			if f.commandCount() != 1 || f.bridge.closeCount() != 0 {
+				t.Fatalf("unidentified source was released: commands=%d drains=%d", f.commandCount(), f.bridge.closeCount())
+			}
+		})
 	}
 }
 

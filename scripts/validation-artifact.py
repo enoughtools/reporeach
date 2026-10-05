@@ -53,11 +53,12 @@ def export(args):
     warning = (
         "RepoReach local validation artifact — not a release.\n"
         "This app has no authorized FSKit provisioning profile or Developer ID signature.\n"
-        "The module cannot be activated until it is signed locally with its actual matching profile.\n"
+        "Unprovisioned local signing may require repeated user approval.\n"
+        "Production distribution requires a matching FSKit profile and Developer ID signing.\n"
         "Keep signing credentials on the local Mac; never upload them to GitHub Actions.\n"
         "Use an isolated test state directory and a disposable empty mount folder.\n"
         "Do not replace an existing installed app or its data with this validation product.\n"
-        "A successful build does not establish a working filesystem mount.\n"
+        "A successful build, registration or signature does not establish a working filesystem mount.\n"
     )
     (args.app / "Contents/Resources/LocalValidation.txt").write_text(warning)
     (args.output / "LOCAL-VALIDATION.txt").write_text(warning)
