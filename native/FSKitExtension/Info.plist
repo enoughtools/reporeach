@@ -14,6 +14,9 @@
 <key>EXAppExtensionAttributes</key><dict>
 <key>EXExtensionPointIdentifier</key><string>com.apple.fskit.fsmodule</string>
 <key>FSShortName</key><string>reporeach</string>
+<key>FSActivateOptionSyntax</key><dict>
+<key>shortOptions</key><string>o:</string>
+</dict>
 <key>FSSupportsBlockResources</key><false/>
 <key>FSSupportsPathURLs</key><true/>
 <key>FSRequiresSecurityScopedPathURLResources</key><true/>

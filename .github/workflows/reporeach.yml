@@ -91,6 +91,10 @@ jobs:
         env:
           ARCHITECTURE: ${{ matrix.architecture }}
         run: scripts/build-macos.sh --backend macfuse --compile-only --arch "$ARCHITECTURE" --unsigned
+      - name: FSKit acceptance module selection regression
+        if: matrix.architecture == 'arm64'
+        # Pure selection validation; no installed module, confirmation or mount.
+        run: go test -run '^TestSelectedFSKitModuleIdentifier$' -count=1 .
       - name: Native unit tests
         run: |
           xcodebuild -project native/RepoReach.xcodeproj -scheme RepoReach \
@@ -153,6 +157,10 @@ jobs:
           test "$(xcodebuild -version | awk '/^Xcode / {print $2}')" = 26.6
       - name: FSKit distribution authorization regression checks
         run: python3 scripts/test-fskit-packaging.py
+      - name: FSKit acceptance module selection regression
+        if: matrix.architecture == 'arm64'
+        # Keep the root Darwin tests covered on both supported CI OS versions.
+        run: go test -run '^TestSelectedFSKitModuleIdentifier$' -count=1 .
       - name: Compile bundled FSKit app and check ExtensionKit layout
         env:
           ARCHITECTURE: ${{ matrix.architecture }}

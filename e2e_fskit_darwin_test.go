@@ -22,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cloudflare/artifact-fs/internal/auth"
 	"github.com/cloudflare/artifact-fs/internal/desktop"
 	"golang.org/x/sys/unix"
 )
@@ -270,8 +271,57 @@ func TestFSKitMountedAcceptance(t *testing.T) {
 	}
 }
 
+func selectedFSKitModuleIdentifier(value string) (string, error) {
+	const production = "com.enoughtools.reporeach.fskit"
+	const validation = "com.enoughtools.reporeach.validation.fskit"
+	switch value {
+	case "", production:
+		return production, nil
+	case validation:
+		return validation, nil
+	default:
+		return "", fmt.Errorf("prerequisite: AFS_FSKIT_MODULE_ID must be %s or the isolated validation identity %s; got %q", production, validation, value)
+	}
+}
+
+func TestSelectedFSKitModuleIdentifier(t *testing.T) {
+	const production = "com.enoughtools.reporeach.fskit"
+	const validation = "com.enoughtools.reporeach.validation.fskit"
+	for _, test := range []struct {
+		name, value, want string
+	}{
+		{name: "default", want: production},
+		{name: "explicit production", value: production, want: production},
+		{name: "isolated validation", value: validation, want: validation},
+		{name: "other module", value: "com.example.fskit"},
+		{name: "containing app", value: "com.enoughtools.reporeach"},
+		{name: "validation app", value: "com.enoughtools.reporeach.validation"},
+		{name: "leading whitespace", value: " " + validation},
+		{name: "trailing whitespace", value: production + "\n"},
+		{name: "case change", value: "COM.enoughtools.reporeach.fskit"},
+		{name: "embedded NUL", value: validation + "\x00"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := selectedFSKitModuleIdentifier(test.value)
+			if test.want == "" {
+				if err == nil || got != "" || !strings.Contains(err.Error(), "AFS_FSKIT_MODULE_ID") {
+					t.Fatalf("unexpected module accepted: value=%q got=%q error=%v", test.value, got, err)
+				}
+				return
+			}
+			if err != nil || got != test.want {
+				t.Fatalf("selected module=%q error=%v want %q", got, err, test.want)
+			}
+		})
+	}
+}
+
 func fsKitAcceptanceModule(t *testing.T) {
 	t.Helper()
+	moduleID, err := selectedFSKitModuleIdentifier(os.Getenv("AFS_FSKIT_MODULE_ID"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	app := os.Getenv("AFS_FSKIT_APP")
 	if os.Getenv("AFS_FSKIT_MODULE_CONFIRMED") != "1" || !filepath.IsAbs(app) {
 		t.Fatal("prerequisite: AFS_FSKIT_APP must name the installed matching RepoReach.app and AFS_FSKIT_MODULE_CONFIRMED=1 must confirm its matching native module is already enabled; see docs/reporeach/fskit-acceptance.md")
@@ -282,7 +332,7 @@ func fsKitAcceptanceModule(t *testing.T) {
 		return strings.TrimSpace(run(t, "", "/usr/libexec/PlistBuddy", "-c", "Print :"+key, plist))
 	}
 	for key, wanted := range map[string]string{
-		"CFBundleIdentifier": "com.enoughtools.reporeach.fskit",
+		"CFBundleIdentifier": moduleID,
 		"EXAppExtensionAttributes:EXExtensionPointIdentifier": "com.apple.fskit.fsmodule",
 		"EXAppExtensionAttributes:FSShortName":                "reporeach",
 		"EXAppExtensionAttributes:FSSupportsPathURLs":         "true",
@@ -298,7 +348,7 @@ func fsKitAcceptanceModule(t *testing.T) {
 	if info, err := os.Stat(filepath.Join(module, "Contents", "MacOS", executable)); err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 {
 		t.Fatalf("installed native module executable: %v, %v", info, err)
 	}
-	t.Logf("Darwin native acceptance uses already installed module %s version %s (%s); matching source and enablement explicitly confirmed by operator", module, read("CFBundleShortVersionString"), read("CFBundleVersion"))
+	t.Logf("Darwin native acceptance uses already installed module %s with identifier %s version %s (%s); matching source and enablement explicitly confirmed by operator", module, moduleID, read("CFBundleShortVersionString"), read("CFBundleVersion"))
 }
 
 type fsKitAcceptanceHarness struct {
@@ -443,6 +493,9 @@ func (h *fsKitAcceptanceHarness) stop(t *testing.T) (safe bool) {
 
 func (h *fsKitAcceptanceHarness) cleanup(t *testing.T) {
 	t.Helper()
+	if t.Failed() && h.server != nil {
+		h.logFailure(t)
+	}
 	if !h.stop(t) {
 		return
 	}
@@ -454,6 +507,38 @@ func (h *fsKitAcceptanceHarness) cleanup(t *testing.T) {
 	if err := os.RemoveAll(h.root); err != nil {
 		t.Errorf("remove detached private fixture %s: %v", h.root, err)
 	}
+}
+
+// Preserve complete, bounded diagnostic lines before disposable cleanup.
+func (h *fsKitAcceptanceHarness) logFailure(t *testing.T) {
+	t.Helper()
+	file, err := os.Open(h.server.logPath)
+	if err != nil {
+		return
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil || !info.Mode().IsRegular() {
+		return
+	}
+	const limit = int64(16 * 1024)
+	start := max(int64(0), info.Size()-limit)
+	if _, err := file.Seek(start, io.SeekStart); err != nil {
+		return
+	}
+	data, err := io.ReadAll(io.LimitReader(file, limit))
+	if err != nil {
+		return
+	}
+	if start > 0 {
+		_, data, _ = bytes.Cut(data, []byte("\n"))
+	}
+	if end := bytes.LastIndexByte(data, '\n'); end >= 0 {
+		data = data[:end+1]
+	} else {
+		return
+	}
+	t.Logf("private native daemon diagnostics:\n%s", auth.RedactString(string(data)))
 }
 
 type fsKitAcceptanceIdentity struct {

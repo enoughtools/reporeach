@@ -48,7 +48,10 @@ class SigningFixtures(unittest.TestCase):
             self.files[prefix + "/Contents/Info.plist"] = plistlib.dumps({
                 "CFBundleIdentifier": identifier, "CFBundleExecutable": name,
                 "LSMinimumSystemVersion": "26.0",
-                "EXAppExtensionAttributes": {"EXExtensionPointIdentifier": "com.apple.fskit.fsmodule"},
+                "EXAppExtensionAttributes": {
+                    "EXExtensionPointIdentifier": "com.apple.fskit.fsmodule",
+                    "FSActivateOptionSyntax": {"shortOptions": "o:"},
+                },
             })
             self.files[prefix + "/Contents/MacOS/" + name] = b"binary fixture\0\xff"
         self.args = SimpleNamespace(

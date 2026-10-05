@@ -7,11 +7,28 @@ This is a narrow acceptance harness, not complete native release qualification. 
 ## Prerequisites
 
 - macOS 26 or later, with the `reporeach` FSKit module already installed and enabled in normal System Settings.
-- An installed `RepoReach.app` containing `Contents/Extensions/RepoReachFSKit.appex`, built from the same source checkout as the test. Building the extension requires Xcode 26 or later and the macOS 26 SDK; installation also requires the appropriate signing and FSKit entitlement authorization.
+- An installed `RepoReach.app` containing `Contents/Extensions/RepoReachFSKit.appex`, whose compiled filesystem implementation matches the verified native source under test. Record separate app and helper revisions and any validation-only bundle-metadata changes as described below. Building the extension requires Xcode 26 or later and the macOS 26 SDK; installation also requires the appropriate signing and FSKit entitlement authorization.
 - Native Git available on `PATH`, and Go 1.26.8 or toolchain download access.
 - A disposable test session in which you can retain the private fixture and helper process if normal cleanup is refused.
 
-Set `AFS_FSKIT_APP` to the absolute path of that installed app. `AFS_FSKIT_MODULE_CONFIRMED=1` is your explicit assertion that the installed module matches the checkout and is already enabled. Bundle metadata checks cannot prove source provenance or extension activation; an actual successful mount is required. Do not set the assertion merely because an app bundle exists.
+Set `AFS_FSKIT_APP` to the absolute path of that installed app. `AFS_FSKIT_MODULE_CONFIRMED=1` is your explicit assertion that the selected installed module matches the source being tested and is already enabled. Bundle metadata checks cannot prove source provenance or extension activation; an actual successful mount is required. Do not set the assertion merely because an app bundle exists.
+
+The default module identifier is `com.enoughtools.reporeach.fskit`. An explicitly
+approved isolated local experiment can use
+`com.enoughtools.reporeach.validation.fskit` to avoid sharing the installed
+release app's identity. Select that identity with
+`AFS_FSKIT_MODULE_ID=com.enoughtools.reporeach.validation.fskit`; every other
+override is rejected. This affects only the acceptance harness's expected
+installed module identifier. Production identifiers, packaging and profile
+authorization remain unchanged.
+
+For that experiment, confirm the exact validation app path, its verified source,
+any local bundle-metadata changes and the selected validation extension's normal
+enablement before setting `AFS_FSKIT_MODULE_CONFIRMED=1`. Relabeling bundle
+metadata, signing or registration alone does not establish enablement. Record
+the native app's CI source revision separately from the test/helper checkout
+revision when they differ, including the relevant differences; do not claim
+source equality from the presence of an executable or a successful mount.
 
 ## Run
 
@@ -26,6 +43,22 @@ go test -run '^TestFSKitMountedAcceptance$' -count=1 -v -timeout=20m .
 ```
 
 The test skips unless explicitly opted in, and skips on an older macOS version. On a supported, opted-in host, missing prerequisites or a failed mount are failures, not passing evidence. It launches its own Go desktop helper against private state and uses the installed native extension for the mount.
+
+For the approved isolated experiment, add the exact validation module selection
+to the same invocation and use its absolute app path:
+
+```sh
+GOTOOLCHAIN=go1.26.8 \
+AFS_RUN_FSKIT_E2E_TESTS=1 \
+AFS_FSKIT_APP=/absolute/path/to/isolated/RepoReach.app \
+AFS_FSKIT_MODULE_ID=com.enoughtools.reporeach.validation.fskit \
+AFS_FSKIT_MODULE_CONFIRMED=1 \
+go test -run '^TestFSKitMountedAcceptance$' -count=1 -v -timeout=20m .
+```
+
+Both identities retain the same platform, source confirmation, installed
+executable, extension-point, filesystem-name and path-resource prerequisites.
+The harness never installs, enables or signs either identity.
 
 The core sequence checks:
 

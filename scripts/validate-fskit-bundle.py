@@ -179,7 +179,13 @@ def check_bundle(app, arch, expected_entitlements):
     info = plistlib.loads((module / "Contents/Info.plist").read_bytes())
     require(app_info.get("CFBundleIdentifier") == "com.enoughtools.reporeach", "Unexpected containing app identifier")
     require(info.get("CFBundleIdentifier") == MODULE_ID, "Unexpected FSKit module identifier")
-    require(info.get("EXAppExtensionAttributes", {}).get("EXExtensionPointIdentifier") == "com.apple.fskit.fsmodule", "FSKit extension point is not configured")
+    attributes = info.get("EXAppExtensionAttributes", {})
+    require(isinstance(attributes, dict) and attributes.get("EXExtensionPointIdentifier") == "com.apple.fskit.fsmodule", "FSKit extension point is not configured")
+    # mount's FSKit dispatcher advertises activation from this dictionary. Its
+    # common -o syntax propagates resource read/write mount flags; RepoReach
+    # implements no additional activation, checking or formatting switches.
+    require(attributes.get("FSActivateOptionSyntax") == {"shortOptions": "o:"}, "FSKit mount activation requires the supported common -o option syntax")
+    require("FSCheckOptionSyntax" not in attributes and "FSFormatOptionSyntax" not in attributes, "FSKit module must not advertise unsupported checking or formatting operations")
     version = tuple(int(component) for component in str(info.get("LSMinimumSystemVersion", "0")).split("."))
     require(version >= (26, 0), "FSKit module must require macOS 26")
     require(expected_entitlements.get(FSMODULE) is True and expected_entitlements.get(SANDBOX) is True, "FSKit capability and sandbox must be configured")

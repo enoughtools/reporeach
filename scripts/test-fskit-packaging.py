@@ -189,6 +189,61 @@ class CMSAuthenticationTests(unittest.TestCase):
                 packaging.decode_profile(path)
 
 
+class CompiledBundleTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory(prefix="reporeach-compiled-fskit-test-")
+        self.addCleanup(self.temporary.cleanup)
+        self.app = pathlib.Path(self.temporary.name) / "RepoReach.app"
+        self.module = self.app / packaging.MODULE_PATH
+        self.app_info = {"CFBundleIdentifier": "com.enoughtools.reporeach", "CFBundleExecutable": "RepoReach"}
+        self.module_info = {
+            "CFBundleIdentifier": packaging.MODULE_ID,
+            "CFBundleExecutable": "RepoReachFSKit", "LSMinimumSystemVersion": "26.0",
+            "EXAppExtensionAttributes": {
+                "EXExtensionPointIdentifier": "com.apple.fskit.fsmodule",
+                "FSActivateOptionSyntax": {"shortOptions": "o:"},
+            },
+        }
+        self.entitlements = {packaging.FSMODULE: True, packaging.SANDBOX: True}
+        for bundle, info in ((self.app, self.app_info), (self.module, self.module_info)):
+            (bundle / "Contents/MacOS").mkdir(parents=True)
+            (bundle / "Contents/MacOS" / info["CFBundleExecutable"]).write_bytes(b"compiled binary fixture\0\xff")
+            (bundle / "Contents/Info.plist").write_bytes(plistlib.dumps(info))
+
+    def check(self):
+        (self.module / "Contents/Info.plist").write_bytes(plistlib.dumps(self.module_info))
+        with mock.patch.object(packaging, "run", return_value=(b"arm64", b"")):
+            return packaging.check_bundle(self.app, "arm64", self.entitlements)
+
+    def test_accepts_compiled_mount_only_module_with_common_options(self):
+        self.assertEqual(self.check(), self.module)
+
+    def test_missing_activation_metadata_is_rejected_before_native_tools(self):
+        del self.module_info["EXAppExtensionAttributes"]["FSActivateOptionSyntax"]
+        with mock.patch.object(packaging, "run") as run, self.assertRaisesRegex(ValueError, "mount activation"):
+            # The previously compiled app identified itself as a filesystem but
+            # mount refused it before calling loadResource or activate.
+            (self.module / "Contents/Info.plist").write_bytes(plistlib.dumps(self.module_info))
+            packaging.check_bundle(self.app, "arm64", self.entitlements)
+        run.assert_not_called()
+
+    def test_rejects_invalid_or_unimplemented_activation_options(self):
+        invalid = (False, [], {}, {"shortOptions": ""}, {"shortOptions": "u:g:m:"}, {"shortOptions": "o:", "longOptions": {"unsupported": True}})
+        for syntax in invalid:
+            with self.subTest(syntax=syntax):
+                self.module_info["EXAppExtensionAttributes"]["FSActivateOptionSyntax"] = syntax
+                with self.assertRaisesRegex(ValueError, "mount activation"):
+                    self.check()
+
+    def test_rejects_unimplemented_checking_and_formatting_advertisements(self):
+        for key in ("FSCheckOptionSyntax", "FSFormatOptionSyntax"):
+            with self.subTest(key=key):
+                self.module_info["EXAppExtensionAttributes"][key] = {}
+                with self.assertRaisesRegex(ValueError, "unsupported checking or formatting"):
+                    self.check()
+                del self.module_info["EXAppExtensionAttributes"][key]
+
+
 class LocalValidationArtifactTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix="reporeach-validation-export-test-")

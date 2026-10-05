@@ -3,12 +3,17 @@
 package desktop
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -622,5 +627,91 @@ func TestNativeFSKitMountCommandCancellationIsBounded(t *testing.T) {
 	err := runFSKitMountCommand(ctx, "/bin/sh", "-c", "sleep 30 & wait")
 	if err == nil || ctx.Err() == nil || time.Since(start) > time.Second {
 		t.Fatalf("canceled command: err=%v elapsed=%v", err, time.Since(start))
+	}
+}
+
+func TestNativeFSKitCommandFailureDiagnosticsAreBoundedAndRedacted(t *testing.T) {
+	for _, test := range []struct {
+		name, script, wantDiagnostic string
+		truncated                    bool
+		secrets                      []string
+	}{
+		{
+			name: "large stderr with credentials",
+			script: "printf '%s\\n' 'mount: transport denied https://credential-user:credential-password@example.invalid/path?token=credential-token#credential-fragment' >&2; " +
+				"printf '%16384s' '' >&2; exit 7",
+			wantDiagnostic: "transport denied", truncated: true,
+			secrets: []string{"credential-user", "credential-password", "credential-token", "credential-fragment"},
+		},
+		{
+			name: "truncated credential URL",
+			script: "printf '%s\\n' 'mount: truncated remote' >&2; printf 'https://partial-user:' >&2; " +
+				"i=0; while [ \"$i\" -lt 1000 ]; do printf 'partial-secret' >&2; i=$((i + 1)); done; printf '@example.invalid\\n' >&2; exit 7",
+			wantDiagnostic: "truncated remote", truncated: true,
+			secrets: []string{"partial-user", "partial-secret"},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var output bytes.Buffer
+			logger := slog.New(slog.NewJSONHandler(&output, nil))
+			err := runFSKitMountCommandLogged(context.Background(), logger, "/bin/sh", "-c", test.script, "native-fskit-test", "argument-secret-marker")
+			var exit *exec.ExitError
+			if !errors.As(err, &exit) || exit.ExitCode() != 7 {
+				t.Fatalf("command error=%v", err)
+			}
+			var record struct {
+				Command   string `json:"command"`
+				ExitCode  int    `json:"exit_code"`
+				Stderr    string `json:"stderr"`
+				Truncated bool   `json:"stderr_truncated"`
+			}
+			if err := json.Unmarshal(output.Bytes(), &record); err != nil {
+				t.Fatal(err)
+			}
+			if record.Command != "sh" || record.ExitCode != 7 || record.Truncated != test.truncated ||
+				len(record.Stderr) > fsKitStderrLimit || !strings.Contains(record.Stderr, test.wantDiagnostic) {
+				t.Fatalf("incomplete or unbounded failure diagnostic: %+v", record)
+			}
+			for _, secret := range append(test.secrets, "argument-secret-marker") {
+				if strings.Contains(output.String(), secret) {
+					t.Fatalf("command diagnostic exposed credential or argument %q", secret)
+				}
+			}
+		})
+	}
+}
+
+func TestNativeFSKitCommandInheritedStderrIsBounded(t *testing.T) {
+	pidFile := filepath.Join(t.TempDir(), "child.pid")
+	// This child only tests an inherited stderr pipe; it never owns a mount.
+	// Clean up its known PID even if a failed assertion ends the test early.
+	t.Cleanup(func() {
+		data, err := os.ReadFile(pidFile)
+		if err != nil {
+			return
+		}
+		pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+		if err != nil || pid <= 0 || pid == os.Getpid() {
+			t.Errorf("invalid inherited-pipe fixture PID: %v", err)
+			return
+		}
+		child, err := os.FindProcess(pid)
+		if err == nil {
+			_ = child.Kill()
+		}
+	})
+	var output bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&output, nil))
+	ctx, cancel := context.WithTimeout(context.Background(), fsKitCommandWaitDelay+2*time.Second)
+	defer cancel()
+	start := time.Now()
+	err := runFSKitMountCommandLogged(ctx, logger, "/bin/sh", "-c",
+		"sleep 30 & printf '%s\\n' \"$!\" > \"$1\"; printf 'mount: parent exited\\n' >&2; exit 9", "native-fskit-test", pidFile)
+	var exit *exec.ExitError
+	if !errors.As(err, &exit) || exit.ExitCode() != 9 || ctx.Err() != nil || time.Since(start) > fsKitCommandWaitDelay+time.Second {
+		t.Fatalf("inherited stderr delayed failure: err=%v elapsed=%v context=%v", err, time.Since(start), ctx.Err())
+	}
+	if !strings.Contains(output.String(), "parent exited") {
+		t.Fatal("inherited stderr suppressed the parent's failure diagnostic")
 	}
 }

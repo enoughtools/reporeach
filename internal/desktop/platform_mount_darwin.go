@@ -3,8 +3,10 @@
 package desktop
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"net/url"
 	"os"
 	"os/exec"
@@ -15,13 +17,18 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/cloudflare/artifact-fs/internal/auth"
 	"github.com/cloudflare/artifact-fs/internal/catalogfs"
 	"github.com/cloudflare/artifact-fs/internal/fsbridge"
 	"github.com/cloudflare/artifact-fs/internal/fusefs"
 	"golang.org/x/sys/unix"
 )
 
-const fsKitMountTimeout = 28 * time.Second
+const (
+	fsKitMountTimeout     = 28 * time.Second
+	fsKitStderrLimit      = 8 << 10
+	fsKitCommandWaitDelay = 2 * time.Second
+)
 
 var errFSKitMountOwnership = errors.New("the repository mount could not be safely identified; keep RepoReach running and unmount that folder before retrying")
 
@@ -52,13 +59,15 @@ type fsKitMountOperations struct {
 	verifyDelay time.Duration
 }
 
-func nativeFSKitOperations() fsKitMountOperations {
+func nativeFSKitOperations(logger *slog.Logger) fsKitMountOperations {
 	return fsKitMountOperations{
 		ready: platformDependencyReady,
 		start: func(ctx context.Context, source string, fs *catalogfs.FileSystem) (platformBridge, error) {
 			return fsbridge.Start(ctx, source, fs)
 		},
-		command: runFSKitMountCommand,
+		command: func(ctx context.Context, program string, args ...string) error {
+			return runFSKitMountCommandLogged(ctx, logger, program, args...)
+		},
 		rootFSID: func(root string) ([2]int32, error) {
 			var stat unix.Statfs_t
 			if err := unix.Statfs(root, &stat); err != nil {
@@ -73,10 +82,50 @@ func nativeFSKitOperations() fsKitMountOperations {
 }
 
 func runFSKitMountCommand(ctx context.Context, program string, args ...string) error {
-	// Nil output streams are real /dev/null descriptors, avoiding pipe-copy
-	// goroutines retained by helpers. Keep the command in its own process group
-	// so cancellation also stops any ordinary child helper it launched.
+	return runFSKitMountCommandLogged(ctx, slog.Default(), program, args...)
+}
+
+// FSKit command stderr is text diagnostics, separate from bridge/blob data.
+// A fixed capture limit prevents a helper's output from retaining unbounded data.
+type fsKitCommandStderr struct {
+	mu        sync.Mutex
+	data      [fsKitStderrLimit]byte
+	length    int
+	truncated bool
+}
+
+func (b *fsKitCommandStderr) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	n := copy(b.data[b.length:], p)
+	b.length += n
+	b.truncated = b.truncated || n < len(p)
+	return len(p), nil // Continue draining stderr after the capture limit.
+}
+
+func (b *fsKitCommandStderr) diagnostic() (string, bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	data := b.data[:b.length]
+	if b.truncated {
+		// A cut URL could end before '@', hiding its credential structure from
+		// redaction. Only retain complete whitespace-delimited diagnostic tokens.
+		if end := bytes.LastIndexAny(data, " \t\r\n"); end >= 0 {
+			data = data[:end]
+		} else {
+			data = nil
+		}
+	}
+	return auth.RedactString(strings.TrimSpace(string(data))), b.truncated
+}
+
+func runFSKitMountCommandLogged(ctx context.Context, logger *slog.Logger, program string, args ...string) error {
+	// Stdout stays /dev/null. WaitDelay bounds the stderr-copy goroutine if a
+	// helper inherits its pipe. A process group also stops ordinary children on
+	// request cancellation; the independently observed kernel mount owns its bridge.
 	command := exec.CommandContext(ctx, program, args...)
+	stderr := &fsKitCommandStderr{}
+	command.Stderr = stderr
 	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	command.Cancel = func() error {
 		if command.Process == nil {
@@ -88,8 +137,19 @@ func runFSKitMountCommand(ctx context.Context, program string, args ...string) e
 		}
 		return err
 	}
-	command.WaitDelay = 2 * time.Second
-	return command.Run()
+	command.WaitDelay = fsKitCommandWaitDelay
+	err := command.Run()
+	if err != nil && logger != nil {
+		diagnostic, truncated := stderr.diagnostic()
+		exitCode := -1
+		if command.ProcessState != nil {
+			exitCode = command.ProcessState.ExitCode()
+		}
+		// Never log arguments, raw stderr or backend diagnostics in product errors.
+		logger.Warn("native filesystem command failed", "command", filepath.Base(program), "exit_code", exitCode,
+			"error", auth.RedactString(err.Error()), "stderr", diagnostic, "stderr_truncated", truncated)
+	}
+	return err
 }
 
 func platformDependencyReady() bool {
@@ -140,7 +200,7 @@ func cachedDarwinMounts() ([]fsKitMountIdentity, error) {
 }
 
 func (s *Service) platformMountCatalogue(ctx context.Context, root string, fs *catalogfs.FileSystem) (fusefs.MountedFS, error) {
-	return s.mountNativeFSKit(ctx, root, fs, nativeFSKitOperations())
+	return s.mountNativeFSKit(ctx, root, fs, nativeFSKitOperations(s.logger))
 }
 
 func (s *Service) mountNativeFSKit(ctx context.Context, root string, fs *catalogfs.FileSystem, ops fsKitMountOperations) (fusefs.MountedFS, error) {
