@@ -210,7 +210,7 @@ def verify_signature(path, fingerprint, team, private):
     details = (result.stdout + result.stderr).decode()
     require("Authority=Developer ID Application:" in details and f"TeamIdentifier={team}\n" in details and "runtime" in details and "Timestamp=" in details, "Signed component lacks the expected Developer ID, team, hardened runtime or timestamp")
     prefix = private / "selected-certificate"
-    run("codesign", "-d", "--extract-certificates", str(prefix), str(path))
+    run("codesign", "-d", f"--extract-certificates={prefix}", str(path))
     require(hashlib.sha1(pathlib.Path(str(prefix) + "0").read_bytes()).hexdigest().upper() == fingerprint, "Signed component used a different identity")
 
 

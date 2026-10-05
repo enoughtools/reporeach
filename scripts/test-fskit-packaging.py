@@ -189,6 +189,71 @@ class CMSAuthenticationTests(unittest.TestCase):
                 packaging.decode_profile(path)
 
 
+class SignedEntitlementTests(unittest.TestCase):
+    def test_extracts_typed_claims_with_explicit_xml_output(self):
+        claims = {packaging.FSMODULE: True, "fixture.identifier": "FIXTURE1234.example", "fixture.groups": ["fixture-group"], "fixture.data": b"binary\0\xff"}
+        for format in (plistlib.FMT_XML, plistlib.FMT_BINARY):
+            with self.subTest(format=format), mock.patch.object(packaging, "run", return_value=(plistlib.dumps(claims, fmt=format), b"display diagnostics")) as run:
+                self.assertEqual(packaging.signature_entitlements(pathlib.Path("fixture.appex")), claims)
+                run.assert_called_once_with("codesign", "-d", "--entitlements", "-", "--xml", "fixture.appex")
+
+    def test_missing_or_abstract_claims_fail_without_format_fallback(self):
+        for contents in (b"", b"[Dict]\n\t[Key] com.apple.developer.fskit.fsmodule\n\t[Value] true\n", b"not a plist"):
+            with self.subTest(contents=contents), mock.patch.object(packaging, "run", return_value=(contents, b"")) as run, self.assertRaises(ValueError):
+                packaging.signature_entitlements(pathlib.Path("fixture.appex"))
+            self.assertEqual(run.call_count, 1)
+
+    def test_non_dictionary_plist_cannot_supply_entitlement_claims(self):
+        for claims in ([], [packaging.FSMODULE], True):
+            with self.subTest(claims=claims), mock.patch.object(packaging, "run", return_value=(plistlib.dumps(claims), b"")), self.assertRaisesRegex(ValueError, "dictionary"):
+                packaging.signature_entitlements(pathlib.Path("fixture.appex"))
+
+    def test_failed_display_command_is_not_retried_with_weaker_options(self):
+        with mock.patch.object(packaging, "run", side_effect=ValueError("codesign failed")) as run, self.assertRaisesRegex(ValueError, "codesign failed"):
+            packaging.signature_entitlements(pathlib.Path("fixture.appex"))
+        self.assertEqual(run.call_count, 1)
+
+
+class SignedCertificateExtractionTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory(prefix="reporeach-signed-fskit-test-")
+        self.addCleanup(self.temporary.cleanup)
+        self.app = pathlib.Path(self.temporary.name) / "RepoReach.app"
+        self.module = self.app / packaging.MODULE_PATH
+        (self.module / "Contents").mkdir(parents=True)
+        (self.module / "Contents/embedded.provisionprofile").write_bytes(b"fixture, not a profile")
+        self.claims = {packaging.FSMODULE: True, packaging.SANDBOX: True}
+        self.certificate = b"fixture public certificate bytes, not signing material"
+
+    def display(self, *args):
+        if args[2] == "--verbose=4":
+            return b"", b"Authority=Developer ID Application: Fixture\nTeamIdentifier=FIXTURE1234\nflags=10000(runtime)\nTimestamp=fixture\n"
+        if args[2] == "--entitlements":
+            self.assertIn("--xml", args)
+            return plistlib.dumps(self.claims), b""
+        if args[2].startswith("--extract-certificates="):
+            # An optional long-option argument must be attached; otherwise
+            # codesign treats the destination prefix as another signed path.
+            prefix = args[2].split("=", 1)[1]
+            pathlib.Path(prefix + "0").write_bytes(self.certificate)
+            return b"", b""
+        self.assertEqual(args[:3], ("codesign", "--verify", "--strict"))
+        return b"", b""
+
+    def test_certificate_and_claims_remain_bound_to_profile_authorization(self):
+        profile = {"fixture": True}
+        with mock.patch.object(packaging, "check_bundle", return_value=self.module), mock.patch.object(packaging, "run", side_effect=self.display), mock.patch.object(packaging, "decode_profile", return_value=profile), mock.patch.object(packaging, "authorize_profile") as authorize:
+            packaging.signed(self.app, "arm64", dict(self.claims))
+        authorize.assert_called_once_with(profile, packaging.MODULE_ID, self.claims, certificate=self.certificate, team="FIXTURE1234", require_bound=True)
+
+    def test_missing_signed_capability_is_rejected_before_profile_authorization(self):
+        expected = dict(self.claims)
+        del self.claims[packaging.FSMODULE]
+        with mock.patch.object(packaging, "check_bundle", return_value=self.module), mock.patch.object(packaging, "run", side_effect=self.display), mock.patch.object(packaging, "authorize_profile") as authorize, self.assertRaisesRegex(ValueError, "omits configured"):
+            packaging.signed(self.app, "arm64", expected)
+        authorize.assert_not_called()
+
+
 class CompiledBundleTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix="reporeach-compiled-fskit-test-")

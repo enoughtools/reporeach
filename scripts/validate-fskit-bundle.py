@@ -196,6 +196,14 @@ def check_bundle(app, arch, expected_entitlements):
     return module
 
 
+def signature_entitlements(path):
+    # Request a property list explicitly; default display may be human-readable.
+    claims, _ = run("codesign", "-d", "--entitlements", "-", "--xml", str(path))
+    actual = plistlib.loads(claims)
+    require(isinstance(actual, dict), "Actual signature entitlements must be a dictionary")
+    return actual
+
+
 def signed(app, arch, expected_entitlements):
     module = check_bundle(app, arch, expected_entitlements)
     embedded = module / "Contents/embedded.provisionprofile"
@@ -206,12 +214,11 @@ def signed(app, arch, expected_entitlements):
     require("Authority=Developer ID Application:" in details, "FSKit distribution requires a Developer ID identity")
     require("runtime" in details and "Timestamp=" in details, "FSKit distribution requires hardened runtime and a signing timestamp")
     team = next((line.split("=", 1)[1] for line in details.splitlines() if line.startswith("TeamIdentifier=")), None)
-    claims, _ = run("codesign", "-d", "--entitlements", "-", str(module))
-    actual = plistlib.loads(claims)
+    actual = signature_entitlements(module)
     require(all(actual.get(key) == value for key, value in expected_entitlements.items()), "Actual FSKit signature omits configured entitlement claims")
     with tempfile.TemporaryDirectory(prefix="reporeach-fskit-cert-") as private:
         certificate_path = pathlib.Path(private) / "certificate"
-        run("codesign", "-d", "--extract-certificates", str(certificate_path), str(module))
+        run("codesign", "-d", f"--extract-certificates={certificate_path}", str(module))
         certificate = pathlib.Path(str(certificate_path) + "0").read_bytes()
     authorize_profile(decode_profile(embedded), MODULE_ID, actual, certificate=certificate, team=team, require_bound=True)
     run("codesign", "--verify", "--strict", str(app))

@@ -199,6 +199,31 @@ class ProvenanceTests(SigningFixtures):
             self.assertEqual(signing.committed_fingerprint(revision), expected.hexdigest())
 
 
+class SignatureInspectionTests(unittest.TestCase):
+    def test_extracted_leaf_must_match_selected_identity(self):
+        certificate = b"fixture public certificate, not signing material"
+        fingerprint = hashlib.sha1(certificate).hexdigest().upper()
+        details = b"Authority=Developer ID Application: Fixture\nTeamIdentifier=FIXTURE1234\nflags=10000(runtime)\nTimestamp=fixture\n"
+        result = SimpleNamespace(returncode=0, stdout=b"", stderr=details)
+        with tempfile.TemporaryDirectory(prefix="reporeach-signature-test-") as folder:
+            private = pathlib.Path(folder)
+            path = private / "fixture.appex"
+
+            def run(*args):
+                if args[2].startswith("--extract-certificates="):
+                    prefix = args[2].split("=", 1)[1]
+                    self.assertEqual(pathlib.Path(prefix).parent, private)
+                    pathlib.Path(prefix + "0").write_bytes(certificate)
+                    return b""
+                self.assertEqual(args[:3], ("codesign", "--verify", "--strict"))
+                return b""
+
+            with mock.patch.object(signing, "run", side_effect=run), mock.patch.object(signing.subprocess, "run", return_value=result):
+                signing.verify_signature(path, fingerprint, "FIXTURE1234", private)
+                with self.assertRaisesRegex(ValueError, "different identity"):
+                    signing.verify_signature(path, "0" * 40, "FIXTURE1234", private)
+
+
 class SigningBoundaryTests(SigningFixtures):
     def signing_context(self):
         requested = {signing.packaging.FSMODULE: True, signing.packaging.SANDBOX: True}
