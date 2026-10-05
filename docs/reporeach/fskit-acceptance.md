@@ -2,7 +2,7 @@
 
 `TestFSKitMountedAcceptance` exercises the native macOS 26 filesystem through real mounted paths and the desktop control service. It uses private temporary state, a private mount folder, and local Git fixtures. It does not install an app, activate an extension, update the OS, or change security settings.
 
-This is a narrow acceptance harness, not complete native release qualification. A skipped test, a successful Go compilation, and bridge tests are not mounted FSKit evidence. The macOS 15 development host cannot establish this result. See [the native backend's remaining release gates](native-fskit.md).
+This is a narrow acceptance harness, not complete native release qualification. A skipped test, a successful Go compilation, and bridge tests are not mounted FSKit evidence. The development host now runs macOS 27.0.1; its result will establish that runtime, not a macOS 26 mounted pass. See [the native backend's remaining release gates](native-fskit.md).
 
 ## Prerequisites
 

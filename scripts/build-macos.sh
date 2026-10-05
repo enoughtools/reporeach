@@ -7,6 +7,7 @@ ARCH=arm64
 VERSION=0.1.0-beta.3
 BACKEND=fskit
 COMPILE_ONLY=false
+VALIDATION_ARTIFACT=false
 SIGN_IDENTITY="${REPOREACH_SIGN_IDENTITY:-}"
 NOTARIZE=false
 while [ "$#" -gt 0 ]; do
@@ -15,15 +16,20 @@ while [ "$#" -gt 0 ]; do
     --version) VERSION="$2"; shift 2 ;;
     --backend) BACKEND="$2"; shift 2 ;;
     --compile-only) COMPILE_ONLY=true; shift ;;
+    --validation-artifact) COMPILE_ONLY=true; VALIDATION_ARTIFACT=true; SIGN_IDENTITY=""; shift ;;
     --unsigned) SIGN_IDENTITY=""; shift ;;
     --sign-identity) SIGN_IDENTITY="$2"; shift 2 ;;
     --notarize) NOTARIZE=true; shift ;;
-    *) echo "Usage: $0 [--arch arm64|x86_64] [--version VERSION] [--backend fskit|macfuse] [--compile-only] [--unsigned|--sign-identity ID] [--notarize]" >&2; exit 2 ;;
+    *) echo "Usage: $0 [--arch arm64|x86_64] [--version VERSION] [--backend fskit|macfuse] [--compile-only|--validation-artifact] [--unsigned|--sign-identity ID] [--notarize]" >&2; exit 2 ;;
   esac
 done
 case "$ARCH" in arm64) GO_ARCH=arm64 ;; x86_64) GO_ARCH=amd64 ;; *) echo "Unsupported architecture: $ARCH" >&2; exit 2 ;; esac
 case "$VERSION" in *[!A-Za-z0-9.+-]*|"") echo "Invalid release version" >&2; exit 2 ;; esac
 test "$(uname -s)" = Darwin || { echo "Run macOS packaging on macOS." >&2; exit 1; }
+if [ "$VALIDATION_ARTIFACT" = true ] && { [ "$BACKEND" != fskit ] || [ -n "$SIGN_IDENTITY" ] || [ "$NOTARIZE" = true ]; }; then
+  echo "--validation-artifact only exports unsigned FSKit products for local validation; it cannot sign, notarize or publish." >&2
+  exit 2
+fi
 case "$BACKEND" in
   fskit)
     PROJECT_SPEC="$ROOT/native/project.yml"
@@ -54,6 +60,17 @@ export PATH="$XCODEGEN_BIN:$PATH"
 OUTPUT="$ROOT/dist/releases/$VERSION"
 STAGE="$ROOT/build/package/$BACKEND/$ARCH"
 DERIVED="$ROOT/build/native/$BACKEND/$ARCH"
+if [ "$VALIDATION_ARTIFACT" = true ]; then
+  OUTPUT="$ROOT/build/fskit-validation/products/$ARCH"
+  STAGE="$ROOT/build/fskit-validation/stage/$ARCH"
+  BASENAME="RepoReach-local-validation-$ARCH"
+  if [ -e "$OUTPUT/$BASENAME.zip" ]; then
+    echo "Local validation archive already exists; refusing to overwrite it: $OUTPUT/$BASENAME.zip" >&2
+    exit 1
+  fi
+  mkdir -p "$OUTPUT" "$STAGE"
+  python3 "$ROOT/scripts/release-manifest.py" source --output "$STAGE/source.json"
+fi
 if [ "$COMPILE_ONLY" = false ]; then
   BASENAME="RepoReach-${VERSION}-macOS-${ARCH}"
   if [ -e "$OUTPUT/$BASENAME.zip" ] || [ -e "$OUTPUT/$BASENAME.dmg" ]; then
@@ -74,8 +91,10 @@ if [ "$COMPILE_ONLY" = true ]; then
       --app "$DERIVED/Build/Products/Release/RepoReach.app" --arch "$ARCH" \
       --entitlements "$ROOT/native/FSKitExtension/FSKit.entitlements"
   fi
-  echo "Compiled $BACKEND $ARCH without release archives: $DERIVED/Build/Products/Release/RepoReach.app"
-  exit 0
+  if [ "$VALIDATION_ARTIFACT" = false ]; then
+    echo "Compiled $BACKEND $ARCH without release archives: $DERIVED/Build/Products/Release/RepoReach.app"
+    exit 0
+  fi
 fi
 GH_CACHE="$("$ROOT/scripts/vendor-gh.sh" "$ARCH")"
 APP="$STAGE/RepoReach.app"
@@ -104,6 +123,14 @@ if [ "$BACKEND" = fskit ]; then
   echo "FSKit is supplied by macOS. RepoReach's FSKit module is included in this app." >> "$APP/Contents/Resources/Licenses/NOTICE.txt"
 else
   echo "macFUSE is a separately installed dependency and is not redistributed here." >> "$APP/Contents/Resources/Licenses/NOTICE.txt"
+fi
+if [ "$VALIDATION_ARTIFACT" = true ]; then
+  # This export has no module provisioning profile or Developer ID signature.
+  # Preserve the normal distribution guard above and all release paths below.
+  python3 "$ROOT/scripts/validation-artifact.py" --app "$APP" --arch "$ARCH" \
+    --source-file "$STAGE/source.json" --output "$OUTPUT"
+  echo "Exported unsigned local-validation product: $OUTPUT (requires local authorized signing before extension activation)"
+  exit 0
 fi
 MARKETING_VERSION="${VERSION%%-*}"
 MARKETING_VERSION="${MARKETING_VERSION%%+*}"

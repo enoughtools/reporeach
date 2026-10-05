@@ -35,6 +35,28 @@ The legacy and FSKit derived builds use separate private output directories.
 Legacy distribution packaging is disabled because the current Darwin engine
 uses the bundled FSKit module.
 
+To obtain a complete compiled app for **local validation** when the local Mac
+has macOS 26 or later but an older Xcode, dispatch the RepoReach workflow from
+the selected committed branch with `validation_artifacts=true`:
+
+```sh
+gh workflow run reporeach.yml --ref codex/native-fskit -f validation_artifacts=true
+gh run list --workflow reporeach.yml --branch codex/native-fskit --event workflow_dispatch
+# Use the selected run ID after the macOS 26 job succeeds.
+gh run download RUN_ID --name fskit-local-validation-arm64 --dir build/fskit-validation/download
+```
+
+The optional artifacts contain the compiled app, bundled FSKit module, real Go
+engine, verified GitHub CLI and dependency notices. The `--validation-artifact`
+build option writes them under `build/fskit-validation/products/<architecture>`
+with source identity, toolchain versions, SHA-256 checksums and an explicit
+local-validation marker. They require a clean committed source checkout.
+They are unprovisioned and unsigned for distribution; the module needs the
+actual matching FSKit profile and local authorized signing before activation.
+Keep signing credentials on the local Mac. Use isolated test data, preserve the
+installed app, and complete real mounted tests before preparing a release.
+This mode cannot sign, notarize, stage website downloads or publish releases.
+
 After real backend validation and source freeze, distribution packaging requires
 an existing Developer ID identity and the actual extension-specific Developer
 ID provisioning profile in `REPOREACH_FSKIT_PROFILE`. Choose a new release
@@ -110,7 +132,8 @@ extension client, including authenticated sessions, paged large responses,
 binary reads/writes and handle cleanup. The standalone invocation is documented
 in [the bridge smoke guide](../native/Tools/README.fsbridge-smoke.md).
 Pull requests compile without signing keys, profiles or release archives. The
-FSKit job uploads compilation logs only. GitHub release publication is disabled
+FSKit job uploads compilation logs; a manually requested run can also export
+the unprovisioned local-validation artifacts described above. GitHub release publication is disabled
 while the new backend is being validated. No source-validation command updates
 the live downloads; publication remains a separate release step.
 

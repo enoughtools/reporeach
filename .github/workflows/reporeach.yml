@@ -15,6 +15,10 @@ on:
         description: Reserved; releases are disabled during native FSKit validation
         type: boolean
         default: false
+      validation_artifacts:
+        description: Export unsigned bundled FSKit apps for local authorized signing and testing; never publish a release
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -151,10 +155,13 @@ jobs:
       - name: Compile bundled FSKit app and check ExtensionKit layout
         env:
           ARCHITECTURE: ${{ matrix.architecture }}
+          EXPORT_VALIDATION_ARTIFACTS: ${{ github.event_name == 'workflow_dispatch' && inputs.validation_artifacts }}
         run: |
           set -euo pipefail
           mkdir -p build/fskit-validation
-          scripts/build-macos.sh --backend fskit --compile-only --arch "$ARCHITECTURE" --unsigned \
+          options=(--compile-only)
+          if [ "$EXPORT_VALIDATION_ARTIFACTS" = true ]; then options=(--validation-artifact); fi
+          scripts/build-macos.sh --backend fskit "${options[@]}" --arch "$ARCHITECTURE" --unsigned \
             > "build/fskit-validation/compile-$ARCHITECTURE.log" 2>&1 || {
               tail -n 120 "build/fskit-validation/compile-$ARCHITECTURE.log"
               exit 1
@@ -190,6 +197,14 @@ jobs:
             -o build/fsbridge-smoke/volume-check
           REPOREACH_FSBRIDGE_NATIVE_CLIENT="$PWD/build/fsbridge-smoke/volume-check" \
             GOTOOLCHAIN=go1.26.8 go test -count=1 -run '^TestNativeFSKitBridgeClient$' -v ./internal/fsbridge
+
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        if: github.event_name == 'workflow_dispatch' && inputs.validation_artifacts && success()
+        with:
+          name: fskit-local-validation-${{ matrix.architecture }}
+          path: build/fskit-validation/products/${{ matrix.architecture }}/
+          if-no-files-found: error
+          retention-days: 7
 
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         if: always()

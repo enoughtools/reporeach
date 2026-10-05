@@ -3,16 +3,24 @@
 import copy
 import datetime
 import importlib.util
+import json
 import pathlib
 import plistlib
 import sys
 import tempfile
 import unittest
+import zipfile
+from types import SimpleNamespace
+from unittest import mock
 
 source = pathlib.Path(__file__).with_name("validate-fskit-bundle.py")
 spec = importlib.util.spec_from_file_location("fskit_packaging", source)
 packaging = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(packaging)
+validation_source = pathlib.Path(__file__).with_name("validation-artifact.py")
+validation_spec = importlib.util.spec_from_file_location("local_validation", validation_source)
+local_validation = importlib.util.module_from_spec(validation_spec)
+validation_spec.loader.exec_module(local_validation)
 
 
 class ProfileAuthorizationTests(unittest.TestCase):
@@ -179,6 +187,86 @@ class CMSAuthenticationTests(unittest.TestCase):
             path.write_bytes(der(48, der(6, packaging.encoded_oid("1.2.840.113549.1.7.1")) + der(160, der(4, content))))
             with self.assertRaises(ValueError):
                 packaging.decode_profile(path)
+
+
+class LocalValidationArtifactTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory(prefix="reporeach-validation-export-test-")
+        self.addCleanup(self.temporary.cleanup)
+        self.folder = pathlib.Path(self.temporary.name)
+        self.app = self.folder / "stage/RepoReach.app"
+        self.module = self.app / "Contents/Extensions/RepoReachFSKit.appex"
+        self.module.mkdir(parents=True)
+        (self.app / "Contents/Resources").mkdir()
+        helpers = self.app / "Contents/Helpers"
+        helpers.mkdir()
+        for name in ("artifact-fs", "gh"):
+            (helpers / name).write_bytes(b"binary fixture\0\xff")
+        self.source = {"url": "https://github.com/enoughtools/reporeach", "dirty": False, "revision": "a" * 40, "contentSha256": "b" * 64}
+        self.source_path = self.folder / "source.json"
+        self.source_path.write_text(json.dumps(self.source))
+        self.args = SimpleNamespace(app=self.app, arch="arm64", source_file=self.source_path, output=self.folder / "products")
+
+    def run_fixture(self, *arguments):
+        if arguments[0] == "lipo":
+            return "arm64"
+        if arguments[0] == "ditto":
+            # Exercise the exported metadata against real archive bytes without
+            # requiring Apple tooling for Linux's distribution-guard CI tests.
+            app, archive = pathlib.Path(arguments[-2]), pathlib.Path(arguments[-1])
+            with zipfile.ZipFile(archive, "w") as output:
+                for path in app.rglob("*"):
+                    if path.is_file():
+                        output.write(path, path.relative_to(app.parent))
+            return ""
+        return "fixture toolchain"
+
+    def export(self):
+        with mock.patch.object(local_validation.sys, "platform", "darwin"), mock.patch.object(local_validation, "run", side_effect=self.run_fixture):
+            local_validation.export(self.args)
+
+    def test_metadata_hashes_the_actual_unprovisioned_app_archive(self):
+        self.export()
+        metadata = json.loads((self.args.output / "RepoReach-local-validation-arm64.json").read_text())
+        self.assertFalse(metadata["distribution"])
+        self.assertFalse(metadata["extensionActivationAuthorized"])
+        self.assertFalse(metadata["mountedValidationPassed"])
+        self.assertTrue(metadata["localSigningRequired"])
+        self.assertEqual(metadata["source"], self.source)
+        archive = self.args.output / metadata["artifact"]["filename"]
+        self.assertEqual(metadata["artifact"]["sha256"], local_validation.digest(archive))
+        self.assertEqual(metadata["artifact"]["bytes"], archive.stat().st_size)
+        with zipfile.ZipFile(archive) as contents:
+            self.assertEqual(contents.read("RepoReach.app/Contents/Helpers/artifact-fs"), b"binary fixture\0\xff")
+            self.assertIn(b"not a release", contents.read("RepoReach.app/Contents/Resources/LocalValidation.txt"))
+        with self.assertRaisesRegex(ValueError, "overwrite"):
+            self.export()
+
+    def test_rejects_embedded_profiles_and_missing_helpers(self):
+        profile = self.module / "Contents/embedded.provisionprofile"
+        profile.parent.mkdir()
+        profile.write_bytes(b"fixture, not a profile")
+        with self.assertRaisesRegex(ValueError, "provisioning profile"):
+            self.export()
+        profile.unlink()
+        (self.app / "Contents/Helpers/artifact-fs").unlink()
+        with self.assertRaisesRegex(ValueError, "helper is missing"):
+            self.export()
+        self.assertFalse(self.args.output.exists())
+
+    def test_rejects_uncommitted_or_unidentifiable_source(self):
+        for change in ({"dirty": True}, {"revision": ""}, {"contentSha256": ""}, {"url": "https://example.com/other"}):
+            with self.subTest(change=change):
+                self.source_path.write_text(json.dumps(dict(self.source, **change)))
+                with self.assertRaises(ValueError):
+                    self.export()
+        self.assertFalse(self.args.output.exists())
+
+    def test_rejects_helper_architecture_mismatch(self):
+        with mock.patch.object(local_validation.sys, "platform", "darwin"), mock.patch.object(local_validation, "run", return_value="x86_64"):
+            with self.assertRaisesRegex(ValueError, "architecture"):
+                local_validation.export(self.args)
+        self.assertFalse(self.args.output.exists())
 
 
 if __name__ == "__main__":
