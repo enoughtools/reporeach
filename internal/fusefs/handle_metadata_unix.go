@@ -50,8 +50,8 @@ func (fs *ArtifactFuse) GetFileHandleAttributes(ctx context.Context, inode fuseo
 // worktree path and an unlinked open backing file. Truncating the latter must
 // never create a new overlay entry or resurrect the deleted path.
 func (fs *ArtifactFuse) SetFileHandleAttributes(ctx context.Context, op *fuseops.SetInodeAttributesOp) error {
-	fs.handleOps.RLock()
-	defer fs.handleOps.RUnlock()
+	fs.handleOps.Lock()
+	defer fs.handleOps.Unlock()
 	if op.Handle == nil {
 		return syscall.EBADF
 	}
@@ -109,6 +109,16 @@ func (fs *ArtifactFuse) SetFileHandleAttributes(ctx context.Context, op *fuseops
 	fh.mu.Unlock()
 	if path == ".git" {
 		return syscall.EROFS
+	}
+	if op.Size != nil || op.Mode != nil || op.Mtime != nil {
+		if err := fs.prepareOpenHandlesForOverlay(ctx, path); err != nil {
+			return fuseOperationError("prepare handle attributes", err)
+		}
+		// Promotion may have rebound this descriptor from the immutable blob.
+		fh.mu.Lock()
+		file = fh.cacheFile
+		retained = fh.cacheGeneration == -1 && file != nil
+		fh.mu.Unlock()
 	}
 	if op.Size != nil {
 		if fh.access != 0 && fh.access&2 == 0 {

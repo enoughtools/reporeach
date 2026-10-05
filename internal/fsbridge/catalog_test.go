@@ -876,6 +876,108 @@ func TestCatalogBridgeCreationRetainsWritableDescriptorForRestrictivePermissions
 	}
 }
 
+func TestCatalogBridgeBaseReaderSeesSeparateWriterAndRemainsReadOnly(t *testing.T) {
+	fixture := newBridgeCatalogFixture(t, "alice/project")
+	fs, err := catalogfs.New(bridgeCatalogEntries[:1], func(context.Context, catalogfs.Entry) (*fusefs.ArtifactFuse, error) {
+		return fixture.backend, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := newBridgeCatalogClient(t, fs)
+	root := c.repository(t, "alice")
+	file := c.lookup(t, root, "README.md")
+	reader := c.call(t, map[string]any{"op": "open", "inode": file, "access": 1}, 0).Handle
+	if got := c.readFile(t, file, reader); !bytes.Equal(got, fixture.content) {
+		t.Fatal("initial reader did not open the committed binary blob")
+	}
+	writer := c.call(t, map[string]any{"op": "open", "inode": file, "access": 2}, 0).Handle
+	changed := bytes.Clone(fixture.content)
+	changed[0], changed[len(changed)-1] = 0xfd, 0xfc
+	c.write(t, file, writer, 0, changed)
+	if got := c.readFile(t, file, reader); !bytes.Equal(got, changed) {
+		t.Fatalf("existing base reader returned stale bytes after separate writer: %x", got)
+	}
+	c.fileFailure(t, http.MethodPut, fmt.Sprintf("/v1/fs/write?inode=%d&handle=%d&offset=0", file, reader), []byte{0xfe}, syscall.EBADF)
+	c.fileFailure(t, http.MethodGet, fmt.Sprintf("/v1/fs/read?inode=%d&handle=%d&offset=0&size=1024", file, writer), nil, syscall.EBADF)
+	if got := c.readFile(t, file, reader); !bytes.Equal(got, changed) {
+		t.Fatal("rejected read-only handle write changed the shared file")
+	}
+	c.call(t, map[string]any{"op": "release", "handle": writer}, 0)
+	c.call(t, map[string]any{"op": "release", "handle": reader}, 0)
+}
+
+func TestCatalogBridgeBaseReaderRebindsBeforeChmodWriteOnly(t *testing.T) {
+	fixture := newBridgeCatalogFixture(t, "alice/project")
+	fs, err := catalogfs.New(bridgeCatalogEntries[:1], func(context.Context, catalogfs.Entry) (*fusefs.ArtifactFuse, error) {
+		return fixture.backend, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := newBridgeCatalogClient(t, fs)
+	root := c.repository(t, "alice")
+	file := c.lookup(t, root, "README.md")
+	reader := c.call(t, map[string]any{"op": "open", "inode": file, "access": 1}, 0).Handle
+	if got := c.readFile(t, file, reader); !bytes.Equal(got, fixture.content) {
+		t.Fatal("initial reader did not open the committed binary blob")
+	}
+	c.call(t, map[string]any{"op": "setattr", "inode": file, "attributes": map[string]any{"mode": 0o200}}, 0)
+	writer := c.call(t, map[string]any{"op": "open", "inode": file, "access": 2}, 0).Handle
+	changed := bytes.Clone(fixture.content)
+	changed[0], changed[len(changed)-1] = 0xfb, 0xfa
+	c.write(t, file, writer, 0, changed)
+	if got := c.readFile(t, file, reader); !bytes.Equal(got, changed) {
+		t.Fatalf("reader lost current bytes after chmod0200 and separate writer: %x", got)
+	}
+	attrs := c.call(t, map[string]any{"op": "getattr", "inode": file, "handle": reader}, 0).Node.Attributes
+	if attrs.Mode&0o777 != 0o200 || attrs.Size != uint64(len(changed)) {
+		t.Fatalf("rebinding changed restrictive attributes: %+v", attrs)
+	}
+	c.fileFailure(t, http.MethodPut, fmt.Sprintf("/v1/fs/write?inode=%d&handle=%d&offset=0", file, reader), []byte{0xfe}, syscall.EBADF)
+	c.call(t, map[string]any{"op": "fsync", "inode": file, "handle": writer}, 0)
+	c.call(t, map[string]any{"op": "release", "handle": writer}, 0)
+	c.call(t, map[string]any{"op": "release", "handle": reader}, 0)
+}
+
+func TestCatalogBridgeWritableHandleSurvivesChmodNoPermissions(t *testing.T) {
+	for _, byHandle := range []bool{false, true} {
+		t.Run(fmt.Sprintf("handle=%t", byHandle), func(t *testing.T) {
+			fixture := newBridgeCatalogFixture(t, "alice/project")
+			fs, err := catalogfs.New(bridgeCatalogEntries[:1], func(context.Context, catalogfs.Entry) (*fusefs.ArtifactFuse, error) {
+				return fixture.backend, nil
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			c := newBridgeCatalogClient(t, fs)
+			root := c.repository(t, "alice")
+			file := c.lookup(t, root, "README.md")
+			handle := c.call(t, map[string]any{"op": "open", "inode": file, "access": 3}, 0).Handle
+			if got := c.readFile(t, file, handle); !bytes.Equal(got, fixture.content) {
+				t.Fatal("initial writable handle did not open the committed bytes")
+			}
+			setattr := map[string]any{"op": "setattr", "inode": file, "attributes": map[string]any{"mode": 0o000}}
+			if byHandle {
+				setattr["handle"] = handle
+			}
+			c.call(t, setattr, 0)
+			changed := bytes.Clone(fixture.content)
+			changed[0], changed[len(changed)-1] = 0xf9, 0xf8
+			c.write(t, file, handle, 0, changed)
+			if got := c.readFile(t, file, handle); !bytes.Equal(got, changed) {
+				t.Fatalf("retained writable handle lost bytes after chmod0000: %x", got)
+			}
+			c.call(t, map[string]any{"op": "fsync", "inode": file, "handle": handle}, 0)
+			attrs := c.call(t, map[string]any{"op": "getattr", "inode": file, "handle": handle}, 0).Node.Attributes
+			if attrs.Mode&0o777 != 0 || attrs.Size != uint64(len(changed)) {
+				t.Fatalf("descriptor write changed mode0000 attributes: %+v", attrs)
+			}
+			c.call(t, map[string]any{"op": "release", "handle": handle}, 0)
+		})
+	}
+}
+
 func TestCatalogBridgeFileAccessFlagsLimitHandleOperations(t *testing.T) {
 	fixture := newBridgeCatalogFixture(t, "alice/project")
 	fs, err := catalogfs.New(bridgeCatalogEntries[:1], func(context.Context, catalogfs.Entry) (*fusefs.ArtifactFuse, error) {

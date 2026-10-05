@@ -6,7 +6,7 @@ RepoReach is a native SwiftUI management app over the ArtifactFS desktop service
 
 - macOS 13 or later for repository management, Apple Silicon or Intel. The bundled native filesystem requires macOS 26 or later.
 - Xcode 26 with the real macOS 26 SDK and [XcodeGen](https://github.com/yonaskolb/XcodeGen) for the default source build. The `FSPathURLResource` API is absent from older SDKs; an availability check cannot make an older SDK compile the extension.
-- The RepoReach filesystem extension must be signed with its actual FSModule provisioning profile and enabled by the user in System Settings. The native path is under development: a complete SDK 26 compile, installed extension activation, and real mount validation are separate release gates. See [native FSKit](../docs/reporeach/native-fskit.md).
+- The RepoReach filesystem extension must be signed with its actual FSModule provisioning profile and enabled by the user in System Settings. Complete SDK 26 builds pass in CI; installed extension activation and real mount validation remain release gates. See [native FSKit](../docs/reporeach/native-fskit.md).
 - Earlier macFUSE builds require its **kernel backend**; see [platform setup](../docs/reporeach/platform-setup.md). The legacy project is retained for source checks and does not bundle the native filesystem. RepoReach never silently enables extensions or changes startup security settings.
 - Bundled `artifact-fs` and the official GitHub CLI under `RepoReach.app/Contents/Helpers`. Release tooling builds/packages these tools; see `scripts/build-macos.sh` at the repository root.
 

@@ -111,6 +111,18 @@ jobs:
             -o build/fsbridge-smoke/check
           AFS_NATIVE_BRIDGE_CLIENT="$PWD/build/fsbridge-smoke/check" \
             go test -count=1 -run '^TestNativeClientInterop$' -v ./internal/fsbridge
+      - name: Production FSVolume callbacks against the real Go bridge
+        if: matrix.architecture == 'arm64'
+        # Callback integration; installed mount/read buffers/directory packers remain a separate gate.
+        run: |
+          mkdir -p build/fsbridge-smoke
+          xcrun swiftc -parse-as-library -target arm64-apple-macos15.4 \
+            native/FSKitExtension/BridgeModels.swift native/FSKitExtension/BridgeConfiguration.swift \
+            native/FSKitExtension/BridgeTransport.swift native/FSKitExtension/BridgeClient.swift \
+            native/FSKitExtension/RepoReachVolume.swift native/Tools/fsbridge-volume-smoke.swift \
+            -o build/fsbridge-smoke/volume-check
+          REPOREACH_FSBRIDGE_NATIVE_CLIENT="$PWD/build/fsbridge-smoke/volume-check" \
+            GOTOOLCHAIN=go1.26.8 go test -count=1 -run '^TestNativeFSKitBridgeClient$' -v ./internal/fsbridge
 
   fskit26:
     # Official runner inventory: actions/runner-images/images/macos/macos-26-arm64-Readme.md.
@@ -166,6 +178,18 @@ jobs:
             -o build/fsbridge-smoke/check
           AFS_NATIVE_BRIDGE_CLIENT="$PWD/build/fsbridge-smoke/check" \
             go test -count=1 -run '^TestNativeClientInterop$' -v ./internal/fsbridge
+      - name: Production FSVolume callbacks against the real Go bridge
+        if: matrix.architecture == 'arm64'
+        # Callback integration; installed mount/read buffers/directory packers remain a separate gate.
+        run: |
+          mkdir -p build/fsbridge-smoke
+          xcrun swiftc -parse-as-library -target arm64-apple-macos15.4 \
+            native/FSKitExtension/BridgeModels.swift native/FSKitExtension/BridgeConfiguration.swift \
+            native/FSKitExtension/BridgeTransport.swift native/FSKitExtension/BridgeClient.swift \
+            native/FSKitExtension/RepoReachVolume.swift native/Tools/fsbridge-volume-smoke.swift \
+            -o build/fsbridge-smoke/volume-check
+          REPOREACH_FSBRIDGE_NATIVE_CLIENT="$PWD/build/fsbridge-smoke/volume-check" \
+            GOTOOLCHAIN=go1.26.8 go test -count=1 -run '^TestNativeFSKitBridgeClient$' -v ./internal/fsbridge
 
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         if: always()

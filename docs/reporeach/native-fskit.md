@@ -52,7 +52,7 @@ The extension needs Apple's [FSKit Module entitlement](https://developer.apple.c
 
 A Developer ID signing certificate alone does not authorize the restricted extension entitlement. A matching identifier and provisioning profile must authorize the module and be embedded in the signed extension; Apple's [provisioning-profile explanation](https://developer.apple.com/documentation/technotes/tn3125-inside-code-signing-provisioning-profiles) describes this boundary. The required FSKit-enabled Developer ID profile has not yet been supplied for this work. Existing beta signing success does not establish that the new extension can run.
 
-The current development Mac is macOS 15.4.1 with Xcode 16.4. It cannot compile or execute the selected macOS 26 URL-resource implementation. Compilation requires Xcode 26 or later with the macOS 26 SDK; mounted acceptance requires a Mac running macOS 26 or later. The configured CI builder can establish compilation when its job runs, while installed and mounted behavior still needs a suitable Mac. Neither profile creation nor a host OS/driver/security change has been performed as part of this documentation.
+The current development Mac is macOS 15.4.1 with Xcode 16.4. It cannot compile or execute the selected macOS 26 URL-resource implementation. Compilation requires Xcode 26 or later with the macOS 26 SDK; mounted acceptance requires a Mac running macOS 26 or later. [CI run 37245859256](https://github.com/enoughtools/reporeach/actions/runs/37245859256) successfully compiled the complete extension and app for Apple Silicon and Intel with Xcode 26.6, checked the bundle layout, and passed the macOS 26 native tests and Go–Swift bridge smoke. That run exposed separate legacy control-smoke and Git logging cleanup failures; it is not a green whole-project check or mounted acceptance. Neither profile creation nor a host OS/driver/security change has been performed as part of this documentation.
 
 Local verification does cover the real Go Unix socket, catalogue, snapshot, overlay, and hydrator with the production Swift bridge client, including binary data, directory pagination, authorization, error mapping, and cleanup. Core FSVolume callback tests use the installed SDK's real FSKit framework. These tests exercise the adapter without a kernel mount; they do not establish resource authorization, installed activation, or kernel cache behavior.
 
@@ -83,8 +83,8 @@ The private bridge currently refuses an existing socket rather than automaticall
 | Area | Current evidence or required proof |
 | --- | --- |
 | Platform mechanism and chosen folder | Apple documents macOS 26 URL resources, user-space extensions, normal extension enablement, and a mount at a chosen home-directory path. |
-| RepoReach extension and Go bridge | Implementation in progress. No production mounted-backend claim. |
-| SDK compilation | Requires Xcode 26/macOS 26 SDK build evidence; the current development host cannot establish it. |
+| RepoReach extension and Go bridge | Implemented and exercised through real local socket and FSVolume callback tests. No production mounted-backend claim. |
+| SDK compilation | Complete app/extension ARM64 and Intel compilation and layout checks passed in macOS 26/Xcode 26.6 CI. |
 | Distribution authorization | Matching FSKit-enabled Developer ID provisioning profile is still missing. |
 | Kernel cache coherence | Persistent working-tree and quiescent catalogue policies are implemented in source; actual macOS 26 mounted proof remains outstanding. |
 | Existing beta.3 proof | Historical Go/native/Linux FUSE evidence remains valid for that release and is not FSKit evidence. |
@@ -96,5 +96,7 @@ Before publishing a native FSKit release, use disposable repositories and record
 3. Verify lazy catalogue browsing, text/binary reads, executable modes, symlinks, writes, rename/delete, directory enumeration, staging, commits, source preservation, and normal Git status.
 4. Warm kernel caches, then switch branches, refresh, restart, and change repo/owner visibility. Assert exact contents, attributes, names, and Git status. Check fresh lookups after a completed reconnect, and clear refusal with preserved state/handles when readers make detachment busy. Establish the macOS 26 policy rather than infer it from bridge responses.
 5. Exercise pinning, conservative Free Up Space refusal, reconnect/relocation, busy unmount, cancellation, extension/service failure, restart, and recovery without dropping staged or uncommitted work.
+
+The [opt-in mounted acceptance harness](fskit-acceptance.md) prepares disposable local fixtures and covers the core Finder/Git/reconnect sequence once a matching installed module is available. Its skip on this macOS 15 host is not evidence of a mounted pass.
 
 Record results by source revision, macOS/Xcode versions, architecture, signing/profile state, and actual mounted environment. Update this status only from that evidence; keep previous release tags, manifests, artifacts, and validation records unchanged.

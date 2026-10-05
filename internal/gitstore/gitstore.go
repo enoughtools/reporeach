@@ -866,7 +866,9 @@ func (s *Store) startRemotesForLogging(ctx context.Context, repo model.RepoConfi
 	}
 	lookupCtx, cancel := context.WithCancel(ctx)
 	result := make(chan lookupResult, 1)
+	done := make(chan struct{})
 	go func() {
+		defer close(done)
 		remote, err := runGit(lookupCtx, repo.GitDir, "remote", "get-url", "origin")
 		result <- lookupResult{remote: strings.TrimSpace(remote), err: err}
 	}()
@@ -875,21 +877,26 @@ func (s *Store) startRemotesForLogging(ctx context.Context, repo model.RepoConfi
 	known := false
 	actualRemote := ""
 	return func() ([]string, bool) {
-		if !finished {
-			select {
-			case lookup := <-result:
-				finished = true
-				known = lookup.err == nil
-				actualRemote = lookup.remote
-			default:
+			if !finished {
+				select {
+				case lookup := <-result:
+					finished = true
+					known = lookup.err == nil
+					actualRemote = lookup.remote
+				default:
+				}
 			}
+			remotes := []string{repo.RemoteURL}
+			if known && actualRemote != "" && actualRemote != strings.TrimSpace(repo.RemoteURL) {
+				remotes = append(remotes, actualRemote)
+			}
+			return remotes, known
+		}, func() {
+			// Cancellation alone does not reap the command. Join before returning
+			// ownership of repository paths and the command's environment to callers.
+			cancel()
+			<-done
 		}
-		remotes := []string{repo.RemoteURL}
-		if known && actualRemote != "" && actualRemote != strings.TrimSpace(repo.RemoteURL) {
-			remotes = append(remotes, actualRemote)
-		}
-		return remotes, known
-	}, cancel
 }
 
 func (s *Store) PrepareExistingCloneNonInteractive(ctx context.Context, repo model.RepoConfig) error {

@@ -295,13 +295,14 @@ func (fs *ArtifactFuse) pinOpenHandles(path string) error {
 		fh.mu.Lock()
 		fh.detachedMetadata = metadata
 		if fh.cacheFile == nil || fh.cacheGeneration != -1 {
-			f, openErr := os.OpenFile(ov.BackingPath, os.O_RDWR, 0)
+			access := fh.access
+			if access == 0 {
+				access = 3 // synthetic legacy handles have both capabilities
+			}
+			f, openErr := os.OpenFile(ov.BackingPath, fileOpenFlags(access), 0)
 			if openErr != nil {
-				f, openErr = os.Open(ov.BackingPath)
-				if openErr != nil {
-					fh.mu.Unlock()
-					return openErr
-				}
+				fh.mu.Unlock()
+				return openErr
 			}
 			old := fh.cacheFile
 			fh.cacheFile = f
@@ -313,6 +314,20 @@ func (fs *ArtifactFuse) pinOpenHandles(path string) error {
 		fh.mu.Unlock()
 	}
 	return nil
+}
+
+// Promote and bind every open reader before the first mutation or permission
+// change. Immutable blob descriptors cannot observe writes to a COW backing,
+// and reopening them after chmod would lose their accepted read capability.
+// The caller holds handleOps exclusively to keep promotion and rebinding atomic
+// with respect to all reads, writes, opens, and namespace changes.
+func (fs *ArtifactFuse) prepareOpenHandlesForOverlay(ctx context.Context, path string) error {
+	fs.resolver.transition.RLock()
+	defer fs.resolver.transition.RUnlock()
+	if err := fs.engine.ensureOverlay(ctx, path); err != nil {
+		return err
+	}
+	return fs.pinOpenHandles(path)
 }
 
 func (fs *ArtifactFuse) detachOpenHandles(path string) {
@@ -566,11 +581,16 @@ func (fs *ArtifactFuse) resolveAttrs(ctx context.Context, path string) (mode uin
 }
 
 func (fs *ArtifactFuse) SetInodeAttributes(ctx context.Context, op *fuseops.SetInodeAttributesOp) error {
-	fs.handleOps.RLock()
-	defer fs.handleOps.RUnlock()
+	fs.handleOps.Lock()
+	defer fs.handleOps.Unlock()
 	ref, err := fs.requireInode(op.Inode, syscall.ESTALE)
 	if err != nil {
 		return err
+	}
+	if ref.Type == "file" && ref.Path != ".git" && (op.Size != nil || op.Mode != nil || op.Mtime != nil) {
+		if err := fs.prepareOpenHandlesForOverlay(ctx, ref.Path); err != nil {
+			return fuseOperationError("prepare file attributes", err)
+		}
 	}
 	if op.Size != nil {
 		fs.closeCachedFilesForPath(ref.Path)
@@ -825,8 +845,8 @@ func (fs *ArtifactFuse) ReleaseDirHandle(_ context.Context, op *fuseops.ReleaseD
 }
 
 func (fs *ArtifactFuse) OpenFile(ctx context.Context, op *fuseops.OpenFileOp) error {
-	fs.handleOps.RLock()
-	defer fs.handleOps.RUnlock()
+	fs.handleOps.Lock()
+	defer fs.handleOps.Unlock()
 	ref, err := fs.requireInode(op.Inode, syscall.ESTALE)
 	if err != nil {
 		return err
@@ -837,10 +857,7 @@ func (fs *ArtifactFuse) OpenFile(ctx context.Context, op *fuseops.OpenFileOp) er
 	}
 	if ref.Path != ".git" {
 		if fh.access&2 != 0 {
-			fs.resolver.transition.RLock()
-			err := fs.engine.ensureOverlay(ctx, ref.Path)
-			fs.resolver.transition.RUnlock()
-			if err != nil {
+			if err := fs.prepareOpenHandlesForOverlay(ctx, ref.Path); err != nil {
 				return fuseOperationError("prepare writable open", err)
 			}
 		}

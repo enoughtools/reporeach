@@ -156,7 +156,7 @@ struct ControlSmoke {
                 let _: EmptyResponse = try await client.request("POST", path: "/v1/mount")
             } catch let failure as EngineFailure {
                 mountRefused = true
-                try expect(failure.message.localizedCaseInsensitiveContains("fuse"), "mount dependency error")
+                try expect(failure.message.contains("macOS 26"), "native filesystem OS requirement error")
             }
             try expect(mountRefused, "mount refused without dependency")
         }
