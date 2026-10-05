@@ -1,5 +1,6 @@
 import Foundation
 import Darwin
+import os
 
 struct FSBridgeHTTPResponse: Sendable {
     let status: Int
@@ -65,6 +66,8 @@ private final class FSBridgeCancellation: @unchecked Sendable {
 }
 
 final class FSBridgeTransport: @unchecked Sendable {
+    // Only fixed operation names and numeric errno values belong in this log.
+    private static let logger = Logger(subsystem: "com.enoughtools.reporeach.fsbridge", category: "Transport")
     private let configuration: FSBridgeConfiguration
     private let queue: OperationQueue
     private let lock = NSLock()
@@ -149,14 +152,30 @@ final class FSBridgeTransport: @unchecked Sendable {
                          control: FSBridgeCancellation) throws -> FSBridgeHTTPResponse {
         try control.check()
         let fd = Darwin.socket(AF_UNIX, SOCK_STREAM, 0)
-        guard fd >= 0 else { throw FSBridgeError.unavailable(Darwin.errno) }
+        guard fd >= 0 else {
+            let error = Darwin.errno
+            Self.logger.error("operation=socket errno=\(error, privacy: .public)")
+            throw FSBridgeError.unavailable(error)
+        }
         do { try control.own(fd) }
         catch { Darwin.close(fd); throw error }
         defer { control.release(fd) }
         var noSigPipe: Int32 = 1
-        guard setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &noSigPipe, socklen_t(MemoryLayout<Int32>.size)) == 0,
-              fcntl(fd, F_SETFD, FD_CLOEXEC) == 0,
-              fcntl(fd, F_SETFL, O_NONBLOCK) == 0 else { throw FSBridgeError.unavailable(Darwin.errno) }
+        guard setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &noSigPipe, socklen_t(MemoryLayout<Int32>.size)) == 0 else {
+            let error = Darwin.errno
+            Self.logger.error("operation=setsockopt.SO_NOSIGPIPE errno=\(error, privacy: .public)")
+            throw FSBridgeError.unavailable(error)
+        }
+        guard fcntl(fd, F_SETFD, FD_CLOEXEC) == 0 else {
+            let error = Darwin.errno
+            Self.logger.error("operation=fcntl.F_SETFD errno=\(error, privacy: .public)")
+            throw FSBridgeError.unavailable(error)
+        }
+        guard fcntl(fd, F_SETFL, O_NONBLOCK) == 0 else {
+            let error = Darwin.errno
+            Self.logger.error("operation=fcntl.F_SETFL errno=\(error, privacy: .public)")
+            throw FSBridgeError.unavailable(error)
+        }
 
         var address = sockaddr_un()
         address.sun_family = sa_family_t(AF_UNIX)
@@ -171,14 +190,24 @@ final class FSBridgeTransport: @unchecked Sendable {
             }
         }
         if connected != 0 {
-            guard Darwin.errno == EINPROGRESS else { try control.check(); throw FSBridgeError.unavailable(Darwin.errno) }
+            let connectError = Darwin.errno
+            guard connectError == EINPROGRESS else {
+                Self.logger.error("operation=connect errno=\(connectError, privacy: .public)")
+                try control.check()
+                throw FSBridgeError.unavailable(connectError)
+            }
             try wait(fd, event: Int16(POLLOUT), deadline: deadline, control: control)
             var error: Int32 = 0
             var length = socklen_t(MemoryLayout<Int32>.size)
             guard getsockopt(fd, SOL_SOCKET, SO_ERROR, &error, &length) == 0 else {
-                throw FSBridgeError.unavailable(Darwin.errno)
+                let optionError = Darwin.errno
+                Self.logger.error("operation=getsockopt.SO_ERROR errno=\(optionError, privacy: .public)")
+                throw FSBridgeError.unavailable(optionError)
             }
-            guard error == 0 else { throw FSBridgeError.unavailable(error) }
+            guard error == 0 else {
+                Self.logger.error("operation=SO_ERROR errno=\(error, privacy: .public)")
+                throw FSBridgeError.unavailable(error)
+            }
         }
 
         let head = "\(method) \(path) HTTP/1.1\r\nHost: localhost\r\nAuthorization: \(configuration.authorizationHeader)\r\nContent-Type: \(contentType)\r\nContent-Length: \(body.count)\r\nConnection: close\r\n\r\n"
