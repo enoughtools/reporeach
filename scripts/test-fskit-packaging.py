@@ -561,5 +561,66 @@ class ValidationGenerationFlagsTests(unittest.TestCase):
         self.assertFalse(generation.exists())
 
 
+class BuildRegistrationCleanupTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory(prefix="reporeach-registration-cleanup-test-")
+        self.addCleanup(self.temporary.cleanup)
+        self.app = pathlib.Path(self.temporary.name) / "derived/Build/Products/Release/RepoReach.app"
+        self.app.mkdir(parents=True)
+        self.module = self.app / "Contents/Extensions/RepoReachFSKit.appex"
+        self.script = pathlib.Path(__file__).with_name("build-macos.sh").read_text()
+        self.code = self.script.split("<<'PY_REGISTRATION'\n", 1)[1].split("\nPY_REGISTRATION", 1)[0]
+
+    def run_cleanup(self, inventory=b" (no matches)\n", unregister_status=0, inventory_status=0, backend="fskit"):
+        results = [SimpleNamespace(returncode=unregister_status, stdout=b"", stderr=b"")]
+        if not unregister_status and backend == "fskit":
+            results.append(SimpleNamespace(returncode=inventory_status, stdout=inventory, stderr=b""))
+        with mock.patch.object(sys, "argv", ["cleanup", str(self.app), backend]), mock.patch.object(subprocess, "run", side_effect=results) as run:
+            exec(compile(self.code, "build-macos.sh registration cleanup", "exec"), {})
+        return run.call_args_list
+
+    def inventory(self, module):
+        return f"     com.enoughtools.reporeach.fskit((null))\tfixture-uuid\t2026-10-05 00:00:00 +0000\t{module}\n (1 plug-in)\n".encode()
+
+    def test_cleanup_unregisters_only_exact_successful_product_and_reads_module_inventory(self):
+        calls = self.run_cleanup()
+        self.assertEqual(calls[0].args[0], ["/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister", "-u", str(self.app)])
+        self.assertEqual(calls[1].args[0], ["/usr/bin/pluginkit", "-m", "-A", "-D", "-v", "-i", packaging.MODULE_ID])
+        self.assertNotIn("REGISTER_APP_WITH_LAUNCH_SERVICES", self.script)
+        build_position = self.script.index("CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO build")
+        cleanup_position = self.script.index("<<'PY_REGISTRATION'")
+        validation_position = self.script.index('python3 "$ROOT/scripts/validate-fskit-bundle.py" compile')
+        self.assertLess(build_position, cleanup_position)
+        self.assertLess(cleanup_position, validation_position)
+        self.assertNotIn("trap ", self.script[:cleanup_position])
+
+    def test_unrelated_app_with_same_identifier_is_preserved(self):
+        other = self.app.parent / "Other.app/Contents/Extensions/RepoReachFSKit.appex"
+        calls = self.run_cleanup(inventory=self.inventory(other))
+        self.assertEqual(len(calls), 2)
+        self.assertNotIn(str(other), calls[0].args[0])
+
+    def test_remaining_exact_module_or_incomplete_inventory_stops_packaging(self):
+        for inventory, reason in ((self.inventory(self.module), "still registered"), (b"", "Incomplete"), (b" (2 plug-ins)\n", "Incomplete"), (b"unstructured result\n", "Unexpected"), (b" (no matches)\n (no matches)\n", "Unexpected")):
+            with self.subTest(inventory=inventory), self.assertRaisesRegex(SystemExit, reason):
+                self.run_cleanup(inventory=inventory)
+
+    def test_tool_failures_stop_without_followup_mutations(self):
+        with self.assertRaisesRegex(SystemExit, "Could not unregister"):
+            self.run_cleanup(unregister_status=1)
+        with self.assertRaisesRegex(SystemExit, "Could not verify"):
+            self.run_cleanup(inventory_status=1)
+
+    def test_legacy_build_only_unregisters_parent_and_redirected_product_is_rejected(self):
+        self.assertEqual(len(self.run_cleanup(backend="macfuse")), 1)
+        self.app.rmdir()
+        target = pathlib.Path(self.temporary.name) / "installed-app"
+        target.mkdir()
+        self.app.symlink_to(target, target_is_directory=True)
+        with mock.patch.object(sys, "argv", ["cleanup", str(self.app), "fskit"]), mock.patch.object(subprocess, "run") as run, self.assertRaisesRegex(SystemExit, "symlink"):
+            exec(compile(self.code, "build-macos.sh registration cleanup", "exec"), {})
+        run.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

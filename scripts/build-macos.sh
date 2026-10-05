@@ -99,8 +99,48 @@ xcodegen generate --spec "$PROJECT_SPEC" --project "$ROOT/native"
 xcodebuild -project "$ROOT/native/RepoReach.xcodeproj" -scheme "$SCHEME" \
   -configuration Release -derivedDataPath "$DERIVED" \
   ARCHS="$ARCH" ONLY_ACTIVE_ARCH=NO \
-  CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO \
-  REGISTER_APP_WITH_LAUNCH_SERVICES=NO build
+  CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO build
+# Xcode registers macOS app products during a successful build. Retire only
+# this build's unsigned product before packaging or returning compile output.
+# Do not clean up a pre-existing derived product after a failed build.
+python3 - "$DERIVED/Build/Products/Release/RepoReach.app" "$BACKEND" <<'PY_REGISTRATION'
+import pathlib, re, subprocess, sys
+
+app = pathlib.Path(sys.argv[1])
+if not app.is_dir() or app.is_symlink():
+    raise SystemExit("Expected compiled app is missing or redirects through a symlink.")
+unregister = "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+result = subprocess.run([unregister, "-u", str(app)], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+if result.returncode:
+    raise SystemExit("Could not unregister this exact compiled app; packaging stopped.")
+if sys.argv[2] == "fskit":
+    result = subprocess.run(["/usr/bin/pluginkit", "-m", "-A", "-D", "-v", "-i", "com.enoughtools.reporeach.fskit"], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if result.returncode or len(result.stdout) > 1024 * 1024:
+        raise SystemExit("Could not verify the compiled filesystem module registration; packaging stopped.")
+    module = str(app / "Contents/Extensions/RepoReachFSKit.appex")
+    records, summary = [], None
+    for line in result.stdout.decode("utf-8", errors="strict").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if line == "(no matches)":
+            if summary is not None:
+                raise SystemExit("Unexpected filesystem registration inventory; packaging stopped.")
+            summary = 0
+        elif re.fullmatch(r"\(\d+ plug-ins?\)", line):
+            if summary is not None:
+                raise SystemExit("Unexpected filesystem registration inventory; packaging stopped.")
+            summary = int(line.split()[0][1:])
+        else:
+            fields = line.split("\t")
+            if len(fields) != 4 or not re.fullmatch(r"[+\-=]?\s*com\.enoughtools\.reporeach\.fskit\(.*\)", fields[0]) or not fields[-1].startswith("/"):
+                raise SystemExit("Unexpected filesystem registration inventory; packaging stopped.")
+            records.append(fields[-1])
+    if summary != len(records):
+        raise SystemExit("Incomplete filesystem registration inventory; packaging stopped.")
+    if module in records:
+        raise SystemExit("This compiled filesystem module is still registered; packaging stopped.")
+PY_REGISTRATION
 if [ "$COMPILE_ONLY" = true ]; then
   if [ "$BACKEND" = fskit ]; then
     python3 "$ROOT/scripts/validate-fskit-bundle.py" compile \

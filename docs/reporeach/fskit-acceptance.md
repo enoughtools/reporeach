@@ -73,8 +73,10 @@ For the requested local app build, first confirm that `xcodebuild -version` and
 `xcrun --sdk macosx --show-sdk-version` select the newly installed toolchain rather
 than Xcode 16.4/SDK 15.5. Xcode 27 and its SDK meet the required minimum of 26.
 Then run `scripts/build-macos.sh --backend fskit --compile-only --arch arm64 --unsigned`
-to validate the app and module locally. This compilation step does not install,
-sign for distribution, enable, or mount the extension. Record the actual local
+to validate the app and module locally. Xcode may register its unsigned app product during compilation. After a successful
+build, the script retires only that exact product registration and verifies its
+FSKit module is absent before returning or packaging. It does not enable the
+extension, sign for distribution, or mount a filesystem. Record the actual local
 toolchain and source revision; signing authorization and installed execution
 remain separate requirements.
 
