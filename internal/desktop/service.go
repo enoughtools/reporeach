@@ -50,6 +50,9 @@ type Service struct {
 	locks            map[string]chan struct{}
 	pins             map[string]string
 	closing          bool
+	quitPrepared     bool
+	closed           bool
+	closeMu          sync.Mutex
 	maintenance      bool
 	recoveryRequired bool
 	workers          sync.WaitGroup
@@ -60,6 +63,9 @@ type Service struct {
 	mounted         fusefs.MountedFS
 	dependencyReady func() bool
 	mountCatalogue  func(context.Context, string, *catalogfs.FileSystem) (fusefs.MountedFS, error)
+	// FSKit 26 cannot invalidate catalogue changes made outside the mounted
+	// filesystem. Publish them only after a normal, successful unmount.
+	quiescentCatalogue bool
 }
 
 func New(ctx context.Context, opts Options) (*Service, error) {
@@ -96,6 +102,12 @@ func New(ctx context.Context, opts Options) (*Service, error) {
 	if err != nil {
 		return nil, err
 	}
+	if runtime.GOOS == "darwin" {
+		if err := engine.SetCatalogViewPolicy(daemon.CatalogViewPersistentWorkingTree); err != nil {
+			_ = engine.Close()
+			return nil, err
+		}
+	}
 	if err := engine.RecoverStorageTransactions(ctx); err != nil {
 		_ = engine.Close()
 		return nil, fmt.Errorf("recover repository storage: %w", err)
@@ -107,8 +119,9 @@ func New(ctx context.Context, opts Options) (*Service, error) {
 		github: NewGitHub(opts.GHPath), engine: engine, state: state,
 		ops: []Operation{}, cancels: map[string]context.CancelFunc{},
 		locks: map[string]chan struct{}{}, pins: map[string]string{},
-		dependencyReady: platformDependencyReady, mountCatalogue: catalogfs.Mount,
+		dependencyReady: platformDependencyReady, quiescentCatalogue: runtime.GOOS == "darwin",
 	}
+	s.mountCatalogue = s.platformMountCatalogue
 	if err := s.recoverRootMigration(ctx); err != nil {
 		_ = engine.Close()
 		cancel()
@@ -157,25 +170,36 @@ func New(ctx context.Context, opts Options) (*Service, error) {
 }
 
 func (s *Service) Close() error {
+	s.closeMu.Lock()
+	defer s.closeMu.Unlock()
 	s.mu.Lock()
-	if s.closing {
+	if s.closed {
 		s.mu.Unlock()
 		return nil
 	}
+	firstClose := !s.closing
 	s.closing = true
 	s.cancel()
 	for _, cancel := range s.cancels {
 		cancel()
 	}
 	s.mu.Unlock()
-	s.github.Close()
+	if firstClose {
+		s.github.Close()
+	}
 	s.workers.Wait()
 	s.lifecycle.Lock()
 	defer s.lifecycle.Unlock()
 	if err := s.detachLocked(); err != nil {
 		return err
 	}
-	return s.engine.Close()
+	if err := s.engine.Close(); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	s.closed = true
+	s.mu.Unlock()
+	return nil
 }
 
 func (s *Service) Restore() {
@@ -190,7 +214,7 @@ func (s *Service) Restore() {
 		}
 	}
 	s.mu.Lock()
-	if s.closing {
+	if s.closing || s.quitPrepared {
 		s.mu.Unlock()
 		return
 	}
@@ -221,7 +245,7 @@ func (s *Service) Status() Status {
 		Organizations: s.organizationsLocked(), Message: s.message}
 }
 
-func (s *Service) Discover(ctx context.Context) (Status, error) {
+func (s *Service) Discover(ctx context.Context) (status Status, retErr error) {
 	repos, account, err := s.github.Discover(ctx)
 	if err != nil {
 		return Status{}, err
@@ -234,11 +258,30 @@ func (s *Service) Discover(ctx context.Context) (Status, error) {
 	s.lifecycle.Lock()
 	defer s.lifecycle.Unlock()
 	s.mu.Lock()
-	if s.closing {
+	if s.closing || s.quitPrepared || s.maintenance || s.recoveryRequired {
 		s.mu.Unlock()
-		return Status{}, errors.New("service is closing")
+		return Status{}, errors.New("wait for the repository service to finish its current change")
+	}
+	s.mu.Unlock()
+	remount, err := s.quiesceCatalogueChange(ctx)
+	if err != nil {
+		return Status{}, err
+	}
+	defer func() {
+		retErr = errors.Join(retErr, s.restoreCatalogueAfterChange(ctx, remount))
+		status = s.Status()
+	}()
+	s.mu.Lock()
+	if s.closing || s.quitPrepared || s.recoveryRequired {
+		s.mu.Unlock()
+		return Status{}, errors.New("repository service is closing or needs recovery")
+	}
+	if err := ctx.Err(); err != nil {
+		s.mu.Unlock()
+		return Status{}, err
 	}
 	previous := s.state
+	oldEntries := s.entriesLocked()
 	old := map[string]Repository{}
 	owners := map[string]string{}
 	for _, owner := range s.state.DisabledOrganizations {
@@ -285,21 +328,33 @@ func (s *Service) Discover(ctx context.Context) (Status, error) {
 	}
 	sort.Slice(repos, func(i, j int) bool { return strings.ToLower(repos[i].ID) < strings.ToLower(repos[j].ID) })
 	s.state.Repositories, s.state.Account = repos, account
-	err = s.persistLocked()
+	err = ctx.Err()
+	if err == nil {
+		err = s.persistLocked()
+		if err == nil {
+			err = ctx.Err()
+		}
+	}
 	if err != nil {
 		s.state = previous
+		err = errors.Join(err, s.persistLocked())
 	}
 	catalog := s.catalog
 	entries := s.entriesLocked()
-	s.mu.Unlock()
 	if err != nil {
+		s.mu.Unlock()
 		return Status{}, err
 	}
 	if catalog != nil {
 		if err := catalog.SetEntries(entries); err != nil {
-			return Status{}, err
+			s.state = previous
+			persistErr := s.persistLocked()
+			catalogErr := catalog.SetEntries(oldEntries)
+			s.mu.Unlock()
+			return Status{}, errors.Join(err, persistErr, catalogErr)
 		}
 	}
+	s.mu.Unlock()
 	return s.Status(), nil
 }
 
@@ -318,7 +373,7 @@ func (s *Service) Mount(ctx context.Context) error {
 
 func (s *Service) mountLocked(ctx context.Context) error {
 	s.mu.Lock()
-	if s.closing {
+	if s.closing || s.quitPrepared {
 		s.mu.Unlock()
 		return errors.New("service is closing")
 	}
@@ -333,7 +388,7 @@ func (s *Service) mountLocked(ctx context.Context) error {
 	root, entries := s.state.MountRoot, s.entriesLocked()
 	s.mu.Unlock()
 	if !s.dependencyReady() {
-		return errors.New("install macFUSE to mount repositories in Finder")
+		return errors.New(platformDependencyMessage())
 	}
 	if err := safeMountDirectory(root); err != nil {
 		return err
@@ -350,8 +405,11 @@ func (s *Service) mountLocked(ctx context.Context) error {
 		return err
 	}
 	mounted, err := s.mountCatalogue(ctx, root, fs)
-	if err != nil {
+	if err != nil && mounted == nil {
 		return err
+	}
+	if mounted == nil {
+		return errors.New("filesystem mount returned no lifecycle owner")
 	}
 	s.mu.Lock()
 	if s.closing {
@@ -372,6 +430,11 @@ func (s *Service) mountLocked(ctx context.Context) error {
 		return errors.Join(errors.New("service is closing"), cleanupErr)
 	}
 	s.catalog, s.mounted = fs, mounted
+	if err != nil {
+		// A failed command is not proof that the OS did not mount the volume.
+		// Retain ownership and the live stores until detachment is proven.
+		s.message = safeError(err)
+	}
 	// Join observes unexpected unmounts without keeping a second mount alive.
 	s.workers.Add(1)
 	s.mu.Unlock()
@@ -390,14 +453,14 @@ func (s *Service) mountLocked(ctx context.Context) error {
 		}
 		s.mu.Unlock()
 	}()
-	return nil
+	return err
 }
 
 func (s *Service) Unmount(ctx context.Context) error {
 	s.lifecycle.Lock()
 	defer s.lifecycle.Unlock()
 	s.mu.Lock()
-	closing := s.closing
+	closing := s.closing || s.quitPrepared
 	s.mu.Unlock()
 	if closing {
 		return errors.New("service is closing")
@@ -409,6 +472,37 @@ func (s *Service) Unmount(ctx context.Context) error {
 	defer s.mu.Unlock()
 	s.state.MountDesired = false
 	return s.persistLocked()
+}
+
+// PrepareQuit detaches normally while retaining mount intent for the next launch.
+// The app must leave its helper running if this reports a busy or uncertain mount.
+func (s *Service) PrepareQuit(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	s.lifecycle.Lock()
+	defer s.lifecycle.Unlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	closing := s.closing
+	s.mu.Unlock()
+	if closing {
+		return errors.New("service is closing")
+	}
+	if err := s.detachLocked(); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	// lifecycle remains held through the terminal claim. A control request
+	// cannot remount between successful preparation and helper termination.
+	s.mu.Lock()
+	s.quitPrepared = true
+	s.mu.Unlock()
+	return nil
 }
 
 func (s *Service) detachLocked() error {
@@ -441,7 +535,7 @@ func (s *Service) Settings(ctx context.Context, root string) error {
 	s.lifecycle.Lock()
 	defer s.lifecycle.Unlock()
 	s.mu.Lock()
-	if s.closing {
+	if s.closing || s.quitPrepared {
 		s.mu.Unlock()
 		return errors.New("service is closing")
 	}
@@ -540,7 +634,7 @@ func (s *Service) Settings(ctx context.Context, root string) error {
 
 func (s *Service) ensureRepository(ctx context.Context, id string) (*fusefs.ArtifactFuse, error) {
 	s.mu.Lock()
-	if s.closing || s.recoveryRequired {
+	if s.closing || s.quitPrepared || s.recoveryRequired {
 		s.mu.Unlock()
 		return nil, errors.New("repository service is closing or needs recovery")
 	}
@@ -617,7 +711,7 @@ func (s *Service) ensureRepository(ctx context.Context, id string) (*fusefs.Arti
 func (s *Service) Action(id, action string) (Operation, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.closing {
+	if s.closing || s.quitPrepared {
 		return Operation{}, errors.New("service is closing")
 	}
 	if s.maintenance {
@@ -1004,18 +1098,6 @@ func safeMountDirectory(root string) error {
 		return errors.New("choose an empty folder so RepoReach does not hide existing files")
 	}
 	return nil
-}
-
-func platformDependencyReady() bool {
-	if runtime.GOOS == "darwin" {
-		info, err := os.Stat("/Library/Filesystems/macfuse.fs/Contents/Resources/mount_macfuse")
-		return err == nil && !info.IsDir() && info.Mode()&0o111 != 0
-	}
-	if runtime.GOOS == "linux" {
-		_, err := os.Stat("/dev/fuse")
-		return err == nil
-	}
-	return false
 }
 
 func shellQuote(value string) string { return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'" }

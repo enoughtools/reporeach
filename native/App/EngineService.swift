@@ -27,6 +27,7 @@ final class EngineService {
     }
 
     var client: EngineClient { EngineClient(executable: engine, socket: socket) }
+    var isRunning: Bool { process?.isRunning == true }
 
     func start(mountRoot: String) throws {
         if process?.isRunning == true { return }

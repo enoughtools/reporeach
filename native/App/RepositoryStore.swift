@@ -275,6 +275,10 @@ final class RepositoryStore: ObservableObject {
     func showFinderExtensionSettings() {
         if let url = URL(string: "x-apple.systempreferences:com.apple.ExtensionsPreferences") { NSWorkspace.shared.open(url) }
     }
+    func showFilesystemExtensionSettings() {
+        if let url = URL(string: "x-apple.systempreferences:com.apple.LoginItems-Settings.extension"), NSWorkspace.shared.open(url) { return }
+        NSWorkspace.shared.open(URL(fileURLWithPath: "/System/Applications/System Settings.app"))
+    }
     func openDependencyPage() { NSWorkspace.shared.open(URL(string: "https://github.com/enoughtools/reporeach/blob/main/docs/reporeach/platform-setup.md")!) }
 
     func setLaunchAtLogin(_ enabled: Bool) async {
@@ -290,6 +294,23 @@ final class RepositoryStore: ObservableObject {
     }
 
     func dismissError() { errorMessage = nil }
+    // Prove detachment before terminating the helper that serves file operations.
+    // A busy volume must keep its service and stores alive.
+    func prepareToQuit() async -> Bool {
+        guard !demoMode else { return true }
+        if isStarting { await startupTask?.value }
+        guard serviceRunning || service.isRunning else { return true }
+        do {
+            let loaded: EngineStatus = try await service.client.request("POST", path: "/v1/prepare-quit", timeout: 45)
+            apply(loaded)
+            guard !loaded.mounted else { throw EngineFailure(message: "The repository folder is still in use. Close files and terminals using it before quitting RepoReach.") }
+            return true
+        } catch {
+            show(error)
+            return false
+        }
+    }
+
     func stop() { invalidated = true; pollTask?.cancel(); pollTask = nil; startupTask?.cancel(); startupTask = nil; service.stop() }
 
     private func perform(_ work: () async throws -> Void) async {

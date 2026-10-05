@@ -37,7 +37,7 @@ func (s *Store) VerifySafeToDiscard(ctx context.Context, repo model.RepoConfig) 
 	}
 	// GIT_WORK_TREE is deliberately excluded: the virtual checkout has already
 	// been detached. diff-index --cached checks the index without a worktree.
-	env := append(nonInteractiveGitEnv(), "GIT_NO_LAZY_FETCH=1", "GIT_OPTIONAL_LOCKS=0")
+	env := append(nonInteractiveGitEnv(), "GIT_NO_LAZY_FETCH=1", "GIT_OPTIONAL_LOCKS=0", "GIT_NO_REPLACE_OBJECTS=1")
 	changed, err := runGitWithEnv(ctx, repo.GitDir, env, "diff-index", "--cached", "--name-only", "-z", "HEAD", "--")
 	if err != nil {
 		return fmt.Errorf("cannot verify index: %w", err)
@@ -50,6 +50,18 @@ func (s *Store) VerifySafeToDiscard(ctx context.Context, repo model.RepoConfig) 
 		return err
 	}
 	for _, ref := range strings.Fields(refs) {
+		if ref == WorkingTreeBaselineRef {
+			// The application owns exactly this direct commit ref. Its objects
+			// remain included in the remote recoverability checks below.
+			metadata, err := runGitWithEnv(ctx, repo.GitDir, env, "for-each-ref", "--format=%(objecttype) %(symref)", ref)
+			if err != nil {
+				return err
+			}
+			if metadata != "commit" {
+				return errors.New("repository contains an invalid or symbolic workingtree baseline ref")
+			}
+			continue
+		}
 		if !strings.HasPrefix(ref, "refs/heads/") && !strings.HasPrefix(ref, "refs/tags/") && !strings.HasPrefix(ref, "refs/remotes/") {
 			return errors.New("repository contains a stash, notes, or other local-only refs")
 		}

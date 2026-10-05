@@ -112,11 +112,17 @@ func TestWriteThroughOpenedBaseHandlePromotesAndWrites(t *testing.T) {
 	if err := os.WriteFile(cachePath, []byte("base"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	repo := model.RepoConfig{ID: "repo"}
+	root := t.TempDir()
+	repo := model.RepoConfig{ID: "repo", OverlayDir: filepath.Join(root, "overlay"), OverlayDBPath: filepath.Join(root, "overlay.db")}
 	base := model.BaseNode{RepoID: repo.ID, Path: "file.txt", Type: "file", Mode: 0o644, ObjectOID: "blob", SizeState: "known", SizeBytes: 4}
 	snap := &fakeSnapshot{nodes: map[string]model.BaseNode{"file.txt": base}}
-	ov := &fakeOverlay{entries: map[string]model.OverlayEntry{}}
-	resolver := newResolver(snap, ov)
+	ov, err := overlaystore.New(context.Background(), repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ov.Close() })
+	resolver := &Resolver{Snapshot: snap, Overlay: ov}
+	resolver.SetGeneration(1)
 	h := &fakeLookupHydrator{size: 4, path: cachePath}
 	engine := &Engine{Resolver: resolver, Repo: repo, Overlay: ov, Hydrator: h}
 	fs := NewArtifactFuse(repo, resolver, engine)
@@ -124,15 +130,27 @@ func TestWriteThroughOpenedBaseHandlePromotesAndWrites(t *testing.T) {
 	if err := fs.LookUpInode(context.Background(), lookup); err != nil {
 		t.Fatal(err)
 	}
-	open := &fuseops.OpenFileOp{Inode: lookup.Entry.Child}
+	open := &fuseops.OpenFileOp{Inode: lookup.Entry.Child, OpenFlags: syscall.O_RDWR}
 	if err := fs.OpenFile(context.Background(), open); err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() {
+		_ = fs.ReleaseFileHandle(context.Background(), &fuseops.ReleaseFileHandleOp{Handle: open.Handle})
+	})
 	if err := fs.WriteFile(context.Background(), &fuseops.WriteFileOp{Handle: open.Handle, Data: []byte("local")}); err != nil {
 		t.Fatal(err)
 	}
-	if ov.writes != 1 || string(ov.data) != "local" {
-		t.Fatalf("overlay writes = %d, data = %q", ov.writes, ov.data)
+	entry, ok, err := ov.Lookup(context.Background(), base.Path)
+	if err != nil || !ok || entry.Kind != model.OverlayKindModify || entry.SizeBytes != 5 {
+		t.Fatalf("promoted overlay = %+v, exists = %v, err = %v", entry, ok, err)
+	}
+	data, err := os.ReadFile(entry.BackingPath)
+	if err != nil || !bytes.Equal(data, []byte("local")) {
+		t.Fatalf("overlay data = %q, err = %v", data, err)
+	}
+	cache, err := os.ReadFile(cachePath)
+	if err != nil || !bytes.Equal(cache, []byte("base")) {
+		t.Fatalf("immutable base data = %q, err = %v", cache, err)
 	}
 }
 

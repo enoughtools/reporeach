@@ -2,6 +2,8 @@
 
 RepoReach combines a macOS management app with a Git-backed filesystem. Enough Tools owns the desktop product in this repository; the underlying engine comes from Cloudflare ArtifactFS and retains its Go module path, `github.com/cloudflare/artifact-fs`.
 
+The transport described below is the published beta.3 FUSE architecture. A bundled native FSKit backend for macOS 26 is under development; its design and unresolved acceptance requirements are recorded in [Native FSKit](native-fskit.md). Historical beta.3 validation does not establish a mounted FSKit backend.
+
 ```mermaid
 flowchart LR
     App[SwiftUI app and background process] -->|Private Unix socket| Desktop[Desktop control service]
@@ -70,3 +72,9 @@ Finder status is a separate cache, written atomically with private file permissi
 This is a FUSE filesystem, not an Apple File Provider extension. RepoReach controls the catalogue mount location and manages its own lazy content layer. It depends on separately installed macFUSE and requires a running local service.
 
 Keep Downloaded is a current-tree availability operation. It is not a complete offline history, LFS/submodule client, general file backup, or automatic commit/push service. The management app's status polling is local; repository discovery and user-requested refresh are separate operations. See [the user guide](user-guide.md) for user-visible behavior and [Contributing](../../CONTRIBUTING.md) for development invariants and tests.
+
+## Native macOS transport under development
+
+The selected future path bundles RepoReach's own FSKit app extension for macOS 26, backed by a private Unix socket bridge to the existing Go catalogue and Git/storage engine. Its target installation experience is normal app installation and one File System Extension enablement, without an external macFUSE installer or Recovery/security-policy changes. This is not yet a production backend claim.
+
+The native source uses a persistent working-tree baseline and quiescent catalogue updates to avoid the earlier live policy's out-of-band view changes. The macOS 26 SDK/build, FSKit-enabled Developer ID provisioning profile, and actual mounted Git/cache-coherence behavior remain acceptance gates. See [the native backend decision and proof status](native-fskit.md); immutable earlier releases retain their existing requirements and results.

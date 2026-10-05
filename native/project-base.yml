@@ -1,0 +1,84 @@
+name: RepoReach
+options:
+  minimumXcodeGenVersion: 2.46.0
+  deploymentTarget:
+    macOS: '13.0'
+  createIntermediateGroups: true
+settings:
+  base:
+    SWIFT_VERSION: '5.0'
+    MACOSX_DEPLOYMENT_TARGET: '13.0'
+    MARKETING_VERSION: '0.1.0'
+    CURRENT_PROJECT_VERSION: '3'
+    ENABLE_HARDENED_RUNTIME: YES
+    CODE_SIGN_STYLE: Automatic
+    CLANG_ENABLE_MODULES: YES
+    SWIFT_EMIT_LOC_STRINGS: NO
+    COMBINE_HIDPI_IMAGES: YES
+    ENABLE_USER_SCRIPT_SANDBOXING: YES
+    GENERATE_INFOPLIST_FILE: NO
+    ARCHS: 'arm64 x86_64'
+    ONLY_ACTIVE_ARCH: NO
+targets:
+  RepoReach:
+    type: application
+    platform: macOS
+    sources:
+      - path: App
+      - path: Resources
+      - path: Shared
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.enoughtools.reporeach
+        PRODUCT_NAME: RepoReach
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        INFOPLIST_FILE: App/Info.plist
+    dependencies:
+      - target: RepoReachFinder
+        embed: true
+      - sdk: ServiceManagement.framework
+  RepoReachFinder:
+    type: app-extension
+    platform: macOS
+    sources:
+      - path: FinderExtension
+        excludes:
+          - README.md
+          - '*.entitlements'
+      - path: Shared
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.enoughtools.reporeach.finder
+        PRODUCT_NAME: RepoReachFinder
+        INFOPLIST_FILE: FinderExtension/Info.plist
+        APPLICATION_EXTENSION_API_ONLY: YES
+        SKIP_INSTALL: YES
+        CODE_SIGN_ENTITLEMENTS: FinderExtension/Finder.entitlements
+    dependencies:
+      - sdk: FinderSync.framework
+  RepoReachTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: Tests
+      - path: FSKitExtension/BridgeModels.swift
+      - path: FSKitExtension/BridgeClient.swift
+      - path: FSKitExtension/BridgeConfiguration.swift
+      - path: FSKitExtension/BridgeTransport.swift
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.enoughtools.reporeach.tests
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_HOST: '$(BUILT_PRODUCTS_DIR)/RepoReach.app/Contents/MacOS/RepoReach'
+        BUNDLE_LOADER: '$(TEST_HOST)'
+    dependencies:
+      - target: RepoReach
+schemes:
+  RepoReach:
+    build:
+      targets:
+        RepoReach: all
+        RepoReachFinder: all
+    test:
+      targets:
+        - RepoReachTests

@@ -5,34 +5,79 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 export GOTOOLCHAIN=go1.26.8
 ARCH=arm64
 VERSION=0.1.0-beta.3
+BACKEND=fskit
+COMPILE_ONLY=false
 SIGN_IDENTITY="${REPOREACH_SIGN_IDENTITY:-}"
 NOTARIZE=false
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --arch) ARCH="$2"; shift 2 ;;
     --version) VERSION="$2"; shift 2 ;;
+    --backend) BACKEND="$2"; shift 2 ;;
+    --compile-only) COMPILE_ONLY=true; shift ;;
     --unsigned) SIGN_IDENTITY=""; shift ;;
     --sign-identity) SIGN_IDENTITY="$2"; shift 2 ;;
     --notarize) NOTARIZE=true; shift ;;
-    *) echo "Usage: $0 [--arch arm64|x86_64] [--version VERSION] [--unsigned|--sign-identity ID] [--notarize]" >&2; exit 2 ;;
+    *) echo "Usage: $0 [--arch arm64|x86_64] [--version VERSION] [--backend fskit|macfuse] [--compile-only] [--unsigned|--sign-identity ID] [--notarize]" >&2; exit 2 ;;
   esac
 done
 case "$ARCH" in arm64) GO_ARCH=arm64 ;; x86_64) GO_ARCH=amd64 ;; *) echo "Unsupported architecture: $ARCH" >&2; exit 2 ;; esac
 case "$VERSION" in *[!A-Za-z0-9.+-]*|"") echo "Invalid release version" >&2; exit 2 ;; esac
 test "$(uname -s)" = Darwin || { echo "Run macOS packaging on macOS." >&2; exit 1; }
+case "$BACKEND" in
+  fskit)
+    PROJECT_SPEC="$ROOT/native/project.yml"
+    SCHEME=RepoReachFSKit
+    XCODE_MAJOR="$(xcodebuild -version | awk '/^Xcode / {split($2, v, "."); print v[1]}')"
+    SDK_MAJOR="$(xcrun --sdk macosx --show-sdk-version | cut -d. -f1)"
+    if [ "$XCODE_MAJOR" -lt 26 ] || [ "$SDK_MAJOR" -lt 26 ]; then
+      echo "The bundled FSKit module requires Xcode 26 and the macOS 26 SDK. Use the macos-26 CI validation job or install a compatible Xcode." >&2
+      exit 1
+    fi
+    if [ "$COMPILE_ONLY" = false ]; then
+      test -n "$SIGN_IDENTITY" || { echo "FSKit distribution requires Developer ID signing. Use --compile-only for unsigned validation." >&2; exit 1; }
+      : "${REPOREACH_FSKIT_PROFILE:?FSKit distribution requires the actual matching Developer ID provisioning profile path}"
+      test -f "$REPOREACH_FSKIT_PROFILE" || { echo "FSKit provisioning profile is missing." >&2; exit 1; }
+    fi
+    ;;
+  macfuse)
+    test "$COMPILE_ONLY" = true || { echo "The legacy backend is available for source compilation only; the current Darwin engine requires the bundled FSKit module." >&2; exit 1; }
+    PROJECT_SPEC="$ROOT/native/project-macfuse.yml"; SCHEME=RepoReach
+    ;;
+  *) echo "Unsupported filesystem backend: $BACKEND" >&2; exit 2 ;;
+esac
+if [ "$COMPILE_ONLY" = true ] && [ "$NOTARIZE" = true ]; then
+  echo "--compile-only cannot notarize or publish archives." >&2; exit 2
+fi
 XCODEGEN_BIN="$("$ROOT/scripts/vendor-xcodegen.sh")"
 export PATH="$XCODEGEN_BIN:$PATH"
 OUTPUT="$ROOT/dist/releases/$VERSION"
-STAGE="$ROOT/build/package/$ARCH"
-DERIVED="$ROOT/build/native/$ARCH"
-GH_CACHE="$("$ROOT/scripts/vendor-gh.sh" "$ARCH")"
-mkdir -p "$OUTPUT" "$STAGE"
-python3 "$ROOT/scripts/release-manifest.py" source --output "$STAGE/source.json"
-xcodegen generate --spec "$ROOT/native/project.yml" --project "$ROOT/native"
-xcodebuild -project "$ROOT/native/RepoReach.xcodeproj" -scheme RepoReach \
+STAGE="$ROOT/build/package/$BACKEND/$ARCH"
+DERIVED="$ROOT/build/native/$BACKEND/$ARCH"
+if [ "$COMPILE_ONLY" = false ]; then
+  BASENAME="RepoReach-${VERSION}-macOS-${ARCH}"
+  if [ -e "$OUTPUT/$BASENAME.zip" ] || [ -e "$OUTPUT/$BASENAME.dmg" ]; then
+    echo "Release archives already exist for this version and architecture; refusing to overwrite them. Choose a new release version." >&2
+    exit 1
+  fi
+  mkdir -p "$OUTPUT" "$STAGE"
+  python3 "$ROOT/scripts/release-manifest.py" source --output "$STAGE/source.json"
+fi
+xcodegen generate --spec "$PROJECT_SPEC" --project "$ROOT/native"
+xcodebuild -project "$ROOT/native/RepoReach.xcodeproj" -scheme "$SCHEME" \
   -configuration Release -derivedDataPath "$DERIVED" \
-  ARCHS="$ARCH" ONLY_ACTIVE_ARCH=NO MACOSX_DEPLOYMENT_TARGET=13.0 \
+  ARCHS="$ARCH" ONLY_ACTIVE_ARCH=NO \
   CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO build
+if [ "$COMPILE_ONLY" = true ]; then
+  if [ "$BACKEND" = fskit ]; then
+    python3 "$ROOT/scripts/validate-fskit-bundle.py" compile \
+      --app "$DERIVED/Build/Products/Release/RepoReach.app" --arch "$ARCH" \
+      --entitlements "$ROOT/native/FSKitExtension/FSKit.entitlements"
+  fi
+  echo "Compiled $BACKEND $ARCH without release archives: $DERIVED/Build/Products/Release/RepoReach.app"
+  exit 0
+fi
+GH_CACHE="$("$ROOT/scripts/vendor-gh.sh" "$ARCH")"
 APP="$STAGE/RepoReach.app"
 rm -rf "$APP"
 ditto "$DERIVED/Build/Products/Release/RepoReach.app" "$APP"
@@ -54,12 +99,18 @@ ArtifactFS and RepoReach source: https://github.com/enoughtools/reporeach
 Upstream ArtifactFS: https://github.com/cloudflare/artifact-fs (Apache-2.0)
 Bundled official GitHub CLI: https://github.com/cli/cli (MIT)
 GitHub CLI version: 2.102.0. GitHub is a trademark of GitHub, Inc.
-macFUSE is a separately installed dependency and is not redistributed here.
 NOTICE
+if [ "$BACKEND" = fskit ]; then
+  echo "FSKit is supplied by macOS. RepoReach's FSKit module is included in this app." >> "$APP/Contents/Resources/Licenses/NOTICE.txt"
+else
+  echo "macFUSE is a separately installed dependency and is not redistributed here." >> "$APP/Contents/Resources/Licenses/NOTICE.txt"
+fi
 MARKETING_VERSION="${VERSION%%-*}"
 MARKETING_VERSION="${MARKETING_VERSION%%+*}"
 BUILD_NUMBER="${REPOREACH_BUILD_NUMBER:-3}"
-for PLIST in "$APP/Contents/Info.plist" "$APP/Contents/PlugIns/RepoReachFinder.appex/Contents/Info.plist"; do
+PLISTS=("$APP/Contents/Info.plist" "$APP/Contents/PlugIns/RepoReachFinder.appex/Contents/Info.plist")
+if [ "$BACKEND" = fskit ]; then PLISTS+=("$APP/Contents/Extensions/RepoReachFSKit.appex/Contents/Info.plist"); fi
+for PLIST in "${PLISTS[@]}"; do
   /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $MARKETING_VERSION" "$PLIST"
   /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD_NUMBER" "$PLIST"
 done
@@ -71,6 +122,15 @@ if [ -n "$SIGN_IDENTITY" ]; then
   for HELPER in artifact-fs gh; do
     codesign --force --timestamp --options runtime --sign "$SIGN_IDENTITY" "$APP/Contents/Helpers/$HELPER"
   done
+  if [ "$BACKEND" = fskit ]; then
+    FSMODULE="$APP/Contents/Extensions/RepoReachFSKit.appex"
+    FSKIT_ENTITLEMENTS="$STAGE/fskit-signing.entitlements"
+    python3 "$ROOT/scripts/validate-fskit-bundle.py" prepare \
+      --profile "$REPOREACH_FSKIT_PROFILE" --bundle-id com.enoughtools.reporeach.fskit \
+      --entitlements "$ROOT/native/FSKitExtension/FSKit.entitlements" --output "$FSKIT_ENTITLEMENTS"
+    cp "$REPOREACH_FSKIT_PROFILE" "$FSMODULE/Contents/embedded.provisionprofile"
+    codesign --force --timestamp --options runtime --entitlements "$FSKIT_ENTITLEMENTS" --sign "$SIGN_IDENTITY" "$FSMODULE"
+  fi
   codesign --force --timestamp --options runtime --entitlements "$ROOT/native/FinderExtension/Finder.entitlements" --sign "$SIGN_IDENTITY" \
     "$APP/Contents/PlugIns/RepoReachFinder.appex"
   codesign --force --timestamp --options runtime --sign "$SIGN_IDENTITY" "$APP"
@@ -84,6 +144,10 @@ codesign --verify --strict --verbose=2 "$APP/Contents/Helpers/artifact-fs"
 codesign --verify --strict --verbose=2 "$APP/Contents/Helpers/gh"
 codesign --verify --strict --verbose=2 "$APP/Contents/PlugIns/RepoReachFinder.appex"
 codesign --verify --strict --verbose=2 "$APP"
+if [ "$BACKEND" = fskit ]; then
+  python3 "$ROOT/scripts/validate-fskit-bundle.py" signed --app "$APP" --arch "$ARCH" \
+    --entitlements "$ROOT/native/FSKitExtension/FSKit.entitlements"
+fi
 NOTARIZED=false
 submit_notary() {
   if [ -n "${REPOREACH_NOTARY_PROFILE:-}" ]; then
@@ -107,7 +171,6 @@ if [ "$NOTARIZE" = true ]; then
   NOTARIZED=true
   rm "$NOTARY_ZIP"
 fi
-BASENAME="RepoReach-${VERSION}-macOS-${ARCH}"
 ZIP="$OUTPUT/$BASENAME.zip"
 DMG="$OUTPUT/$BASENAME.dmg"
 rm -f "$ZIP" "$DMG"
@@ -126,6 +189,8 @@ if [ "$NOTARIZED" = true ]; then
   xcrun stapler validate "$DMG"
   spctl --assess --type open --context context:primary-signature --verbose=2 "$DMG"
 fi
+RECORD_OPTIONS=(--backend "$BACKEND")
+if [ "$BACKEND" = fskit ]; then RECORD_OPTIONS+=(--fskit-profile "$FSMODULE/Contents/embedded.provisionprofile"); fi
 python3 "$ROOT/scripts/release-manifest.py" record --directory "$OUTPUT" \
-  --version "$VERSION" --arch "$ARCH" --signature "$SIGNATURE" --notarized "$NOTARIZED" --source-file "$STAGE/source.json"
+  --version "$VERSION" --arch "$ARCH" --signature "$SIGNATURE" --notarized "$NOTARIZED" --source-file "$STAGE/source.json" "${RECORD_OPTIONS[@]}"
 echo "Packaged $ARCH: $OUTPUT ($SIGNATURE; notarized=$NOTARIZED)"

@@ -1,12 +1,13 @@
 # RepoReach for macOS
 
-RepoReach is a native SwiftUI management app over the ArtifactFS desktop service. Closing its window keeps the app and service running in the background; reopening RepoReach restores its window. There is no menu-bar item. Explicitly quitting the app gracefully stops its own service and unmounts its filesystem.
+RepoReach is a native SwiftUI management app over the ArtifactFS desktop service. Closing its window keeps the app and service running in the background; reopening RepoReach restores its window. There is no menu-bar item. Explicit Quit first unmounts the filesystem, then stops the service. If the folder is still in use, the app stays running and explains what needs closing.
 
 ## Requirements
 
-- macOS 13 or later, Apple Silicon or Intel.
-- Xcode 16 or later and [XcodeGen](https://github.com/yonaskolb/XcodeGen) for source builds; release builds were validated with Xcode 16.4.
-- [macFUSE](https://macfuse.github.io/) with its **kernel backend** installed and approved by the user before mounting. FSKit alone is not supported by this beta; see [platform setup](../docs/reporeach/platform-setup.md), including Apple silicon setup requirements. A detected installation does not prove its kernel backend is active. RepoReach never silently installs a filesystem driver or changes startup settings.
+- macOS 13 or later for repository management, Apple Silicon or Intel. The bundled native filesystem requires macOS 26 or later.
+- Xcode 26 with the real macOS 26 SDK and [XcodeGen](https://github.com/yonaskolb/XcodeGen) for the default source build. The `FSPathURLResource` API is absent from older SDKs; an availability check cannot make an older SDK compile the extension.
+- The RepoReach filesystem extension must be signed with its actual FSModule provisioning profile and enabled by the user in System Settings. The native path is under development: a complete SDK 26 compile, installed extension activation, and real mount validation are separate release gates. See [native FSKit](../docs/reporeach/native-fskit.md).
+- Earlier macFUSE builds require its **kernel backend**; see [platform setup](../docs/reporeach/platform-setup.md). The legacy project is retained for source checks and does not bundle the native filesystem. RepoReach never silently enables extensions or changes startup security settings.
 - Bundled `artifact-fs` and the official GitHub CLI under `RepoReach.app/Contents/Helpers`. Release tooling builds/packages these tools; see `scripts/build-macos.sh` at the repository root.
 
 ## Build and test
@@ -14,9 +15,11 @@ RepoReach is a native SwiftUI management app over the ArtifactFS desktop service
 ```sh
 cd native
 xcodegen generate
-xcodebuild -project RepoReach.xcodeproj -scheme RepoReach -configuration Debug -derivedDataPath ../build/native CODE_SIGNING_ALLOWED=NO build
-xcodebuild -project RepoReach.xcodeproj -scheme RepoReach -destination 'platform=macOS,arch=arm64' -derivedDataPath ../build/native CODE_SIGNING_ALLOWED=NO test
+xcodebuild -project RepoReach.xcodeproj -scheme RepoReachFSKit -configuration Debug -derivedDataPath ../build/native CODE_SIGNING_ALLOWED=NO build
+xcodebuild -project RepoReach.xcodeproj -scheme RepoReachFSKit -destination 'platform=macOS,arch=arm64' -derivedDataPath ../build/native CODE_SIGNING_ALLOWED=NO test
 ```
+
+On an older SDK, `xcodegen generate --spec project-macfuse.yml` generates only the management app, Finder extension, and pure bridge tests. The `RepoReach` scheme in that project checks these sources without substituting fake declarations for FSKit's macOS 26 APIs. Generate `project.yml` again before a production build.
 
 Build the Go engine separately with `go build ./cmd/artifact-fs`. For development only, the app accepts `REPOREACH_ENGINE_PATH` and `REPOREACH_GH_PATH` pointing to local executables. A private `REPOREACH_STATE_DIR` and `REPOREACH_MOUNT_ROOT` can isolate development or lifecycle smoke runs; isolated runs never change normal mount preferences or Finder metadata. Normal release builds use only bundled helpers. No access token is passed on any command line.
 
@@ -43,6 +46,7 @@ Use **Show repository in Finder** in repository details or **Owners & organizati
 - `Shared/ActionRoute.swift` is the validated Finder-to-app command surface.
 - `Shared/FinderStatusCache.swift` publishes metadata only using private atomic writes.
 - `FinderExtension` supplies repository-level actions and badges without hydrating file contents. See its README for entitlement and release-validation details.
+- `FSKitExtension` provides the bundled `com.enoughtools.reporeach.fskit` ExtensionKit module in `Contents/Extensions/RepoReachFSKit.appex`. A security-scoped path resource grants access to a private connection directory; binary reads and writes cross an authenticated UNIX socket in bounded chunks. The Go catalogue remains the source of filesystem state.
 
 GitHub sign-in delegates to the bundled official `gh` device/web flow. Credentials stay with `gh`; RepoReach never reads or stores tokens. Catalogue metadata and mount settings persist in `~/Library/Application Support/RepoReach`.
 

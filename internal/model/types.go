@@ -197,6 +197,7 @@ type GitStore interface {
 	Fetch(ctx context.Context, repo RepoConfig) error
 	FetchRefNonInteractive(ctx context.Context, repo RepoConfig, ref string) error
 	ResolveHEAD(ctx context.Context, repo RepoConfig) (oid string, ref string, err error)
+	PinWorkingTreeBaseline(ctx context.Context, repo RepoConfig, oid string) error
 	BuildTreeIndex(ctx context.Context, repo RepoConfig, headOID string) ([]BaseNode, error)
 	BlobToCache(ctx context.Context, repo RepoConfig, objectOID string, dstPath string) (size int64, err error)
 	ReadBlob(ctx context.Context, repo RepoConfig, objectOID string, maxBytes int64) ([]byte, error)
@@ -220,12 +221,26 @@ type OverlayStore interface {
 	EnsureCopyOnWrite(ctx context.Context, repo RepoConfig, path string, base BaseNode) (OverlayEntry, error)
 	EnsureCopyOnWriteFrom(ctx context.Context, repo RepoConfig, path string, base BaseNode, src *os.File) (OverlayEntry, error)
 	CreateFile(ctx context.Context, path string, mode uint32) (OverlayEntry, error)
+	// CreateFileOpened retains the writable creation descriptor opened before
+	// final mode bits are applied. The caller owns the returned descriptor.
+	CreateFileOpened(ctx context.Context, path string, mode uint32) (OverlayEntry, *os.File, error)
 	CreateSymlink(ctx context.Context, path string, target string) (OverlayEntry, error)
 	WriteFile(ctx context.Context, path string, off int64, data []byte) (int, error)
+	// WriteFileFrom writes through a retained descriptor only while it identifies
+	// the current backing file at path.
+	WriteFileFrom(ctx context.Context, path string, off int64, data []byte, file *os.File) (int, error)
 	SyncFile(ctx context.Context, path string) error
+	// SyncFileFrom syncs a retained descriptor after checking namespace identity.
+	SyncFileFrom(ctx context.Context, path string, file *os.File) error
 	Truncate(ctx context.Context, path string, size int64) error
+	// TruncateFrom applies the same namespace identity check as WriteFileFrom.
+	TruncateFrom(ctx context.Context, path string, size int64, file *os.File) error
 	Remove(ctx context.Context, path string) error
 	Rename(ctx context.Context, oldPath, newPath string) error
+	// RenameWithSourceWhiteout moves a created file or symlink that shadows a
+	// base source and leaves that source deleted in one transaction. destinationBase,
+	// when non-nil, supplies the overwritten destination's independent metadata.
+	RenameWithSourceWhiteout(ctx context.Context, oldPath, newPath string, destinationBase *BaseNode) error
 	RenameTree(ctx context.Context, oldPath, newPath string, sourceBasePaths, destinationBasePaths []string) error
 	RenameAndMarkModifiedFromBase(ctx context.Context, oldPath, newPath string, sourceOID string, sourceMode uint32) error
 	Mkdir(ctx context.Context, path string, mode uint32) error

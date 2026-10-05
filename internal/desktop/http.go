@@ -176,6 +176,9 @@ func (s *Service) Handler() http.Handler {
 		case "POST /v1/unmount":
 			err = s.Unmount(ctx)
 			response = s.Status()
+		case "POST /v1/prepare-quit":
+			err = s.PrepareQuit(ctx)
+			response = s.Status()
 		case "POST /v1/repositories/action":
 			var action struct {
 				ID     string `json:"id"`

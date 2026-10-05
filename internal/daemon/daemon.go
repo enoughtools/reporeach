@@ -100,6 +100,8 @@ type Service struct {
 	mountFailures        map[model.RepoID]*mountFailure
 	prepareWorkers       sync.WaitGroup
 	closing              bool
+	catalogViewPolicy    CatalogViewPolicy
+	catalogPolicyLocked  bool
 }
 
 type mountFailure struct {
@@ -108,26 +110,27 @@ type mountFailure struct {
 }
 
 type repoRuntime struct {
-	cfg      model.RepoConfig
-	ctx      context.Context
-	cancel   context.CancelFunc
-	snapshot *snapshot.Store
-	overlay  *overlay.Store
-	hydrator *hydrator.Service
-	sizes    *sizeUpdateBatcher
-	resolver *fusefs.Resolver
-	engine   *fusefs.Engine
-	mfs      fusefs.MountedFS
-	gate     *fusefs.ReadyGate
-	state    model.RepoRuntimeState
-	active   bool
-	refresh  chan time.Duration
-	joinDone chan struct{}
-	stopping bool
-	detached bool
-	headMu   sync.Mutex
-	workers  sync.WaitGroup
-	mounts   sync.WaitGroup
+	cfg               model.RepoConfig
+	ctx               context.Context
+	cancel            context.CancelFunc
+	snapshot          *snapshot.Store
+	overlay           *overlay.Store
+	hydrator          *hydrator.Service
+	sizes             *sizeUpdateBatcher
+	resolver          *fusefs.Resolver
+	engine            *fusefs.Engine
+	mfs               fusefs.MountedFS
+	gate              *fusefs.ReadyGate
+	state             model.RepoRuntimeState
+	active            bool
+	refresh           chan time.Duration
+	joinDone          chan struct{}
+	stopping          bool
+	detached          bool
+	headMu            sync.Mutex
+	workers           sync.WaitGroup
+	mounts            sync.WaitGroup
+	catalogViewPolicy CatalogViewPolicy
 }
 
 type aheadBehind struct {
@@ -271,6 +274,12 @@ func (s *Service) Close() error {
 }
 
 func (s *Service) Start(ctx context.Context) error {
+	s.mu.Lock()
+	persistentCatalogue := s.catalogViewPolicy == CatalogViewPersistentWorkingTree
+	s.mu.Unlock()
+	if persistentCatalogue {
+		return errors.New("persistent workingtree policy requires a shared catalogue mount")
+	}
 	// Initial mount of all registered repos.
 	if err := s.syncRepos(ctx); err != nil {
 		return err
@@ -508,12 +517,23 @@ func (s *Service) AddRepoWithOptions(ctx context.Context, cfg model.RepoConfig, 
 	if cfg.ID == "" {
 		cfg.ID = model.RepoID(cfg.Name)
 	}
+	if err := s.rejectPersistentRuntimePreparation(ctx, cfg); err != nil {
+		return err
+	}
 	cfg.RemoteURLRedacted = auth.RedactRemoteURL(cfg.RemoteURL)
 	if cfg.RefreshInterval <= 0 {
 		cfg.RefreshInterval = 30 * time.Second
 	}
 	explicitGitDir := strings.TrimSpace(cfg.GitDir) != ""
 	s.fillPaths(&cfg)
+	s.mu.Lock()
+	persistent := s.catalogViewPolicy == CatalogViewPersistentWorkingTree
+	s.mu.Unlock()
+	if persistent {
+		if err := s.validatePersistentCatalogStorage(cfg); err != nil {
+			return err
+		}
+	}
 	if strings.TrimSpace(cfg.FetchRef) == "" {
 		cfg.FetchRef = defaultFetchRef(cfg.Branch)
 	}
@@ -676,6 +696,14 @@ func (s *Service) Status(ctx context.Context, name string) (model.RepoRuntimeSta
 	if err != nil {
 		return model.RepoRuntimeState{}, err
 	}
+	s.mu.Lock()
+	persistentPolicy := s.catalogViewPolicy == CatalogViewPersistentWorkingTree
+	s.mu.Unlock()
+	if persistentPolicy {
+		if err := s.validatePersistentCatalogStorage(cfg); err != nil {
+			return model.RepoRuntimeState{}, err
+		}
+	}
 
 	// If we're the running daemon, use in-memory state.
 	s.mu.Lock()
@@ -685,7 +713,16 @@ func (s *Service) Status(ctx context.Context, name string) (model.RepoRuntimeSta
 		rt.state.DirtyOverlay = dirty > 0
 		st := rt.state // copy under lock
 		blobCacheDir := rt.cfg.BlobCacheDir
+		persistent := rt.catalogViewPolicy == CatalogViewPersistentWorkingTree
 		s.mu.Unlock()
+		if persistent {
+			// The workingtree baseline is intentionally independent of HEAD.
+			// Report current Git metadata without changing the mounted view.
+			st.CurrentHEADOID, st.CurrentHEADRef, err = s.git.ResolveHEAD(ctx, cfg)
+			if err != nil {
+				return st, err
+			}
+		}
 		applyHydrationStats(&st, blobCacheDir)
 		applySourceStatus(&st, cfg)
 		return st, nil
@@ -728,6 +765,9 @@ func (s *Service) Prepare(ctx context.Context, name string) error {
 	if err != nil {
 		return err
 	}
+	if err := s.rejectPersistentRuntimePreparation(ctx, cfg); err != nil {
+		return err
+	}
 	async := isAsyncRepo(cfg)
 	if async && cfg.PrepareState == model.PrepareStateReady && cfg.RequiredCommit == "" {
 		return nil
@@ -766,6 +806,12 @@ func (s *Service) Prepare(ctx context.Context, name string) error {
 }
 
 func (s *Service) Remount(ctx context.Context, name string) error {
+	s.mu.Lock()
+	persistent := s.catalogViewPolicy == CatalogViewPersistentWorkingTree
+	s.mu.Unlock()
+	if persistent {
+		return errors.New("persistent workingtree policy requires a shared catalogue mount")
+	}
 	cfg, err := s.registry.GetRepo(ctx, name)
 	if err != nil {
 		return err
@@ -1494,6 +1540,10 @@ func (s *Service) snapshotForPrepare(ctx context.Context, cfg model.RepoConfig) 
 func (s *Service) completePreparedRuntime(ctx context.Context, cfg model.RepoConfig, headOID string, headRef string, gen int64) error {
 	s.mu.Lock()
 	rt := s.running[cfg.ID]
+	if rt != nil && rt.catalogViewPolicy == CatalogViewPersistentWorkingTree {
+		s.mu.Unlock()
+		return errors.New("cannot replace an active persistent workingtree baseline")
+	}
 	if rt != nil && !samePrepareConfig(rt.cfg, cfg) {
 		s.mu.Unlock()
 		return registry.ErrRepoChanged
@@ -1594,6 +1644,10 @@ func (s *Service) onHEADChanged(ctx context.Context, rt *repoRuntime) {
 	defer rt.headMu.Unlock()
 	s.mu.Lock()
 	if s.running[rt.cfg.ID] != rt {
+		s.mu.Unlock()
+		return
+	}
+	if rt.catalogViewPolicy == CatalogViewPersistentWorkingTree {
 		s.mu.Unlock()
 		return
 	}
@@ -1849,6 +1903,14 @@ func (s *Service) readPersistedStatus(ctx context.Context, cfg model.RepoConfig)
 			snap.Close()
 		}
 	}
+	s.mu.Lock()
+	persistent := s.catalogViewPolicy == CatalogViewPersistentWorkingTree
+	s.mu.Unlock()
+	if persistent {
+		// Snapshot state describes the persistent workingtree baseline, not the
+		// current branch tip. Do not report that baseline as current Git HEAD.
+		st.CurrentHEADOID, st.CurrentHEADRef, _ = s.git.ResolveHEAD(ctx, cfg)
+	}
 	if cfg.OverlayDBPath != "" {
 		if _, statErr := os.Stat(cfg.OverlayDBPath); statErr == nil {
 			if db, err := meta.OpenDB(cfg.OverlayDBPath); err == nil {
@@ -1889,9 +1951,28 @@ func applySourceStatus(st *model.RepoRuntimeState, cfg model.RepoConfig) {
 }
 
 func (s *Service) publishSnapshot(ctx context.Context, cfg model.RepoConfig, snap *snapshot.Store, oid string, ref string) (int64, string, error) {
+	s.mu.Lock()
+	persistent := s.catalogViewPolicy == CatalogViewPersistentWorkingTree
+	s.mu.Unlock()
+	if persistent {
+		_, _, generation, err := snap.ReadState(ctx)
+		if err != nil {
+			return 0, snapshotPhasePublish, err
+		}
+		if generation != 0 {
+			return 0, snapshotPhasePublish, errors.New("preserve the existing workingtree baseline; rebasing it requires a quiescent workingtree migration")
+		}
+	}
 	nodes, err := s.git.BuildTreeIndex(ctx, cfg, oid)
 	if err != nil {
 		return 0, snapshotPhaseBuild, err
+	}
+	if persistent {
+		// Protect the baseline before making it durable, including repositories
+		// that are prepared while hidden and have not been opened yet.
+		if err := s.git.PinWorkingTreeBaseline(ctx, cfg, oid); err != nil {
+			return 0, snapshotPhasePublish, err
+		}
 	}
 	gen, err := snap.PublishGeneration(ctx, oid, ref, nodes)
 	if err != nil {
@@ -2085,7 +2166,7 @@ func (s *Service) retryRuntimeMount(rt *repoRuntime) {
 
 func (s *Service) startRepoBackground(rt *repoRuntime) {
 	s.mu.Lock()
-	if rt.active || rt.stopping {
+	if rt.active || rt.stopping || rt.catalogViewPolicy == CatalogViewPersistentWorkingTree {
 		s.mu.Unlock()
 		return
 	}

@@ -7,6 +7,7 @@ This documentation describes the current beta source. A packaged release's downl
 - [Using the beta](user-guide.md): setup, virtual folders, Git work, offline downloads, and freeing space.
 - [Platform setup](platform-setup.md): macFUSE's kernel backend, signing, security approval, and Finder extension settings.
 - [Architecture](architecture.md): the native app, local service, catalogue filesystem, and ArtifactFS storage.
+- [Native FSKit development](native-fskit.md): the selected macOS 26 backend, bundled-extension goal, and outstanding build, provisioning, and mounted coherence proof.
 - [Privacy and authentication](privacy-auth.md): GitHub permissions, local credentials, stored data, and network requests.
 - [Building and releasing](releasing.md): packaging, signing, notarization, and the release validation checklist.
 - [Beta validation](validation.md): tested environments, recorded checks, and remaining installation acceptance.

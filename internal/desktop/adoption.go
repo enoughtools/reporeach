@@ -39,7 +39,7 @@ var errAdoptionRemote = errors.New("use a standard Git remote or an absolute loc
 
 // Adopt discovers a remote's branch without downloading its tree or invoking
 // GitHub. Preparation remains lazy, just as it does for discovered repositories.
-func (s *Service) Adopt(ctx context.Context, request AdoptionRequest) (Status, error) {
+func (s *Service) Adopt(ctx context.Context, request AdoptionRequest) (status Status, retErr error) {
 	remote, err := parseAdoptionRemote(request.RemoteURL)
 	if err != nil {
 		return Status{}, err
@@ -111,6 +111,30 @@ func (s *Service) Adopt(ctx context.Context, request AdoptionRequest) (Status, e
 		}
 		return Status{}, errors.New("that owner and repository name are already in the catalogue; choose a different name or group")
 	}
+	s.mu.Unlock()
+	remount, err := s.quiesceCatalogueChange(ctx)
+	if err != nil {
+		return Status{}, err
+	}
+	defer func() {
+		retErr = errors.Join(retErr, s.restoreCatalogueAfterChange(ctx, remount))
+		status = s.Status()
+	}()
+	s.mu.Lock()
+	if s.closing || s.quitPrepared || s.recoveryRequired {
+		s.mu.Unlock()
+		return Status{}, errors.New("repository service is closing or needs recovery")
+	}
+	if err := ctx.Err(); err != nil {
+		s.mu.Unlock()
+		return Status{}, err
+	}
+	if err := s.adoptionSourceAllowedLocked(remote); err != nil {
+		s.mu.Unlock()
+		return Status{}, err
+	}
+	// Draining the old session may finish an unrelated operation. Capture the
+	// rollback snapshot only now, so a failed save cannot undo its result.
 	previous := s.state
 	oldEntries := s.entriesLocked()
 	s.state.Repositories = append(append([]Repository(nil), previous.Repositories...), repo)
@@ -118,7 +142,13 @@ func (s *Service) Adopt(ctx context.Context, request AdoptionRequest) (Status, e
 		return strings.ToLower(s.state.Repositories[i].ID) < strings.ToLower(s.state.Repositories[j].ID)
 	})
 	catalog, entries := s.catalog, s.entriesLocked()
-	err = s.persistLocked()
+	err = ctx.Err()
+	if err == nil {
+		err = s.persistLocked()
+		if err == nil {
+			err = ctx.Err()
+		}
+	}
 	if err != nil {
 		s.state = previous
 		err = errors.Join(err, s.persistLocked())
@@ -144,9 +174,13 @@ func (s *Service) Adopt(ctx context.Context, request AdoptionRequest) (Status, e
 // symlinks. Opening our own mounted tree can recursively activate repositories
 // and, on Linux, deadlock Go's netpoll registration against its FUSE server.
 func (s *Service) adoptionAllowedLocked(remote adoptionRemote) error {
-	if s.closing || s.maintenance || s.recoveryRequired {
+	if s.closing || s.quitPrepared || s.maintenance || s.recoveryRequired {
 		return errors.New("wait for the repository service to finish its current change")
 	}
+	return s.adoptionSourceAllowedLocked(remote)
+}
+
+func (s *Service) adoptionSourceAllowedLocked(remote adoptionRemote) error {
 	if remote.localPath == "" {
 		return nil
 	}

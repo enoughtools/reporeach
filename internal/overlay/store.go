@@ -225,29 +225,8 @@ func (s *Store) EnsureCopyOnWriteFrom(ctx context.Context, _ model.RepoConfig, p
 }
 
 func (s *Store) CreateFile(ctx context.Context, path string, mode uint32) (model.OverlayEntry, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	f, err := os.CreateTemp(s.upperDir, ".artifact-fs-entry-*")
-	if err != nil {
-		return model.OverlayEntry{}, err
-	}
-	backing := f.Name()
-	if err := f.Chmod(os.FileMode(mode)); err != nil {
-		f.Close()
-		os.Remove(backing)
-		return model.OverlayEntry{}, err
-	}
-	if err := f.Close(); err != nil {
-		os.Remove(backing)
-		return model.OverlayEntry{}, err
-	}
-	now := time.Now().UnixNano()
-	e := model.OverlayEntry{RepoID: s.repo.ID, Path: model.CleanPath(path), Kind: model.OverlayKindCreate, BackingPath: backing, Mode: mode, MtimeUnixNs: now, CtimeUnixNs: now}
-	if err := s.upsertEntry(ctx, e); err != nil {
-		os.Remove(backing)
-		return model.OverlayEntry{}, err
-	}
-	return e, nil
+	e, _, err := s.createFileOpened(ctx, path, mode, false)
+	return e, err
 }
 
 func (s *Store) CreateSymlink(ctx context.Context, path string, target string) (model.OverlayEntry, error) {
@@ -274,6 +253,9 @@ func (s *Store) CreateSymlink(ctx context.Context, path string, target string) (
 }
 
 func (s *Store) WriteFile(ctx context.Context, path string, off int64, data []byte) (int, error) {
+	if err := validateWriteOffset(off, len(data)); err != nil {
+		return 0, err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	e, ok, err := s.Lookup(ctx, path)
@@ -288,19 +270,7 @@ func (s *Store) WriteFile(ctx context.Context, path string, off int64, data []by
 		return 0, err
 	}
 	defer f.Close()
-	n, err := f.WriteAt(data, off)
-	if err != nil {
-		return n, err
-	}
-	st, _ := f.Stat()
-	now := time.Now().UnixNano()
-	e.SizeBytes = st.Size()
-	e.MtimeUnixNs = now
-	e.CtimeUnixNs = now
-	if e.Kind != model.OverlayKindCreate {
-		e.Kind = model.OverlayKindModify
-	}
-	return n, s.upsertEntry(ctx, e)
+	return s.writeFileOpenedLocked(ctx, e, off, data, f)
 }
 
 func (s *Store) SyncFile(ctx context.Context, path string) error {
@@ -351,14 +321,7 @@ func (s *Store) Truncate(ctx context.Context, path string, size int64) error {
 	if err := os.Truncate(e.BackingPath, size); err != nil {
 		return err
 	}
-	now := time.Now().UnixNano()
-	e.SizeBytes = size
-	e.MtimeUnixNs = now
-	e.CtimeUnixNs = now
-	if e.Kind != model.OverlayKindCreate {
-		e.Kind = model.OverlayKindModify
-	}
-	return s.upsertEntry(ctx, e)
+	return s.publishFileChangeLocked(ctx, e, size)
 }
 
 func (s *Store) Remove(ctx context.Context, path string) error {
@@ -383,6 +346,16 @@ func (s *Store) Remove(ctx context.Context, path string) error {
 func (s *Store) Rename(ctx context.Context, oldPath, newPath string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.renameLocked(ctx, oldPath, newPath, false, nil)
+}
+
+func (s *Store) RenameWithSourceWhiteout(ctx context.Context, oldPath, newPath string, destinationBase *model.BaseNode) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.renameLocked(ctx, oldPath, newPath, true, destinationBase)
+}
+
+func (s *Store) renameLocked(ctx context.Context, oldPath, newPath string, preserveSourceDeletion bool, destinationBase *model.BaseNode) error {
 	oldPath = model.CleanPath(oldPath)
 	newPath = model.CleanPath(newPath)
 	e, ok, err := s.Lookup(ctx, oldPath)
@@ -394,6 +367,9 @@ func (s *Store) Rename(ctx context.Context, oldPath, newPath string) error {
 	}
 	if oldPath == newPath {
 		return nil
+	}
+	if preserveSourceDeletion && e.Kind != model.OverlayKindCreate && e.Kind != model.OverlayKindSymlink {
+		return iofs.ErrInvalid
 	}
 	if e.Kind == model.OverlayKindMkdir {
 		return s.renameTreeLocked(ctx, oldPath, newPath, nil, nil)
@@ -421,6 +397,23 @@ func (s *Store) Rename(ctx context.Context, oldPath, newPath string) error {
 		writeSourceWhiteout = e.SourceOID != ""
 		newSourceOID = ""
 		newSourceMode = 0
+	}
+	if destinationBase != nil {
+		newKind = model.OverlayKindModify
+		newTargetPath = ""
+		if e.Kind == model.OverlayKindSymlink {
+			newKind = model.OverlayKindSymlink
+			newTargetPath = e.TargetPath
+		}
+		newSourceOID = destinationBase.ObjectOID
+		newSourceMode = destinationBase.Mode
+	}
+	if preserveSourceDeletion {
+		// A create or newly created symlink can replace a tracked source without
+		// carrying its OID. Keep that source hidden independently of the moved
+		// entry's kind, target or destination provenance.
+		writeSourceWhiteout = true
+		whiteoutTargetPath = ""
 	}
 	var replaced model.OverlayEntry
 	if dst, exists, err := s.Lookup(ctx, newPath); err != nil {

@@ -75,7 +75,7 @@ func (s *Service) SetRepositoryEnabled(ctx context.Context, id string, enabled b
 // lock-order deadlock with storage removal (repo lock, then lifecycle lock).
 // Existing file handles stay valid; the switch controls new catalogue entries
 // and background pin work, rather than revoking already-open files.
-func (s *Service) changeVisibility(ctx context.Context, owner, id string, enabled bool) error {
+func (s *Service) changeVisibility(ctx context.Context, owner, id string, enabled bool) (retErr error) {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -85,7 +85,7 @@ func (s *Service) changeVisibility(ctx context.Context, owner, id string, enable
 	if owner != "" {
 		owner = s.canonicalOwnerLocked(owner)
 	}
-	if s.closing || s.maintenance || s.recoveryRequired {
+	if s.closing || s.quitPrepared || s.maintenance || s.recoveryRequired {
 		s.mu.Unlock()
 		return errors.New("wait for the repository service to finish its current change")
 	}
@@ -105,11 +105,13 @@ func (s *Service) changeVisibility(ctx context.Context, owner, id string, enable
 		return nil
 	}
 	var reserved []chan struct{}
-	defer func() {
+	releaseReservations := func() {
 		for _, lock := range reserved {
 			lock <- struct{}{}
 		}
-	}()
+		reserved = nil
+	}
+	defer releaseReservations()
 	for _, repo := range s.state.Repositories {
 		if (owner != "" && !strings.EqualFold(repo.Owner, owner)) || (owner == "" && repo.ID != id) {
 			continue
@@ -137,6 +139,35 @@ func (s *Service) changeVisibility(ctx context.Context, owner, id string, enable
 		s.mu.Unlock()
 		return err
 	}
+	var err error
+	if s.quiescentCatalogue {
+		// Claim this before any handoff, including an already-unmounted native
+		// catalogue. New actions cannot enter after the affected busy checks.
+		s.maintenance = true
+		if s.mounted != nil {
+			// A queued activation must be able to take its repository lock and
+			// drain before unmount returns. Maintenance excludes new actions.
+			releaseReservations()
+		}
+		s.mu.Unlock()
+		remount, err := s.quiesceCatalogueChange(ctx)
+		if err != nil {
+			return err
+		}
+		defer func() { retErr = errors.Join(retErr, s.restoreCatalogueAfterChange(ctx, remount)) }()
+		s.mu.Lock()
+		if s.closing || s.quitPrepared || s.recoveryRequired {
+			s.mu.Unlock()
+			return errors.New("repository service is closing or needs recovery")
+		}
+		if err := ctx.Err(); err != nil {
+			s.mu.Unlock()
+			return err
+		}
+	}
+	// FUSE retains mu and its reservations throughout check and publication.
+	// Detachment can finish other repository operations. Include those results
+	// in the rollback snapshot instead of restoring state from before drain.
 	previous := s.state
 	oldEntries := s.entriesLocked()
 	s.state.Repositories = append([]Repository(nil), previous.Repositories...)
@@ -156,7 +187,13 @@ func (s *Service) changeVisibility(ctx context.Context, owner, id string, enable
 		s.state.DisabledOrganizations = filtered
 	}
 	catalog, entries := s.catalog, s.entriesLocked()
-	err := s.persistLocked()
+	err = ctx.Err()
+	if err == nil {
+		err = s.persistLocked()
+		if err == nil {
+			err = ctx.Err()
+		}
+	}
 	if err != nil {
 		s.state = previous
 		// writeState can fail after rename. Restore the previous durable policy

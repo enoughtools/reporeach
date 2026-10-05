@@ -9,6 +9,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var store: RepositoryStore!
     private var openingAction = false
     private var presentationTask: Task<Void, Never>?
+    private var terminationPending = false
 
     static func main() {
         let application = NSApplication.shared
@@ -107,6 +108,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             }
             #endif
         }
+    }
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard let store else { return .terminateNow }
+        guard !terminationPending else { return .terminateLater }
+        terminationPending = true
+        Task {
+            let detached = await store.prepareToQuit()
+            terminationPending = false
+            if !detached { showMainWindow() }
+            sender.reply(toApplicationShouldTerminate: detached)
+        }
+        return .terminateLater
     }
     func applicationWillTerminate(_ notification: Notification) { presentationTask?.cancel(); store?.stop() }
 

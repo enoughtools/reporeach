@@ -25,6 +25,9 @@ func newDesktopTestService(t *testing.T, ghScript string) *Service {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// These shared fixtures exercise FUSE's live catalogue publication. Tests
+	// for native FSKit's quiescent catalogue transactions opt in explicitly.
+	s.quiescentCatalogue = false
 	t.Cleanup(func() {
 		if err := s.Close(); err != nil {
 			t.Errorf("close desktop service: %v", err)
@@ -372,8 +375,8 @@ func TestServiceMountRefusesMissingDependencyAndOccupiedFolders(t *testing.T) {
 		t.Fatal("mount attempted despite failed prerequisites")
 		return nil, nil
 	}
-	if err := s.Mount(context.Background()); err == nil || !strings.Contains(err.Error(), "macFUSE") {
-		t.Fatalf("error = %v, want macFUSE installation guidance", err)
+	if err := s.Mount(context.Background()); err == nil || err.Error() != platformDependencyMessage() {
+		t.Fatalf("error = %v, want platform filesystem guidance", err)
 	}
 	s.dependencyReady = func() bool { return true }
 	if err := os.MkdirAll(s.opts.MountRoot, 0o755); err != nil {

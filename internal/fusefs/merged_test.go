@@ -82,6 +82,23 @@ func (f *fakeOverlay) EnsureCopyOnWriteFrom(ctx context.Context, repo model.Repo
 func (f *fakeOverlay) CreateFile(_ context.Context, _ string, _ uint32) (model.OverlayEntry, error) {
 	return model.OverlayEntry{}, nil
 }
+
+func (f *fakeOverlay) CreateFileOpened(ctx context.Context, path string, mode uint32) (model.OverlayEntry, *os.File, error) {
+	entry, err := f.CreateFile(ctx, path, mode)
+	return entry, nil, err
+}
+
+func (f *fakeOverlay) WriteFileFrom(ctx context.Context, path string, off int64, data []byte, _ *os.File) (int, error) {
+	return f.WriteFile(ctx, path, off, data)
+}
+
+func (f *fakeOverlay) TruncateFrom(ctx context.Context, path string, size int64, _ *os.File) error {
+	return f.Truncate(ctx, path, size)
+}
+
+func (f *fakeOverlay) SyncFileFrom(ctx context.Context, path string, _ *os.File) error {
+	return f.SyncFile(ctx, path)
+}
 func (f *fakeOverlay) CreateSymlink(_ context.Context, path string, target string) (model.OverlayEntry, error) {
 	if f.entries == nil {
 		f.entries = map[string]model.OverlayEntry{}
@@ -149,6 +166,25 @@ func (f *fakeOverlay) RenameTree(_ context.Context, oldPath, newPath string, sou
 			f.entries[path] = model.OverlayEntry{Path: path, Kind: model.OverlayKindDelete}
 		}
 	}
+	return nil
+}
+func (f *fakeOverlay) RenameWithSourceWhiteout(ctx context.Context, oldPath, newPath string, destinationBase *model.BaseNode) error {
+	if model.CleanPath(oldPath) == model.CleanPath(newPath) {
+		return nil
+	}
+	if err := f.Rename(ctx, oldPath, newPath); err != nil {
+		return err
+	}
+	if destinationBase != nil {
+		e := f.entries[model.CleanPath(newPath)]
+		if e.Kind != model.OverlayKindSymlink {
+			e.Kind = model.OverlayKindModify
+		}
+		e.SourceOID = destinationBase.ObjectOID
+		e.SourceMode = destinationBase.Mode
+		f.entries[e.Path] = e
+	}
+	f.entries[model.CleanPath(oldPath)] = model.OverlayEntry{Path: model.CleanPath(oldPath), Kind: model.OverlayKindDelete}
 	return nil
 }
 func (f *fakeOverlay) Mkdir(_ context.Context, path string, mode uint32) error {

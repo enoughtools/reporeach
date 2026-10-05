@@ -1,0 +1,3 @@
+# Legacy/source validation only. Production builds use project.yml and FSKit.
+include:
+  - project-base.yml

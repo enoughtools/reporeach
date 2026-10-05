@@ -15,11 +15,13 @@ import (
 	"github.com/cloudflare/artifact-fs/internal/model"
 	"github.com/cloudflare/artifact-fs/internal/overlay"
 	"github.com/cloudflare/artifact-fs/internal/registry"
+	"github.com/cloudflare/artifact-fs/internal/snapshot"
 )
 
-// DownloadProgress counts unique blobs in one committed checkout. TotalBytes is
-// a lower bound while TotalBytesKnown is false. Complete is set only after all
-// blobs are present and HEAD has been rechecked.
+// DownloadProgress counts unique blobs required by the committed checkout and,
+// when enabled, its persistent workingtree baseline. TotalBytes is a lower
+// bound while TotalBytesKnown is false. Complete is set only after all blobs
+// are present and HEAD has been rechecked.
 type DownloadProgress struct {
 	TotalBlobs      int64  `json:"totalBlobs"`
 	CompletedBlobs  int64  `json:"completedBlobs"`
@@ -31,10 +33,11 @@ type DownloadProgress struct {
 	Complete        bool   `json:"complete"`
 }
 
-// DownloadCurrentTree hydrates the current committed tree. It does not reset
-// the index, modify the overlay, or download unrelated history. The callback is
-// synchronous; callers can cancel ctx in response to progress. Desktop callers
-// serialize this operation with repository removal.
+// DownloadCurrentTree hydrates the current committed tree and the persistent
+// workingtree baseline when enabled. It does not reset the index, modify the
+// overlay, or download unrelated history. The callback is synchronous; callers
+// can cancel ctx in response to progress. Desktop callers serialize this
+// operation with repository removal.
 func (s *Service) DownloadCurrentTree(ctx context.Context, name string, progress func(DownloadProgress)) (result DownloadProgress, err error) {
 	if err := model.ValidateRepoName(name); err != nil {
 		return result, err
@@ -51,6 +54,29 @@ func (s *Service) DownloadCurrentTree(ctx context.Context, name string, progress
 		nodes, err := s.git.BuildTreeIndex(ctx, cfg, head)
 		if err != nil {
 			return err
+		}
+		s.mu.Lock()
+		persistent := s.catalogViewPolicy == CatalogViewPersistentWorkingTree
+		s.mu.Unlock()
+		if persistent {
+			// HEAD can move without changing the workingtree (soft/mixed reset,
+			// ref updates). Keep the frozen baseline available offline as well
+			// as the current committed tree; overlay bytes are already local.
+			snap, err := snapshot.New(ctx, cfg.MetaDBPath)
+			if err != nil {
+				return err
+			}
+			baseline, _, generation, readErr := snap.ReadState(ctx)
+			if err := errors.Join(readErr, snap.Close()); err != nil {
+				return err
+			}
+			if generation != 0 && baseline != head {
+				baselineNodes, err := s.git.BuildTreeIndex(ctx, cfg, baseline)
+				if err != nil {
+					return fmt.Errorf("read persistent workingtree baseline: %w", err)
+				}
+				nodes = append(nodes, baselineNodes...)
+			}
 		}
 		unique := make([]model.BaseNode, 0, len(nodes))
 		seen := make(map[string]bool, len(nodes))
@@ -236,7 +262,33 @@ func (s *Service) FreeRepositorySpace(ctx context.Context, name string) (retErr 
 				return errors.Join(readErr, closeErr)
 			}
 			if len(entries) != 0 {
+				s.mu.Lock()
+				persistent := s.catalogViewPolicy == CatalogViewPersistentWorkingTree
+				s.mu.Unlock()
+				if persistent {
+					return errors.New("persistent workingtree edits are retained; safe overlay compaction is required before freeing space")
+				}
 				return errors.New("repository has local files or deletions; commit and push them before freeing space")
+			}
+			s.mu.Lock()
+			persistent := s.catalogViewPolicy == CatalogViewPersistentWorkingTree
+			s.mu.Unlock()
+			if persistent {
+				snap, err := snapshot.New(ctx, latest.MetaDBPath)
+				if err != nil {
+					return err
+				}
+				baseline, _, generation, readErr := snap.ReadState(ctx)
+				if err := errors.Join(readErr, snap.Close()); err != nil {
+					return err
+				}
+				head, _, err := s.git.ResolveHEAD(ctx, latest)
+				if err != nil {
+					return err
+				}
+				if generation <= 0 || baseline != head {
+					return errors.New("persistent workingtree baseline differs from Git HEAD; preserve it until a safe workingtree migration can be performed")
+				}
 			}
 			if err := verifyEmptyOverlayUpper(latest.OverlayDir); err != nil {
 				return err

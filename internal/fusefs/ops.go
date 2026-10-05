@@ -154,24 +154,36 @@ func (e *Engine) Rename(ctx context.Context, oldPath, newPath string) error {
 	if resolvedNodeType(source) == "dir" {
 		return e.renameDirectory(ctx, oldPath, newPath)
 	}
+	if destination, err := e.Resolver.resolvePath(newPath); err == nil {
+		if resolvedNodeType(destination) == "dir" {
+			return fs.ErrInvalid
+		}
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	destinationBase, destinationInBase, err := e.Resolver.Snapshot.LookupNode(ctx, e.Resolver.Generation(), newPath)
+	if err != nil {
+		return err
+	}
 	if source.FromOverlay {
 		ov := source.Overlay
-		if dst, ok, err := e.Resolver.Snapshot.LookupNode(ctx, e.Resolver.Generation(), newPath); err != nil {
-			return err
-		} else if ok {
-			if dst.Type == "dir" {
-				return fs.ErrInvalid
+		if ov.Kind == model.OverlayKindCreate || ov.Kind == model.OverlayKindSymlink {
+			_, sourceInBase, err := e.Resolver.Snapshot.LookupNode(ctx, e.Resolver.Generation(), oldPath)
+			if err != nil {
+				return err
 			}
-			if ov.Kind == model.OverlayKindCreate || ov.Kind == model.OverlayKindSymlink {
-				return e.Overlay.RenameAndMarkModifiedFromBase(ctx, oldPath, newPath, dst.ObjectOID, dst.Mode)
+			if sourceInBase {
+				var overwrittenBase *model.BaseNode
+				if destinationInBase {
+					overwrittenBase = &destinationBase
+				}
+				return e.Overlay.RenameWithSourceWhiteout(ctx, oldPath, newPath, overwrittenBase)
+			}
+			if destinationInBase {
+				return e.Overlay.RenameAndMarkModifiedFromBase(ctx, oldPath, newPath, destinationBase.ObjectOID, destinationBase.Mode)
 			}
 		}
 		return e.Overlay.Rename(ctx, oldPath, newPath)
-	}
-	if dst, ok, err := e.Resolver.Snapshot.LookupNode(ctx, e.Resolver.Generation(), newPath); err != nil {
-		return err
-	} else if ok && dst.Type == "dir" {
-		return fs.ErrInvalid
 	}
 	if err := e.ensureOverlay(ctx, oldPath); err != nil {
 		return err

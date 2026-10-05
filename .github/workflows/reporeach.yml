@@ -12,7 +12,7 @@ on:
         required: true
         default: 0.1.0-beta.3
       publish:
-        description: Publish a GitHub release after checks pass
+        description: Reserved; releases are disabled during native FSKit validation
         type: boolean
         default: false
 
@@ -31,10 +31,11 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version: 1.26.8
+      - run: python3 scripts/test-fskit-packaging.py
       - run: go build ./cmd/artifact-fs
       - run: go vet ./...
       - run: go test ./...
-      - run: go test -race ./internal/gitstore ./internal/hydrator ./internal/daemon ./internal/fusefs ./internal/overlay ./internal/catalogfs ./internal/desktop
+      - run: go test -race ./internal/gitstore ./internal/hydrator ./internal/daemon ./internal/fusefs ./internal/overlay ./internal/catalogfs ./internal/desktop ./internal/fsbridge
 
   filesystem:
     runs-on: ubuntu-24.04
@@ -76,69 +77,15 @@ jobs:
       fail-fast: false
       matrix:
         architecture: [arm64, x86_64]
-    env:
-      REPOREACH_BUILD_NUMBER: "3"
-      MACOS_DEVELOPER_ID_CERTIFICATE: ${{ secrets.MACOS_DEVELOPER_ID_CERTIFICATE }}
-      MACOS_DEVELOPER_ID_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_DEVELOPER_ID_CERTIFICATE_PASSWORD }}
-      APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
-      APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
-      APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version: 1.26.8
-      - name: Resolve version
-        id: version
+      - name: Compile legacy management app for source validation
         env:
-          INPUT_VERSION: ${{ inputs.version }}
-        run: |
-          version="${INPUT_VERSION:-0.1.0-beta.3}"
-          if [[ "$GITHUB_REF" == refs/tags/reporeach-v* ]]; then version="${GITHUB_REF#refs/tags/reporeach-v}"; fi
-          case "$version" in *[!A-Za-z0-9.+-]*|"") exit 2 ;; esac
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-      - name: Import optional signing identity
-        if: github.event_name != 'pull_request' && env.MACOS_DEVELOPER_ID_CERTIFICATE != ''
-        run: |
-          set -euo pipefail
-          signing_keychain="$RUNNER_TEMP/reporeach-signing.keychain-db"
-          signing_password="$(openssl rand -hex 24)"
-          printf '%s' "$MACOS_DEVELOPER_ID_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/developer-id.p12"
-          security create-keychain -p "$signing_password" "$signing_keychain"
-          security set-keychain-settings -lut 21600 "$signing_keychain"
-          security unlock-keychain -p "$signing_password" "$signing_keychain"
-          security import "$RUNNER_TEMP/developer-id.p12" -k "$signing_keychain" \
-            -P "$MACOS_DEVELOPER_ID_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
-          security list-keychains -d user -s "$signing_keychain" "$HOME/Library/Keychains/login.keychain-db"
-          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$signing_password" "$signing_keychain"
-          identity="$(security find-identity -v -p codesigning "$signing_keychain" | awk -F'"' '/Developer ID Application/{print $2; exit}')"
-          test -n "$identity"
-          echo "REPOREACH_SIGN_IDENTITY=$identity" >> "$GITHUB_ENV"
-          rm "$RUNNER_TEMP/developer-id.p12"
-      - name: Package app, engine, official GitHub CLI, and Finder extension
-        env:
-          VERSION: ${{ steps.version.outputs.version }}
           ARCHITECTURE: ${{ matrix.architecture }}
-        run: |
-          set -euo pipefail
-          options=(--arch "$ARCHITECTURE" --version "$VERSION")
-          if [ -n "${REPOREACH_SIGN_IDENTITY:-}" ] && [ -n "$APPLE_API_KEY" ] && [ -n "$APPLE_API_KEY_ID" ] && [ -n "$APPLE_API_ISSUER" ]; then
-            mkdir -p "$RUNNER_TEMP/private_keys"
-            export APPLE_API_KEY_PATH="$RUNNER_TEMP/private_keys/AuthKey_${APPLE_API_KEY_ID}.p8"
-            printf '%s' "$APPLE_API_KEY" | base64 --decode > "$APPLE_API_KEY_PATH"
-            chmod 600 "$APPLE_API_KEY_PATH"
-            options+=(--notarize)
-          fi
-          scripts/build-macos.sh "${options[@]}"
-          python3 - <<'PY'
-          import os, pathlib
-          notices = pathlib.Path("build/package") / os.environ["ARCHITECTURE"] / "RepoReach.app/Contents/Resources/Licenses"
-          source_files = list(notices.rglob("*.go"))
-          if source_files:
-              raise SystemExit(f"Bundled notices must be inert text resources: {source_files}")
-          PY
-          go list ./... >/dev/null
-          python3 scripts/release-manifest.py manifest --directory "dist/releases/$VERSION" --version "$VERSION"
+        run: scripts/build-macos.sh --backend macfuse --compile-only --arch "$ARCHITECTURE" --unsigned
       - name: Native unit tests
         run: |
           xcodebuild -project native/RepoReach.xcodeproj -scheme RepoReach \
@@ -153,22 +100,85 @@ jobs:
           swiftc -parse-as-library native/App/Models.swift native/App/EngineClient.swift \
             native/Tools/control-smoke.swift -o build/control-smoke/check
           build/control-smoke/check "$PWD/build/control-smoke/artifact-fs"
-      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
-        with:
-          name: macos-${{ matrix.architecture }}
-          path: dist/releases/${{ steps.version.outputs.version }}/
-          include-hidden-files: true
-          retention-days: 14
-      - name: Remove temporary signing material
-        if: always()
+
+      - name: Real Go filesystem bridge and Swift extension client interop
+        if: matrix.architecture == 'arm64'
         run: |
-          rm -f "$RUNNER_TEMP/developer-id.p12"
-          rm -rf "$RUNNER_TEMP/private_keys"
-          if [ -f "$RUNNER_TEMP/reporeach-signing.keychain-db" ]; then security delete-keychain "$RUNNER_TEMP/reporeach-signing.keychain-db"; fi
+          mkdir -p build/fsbridge-smoke
+          swiftc -parse-as-library native/FSKitExtension/BridgeConfiguration.swift \
+            native/FSKitExtension/BridgeModels.swift native/FSKitExtension/BridgeTransport.swift \
+            native/FSKitExtension/BridgeClient.swift native/Tools/fsbridge-smoke.swift \
+            -o build/fsbridge-smoke/check
+          AFS_NATIVE_BRIDGE_CLIENT="$PWD/build/fsbridge-smoke/check" \
+            go test -count=1 -run '^TestNativeClientInterop$' -v ./internal/fsbridge
+
+  fskit26:
+    # Official runner inventory: actions/runner-images/images/macos/macos-26-arm64-Readme.md.
+    # Compile validation does not establish signed extension activation or a real mount.
+    runs-on: macos-26
+    strategy:
+      fail-fast: false
+      matrix:
+        architecture: [arm64, x86_64]
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version: 1.26.8
+      - name: Verify macOS 26 and selected Xcode 26.6
+        run: |
+          set -euo pipefail
+          test "$(sw_vers -productVersion | cut -d. -f1)" -ge 26
+          xcodebuild -version
+          xcrun --sdk macosx --show-sdk-version
+          test "$(xcodebuild -version | awk '/^Xcode / {print $2}')" = 26.6
+      - name: FSKit distribution authorization regression checks
+        run: python3 scripts/test-fskit-packaging.py
+      - name: Compile bundled FSKit app and check ExtensionKit layout
+        env:
+          ARCHITECTURE: ${{ matrix.architecture }}
+        run: |
+          set -euo pipefail
+          mkdir -p build/fskit-validation
+          scripts/build-macos.sh --backend fskit --compile-only --arch "$ARCHITECTURE" --unsigned \
+            > "build/fskit-validation/compile-$ARCHITECTURE.log" 2>&1 || {
+              tail -n 120 "build/fskit-validation/compile-$ARCHITECTURE.log"
+              exit 1
+            }
+          tail -n 12 "build/fskit-validation/compile-$ARCHITECTURE.log"
+          test ! -d dist/releases
+      - name: FSKit and native unit tests
+        if: matrix.architecture == 'arm64'
+        run: |
+          xcodebuild -project native/RepoReach.xcodeproj -scheme RepoReachFSKit \
+            -configuration Debug -derivedDataPath build/native-fskit-tests \
+            -destination 'platform=macOS' ONLY_ACTIVE_ARCH=YES \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO test
+      - name: Real Go filesystem bridge and Swift extension client interop
+        if: matrix.architecture == 'arm64'
+        run: |
+          mkdir -p build/fsbridge-smoke
+          swiftc -parse-as-library native/FSKitExtension/BridgeConfiguration.swift \
+            native/FSKitExtension/BridgeModels.swift native/FSKitExtension/BridgeTransport.swift \
+            native/FSKitExtension/BridgeClient.swift native/Tools/fsbridge-smoke.swift \
+            -o build/fsbridge-smoke/check
+          AFS_NATIVE_BRIDGE_CLIENT="$PWD/build/fsbridge-smoke/check" \
+            go test -count=1 -run '^TestNativeClientInterop$' -v ./internal/fsbridge
+
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        if: always()
+        with:
+          name: fskit26-compile-validation-${{ matrix.architecture }}
+          path: build/fskit-validation/*.log
+          retention-days: 14
 
   release:
-    if: startsWith(github.ref, 'refs/tags/reporeach-v') || (github.event_name == 'workflow_dispatch' && inputs.publish)
-    needs: [engine, filesystem, website, macos]
+    # New FSKit releases remain disabled until signed extension activation and
+    # mounted behavior pass on macOS 26 with an actual authorized profile.
+    if: ${{ false }}
+    needs: [engine, filesystem, website, macos, fskit26]
     runs-on: ubuntu-24.04
     permissions:
       contents: write

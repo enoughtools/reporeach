@@ -262,7 +262,7 @@ func TestRepositoryMutationsUseWritableArtifactFSOverlay(t *testing.T) {
 	}
 	ctx := context.Background()
 	root := repoRoot(t, fs, "alice")
-	create := &fuseops.CreateFileOp{Parent: root, Name: "local.txt", Mode: 0o644}
+	create := &fuseops.CreateFileOp{Parent: root, Name: "local.txt", Mode: 0o644, OpenFlags: syscall.O_RDWR}
 	if err := fs.CreateFile(ctx, create); err != nil {
 		t.Fatal(err)
 	}

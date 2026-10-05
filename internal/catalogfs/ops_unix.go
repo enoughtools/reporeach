@@ -61,9 +61,9 @@ func (fs *FileSystem) CreateFile(ctx context.Context, op *fuseops.CreateFileOp) 
 		return err
 	}
 	localInode := child.Entry.Child
-	child.Handle = fs.addHandle(&handle{repo: n.repo, backend: backend, local: child.Handle, inode: localInode})
 	child.Parent = op.Parent
 	child.Entry.Child = fs.mapInode(n.repo, child.Entry.Child, true)
+	child.Handle = fs.addHandle(&handle{repo: n.repo, backend: backend, local: child.Handle, inode: localInode, globalInode: child.Entry.Child})
 	*op = child
 	return nil
 }
@@ -112,7 +112,7 @@ func (fs *FileSystem) OpenFile(ctx context.Context, op *fuseops.OpenFileOp) erro
 		return err
 	}
 	child.Inode = op.Inode
-	child.Handle = fs.addHandle(&handle{repo: n.repo, backend: backend, local: child.Handle, inode: n.local})
+	child.Handle = fs.addHandle(&handle{repo: n.repo, backend: backend, local: child.Handle, inode: n.local, globalInode: op.Inode})
 	*op = child
 	return nil
 }

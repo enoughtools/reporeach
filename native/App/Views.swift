@@ -587,11 +587,11 @@ struct ContentView: View {
     private var dependencyBanner: some View {
         notice(symbol: "externaldrive", color: ReachTheme.ink) {
             VStack(alignment: .leading, spacing: 4) {
-                Text("macFUSE's kernel backend is needed for this beta.").font(.system(size: 12, weight: .semibold))
-                Text("Follow the macFUSE kernel-extension setup and approval steps, then restart. FSKit alone is not supported.").font(.system(size: 11)).foregroundStyle(ReachTheme.muted)
+                Text("Virtual folders require macOS 26.").font(.system(size: 12, weight: .semibold))
+                Text("You can manage repositories here. On macOS 26, enable RepoReach's bundled filesystem extension to show them in Finder.").font(.system(size: 11)).foregroundStyle(ReachTheme.muted)
             }
             Spacer(minLength: 8)
-            Button("Set Up macFUSE") { store.openDependencyPage() }
+            Button("Filesystem Settings") { store.showFilesystemExtensionSettings() }
                 .buttonStyle(ReachButtonStyle(compact: true))
         }
     }
@@ -735,14 +735,12 @@ struct SettingsView: View {
                 settingSection("Filesystem support", symbol: "externaldrive") {
                     HStack(spacing: 7) {
                         Circle().fill(store.status?.dependencyReady == true ? ReachTheme.success : ReachTheme.muted).frame(width: 6, height: 6)
-                        Text(store.status?.dependencyReady == true ? "macFUSE installation found" : "macFUSE is required").font(.system(size: 12, weight: .semibold))
+                        Text(store.status?.dependencyReady == true ? "macOS 26 filesystem support available" : "Virtual folders require macOS 26").font(.system(size: 12, weight: .semibold))
                     }
-                    Text("This beta requires macFUSE's kernel backend. FSKit alone is not supported. Apple silicon Macs may need additional kernel-extension setup and approval; follow the setup guide before installing.")
+                    Text("Enable RepoReach in System Settings → General → Login Items & Extensions → File System Extensions, then choose Mount Folders. The filesystem extension is included in the app.")
                         .font(.system(size: 12)).foregroundStyle(ReachTheme.muted).lineSpacing(3)
-                    Button("RepoReach Setup Guide") { store.openDependencyPage() }
+                    Button("Open Filesystem Extension Settings") { store.showFilesystemExtensionSettings() }
                         .buttonStyle(ReachButtonStyle(compact: true))
-                    Link("macFUSE Download ↗", destination: URL(string: "https://macfuse.github.io/")!)
-                        .font(.system(size: 12)).foregroundStyle(ReachTheme.accent)
                 }
                 settingSection("Private by design", symbol: "lock") {
                     Text("GitHub's official CLI handles credentials using macOS Keychain when available. Repositories use Git directly with your existing Git and SSH credentials. Your repository contents are not sent to Enough Tools.")

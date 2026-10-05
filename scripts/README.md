@@ -1,28 +1,76 @@
 # RepoReach builds and releases
 
-Builds require macOS, Xcode, a Go launcher, Python 3, and network access to
-the pinned official GitHub CLI and XcodeGen distributions. XcodeGen 2.46.0 is
-downloaded into a verified private build cache. A macFUSE driver is not needed to
-compile or package the app. Runtime mounts require a separate macFUSE install.
-The engine compiler is pinned to Go 1.26.8 and fetched through Go's toolchain
-mechanism without replacing the host's Go installation.
+The default build includes RepoReach's FSKit ExtensionKit module and requires
+Xcode 26 plus the macOS 26 SDK. The management app retains a macOS 13 deployment
+target; virtual mounts through the bundled module require macOS 26. No external
+macFUSE installation is required by the FSKit backend. The existing published
+beta 3 downloads still use the earlier backend and are immutable.
 
-From the repository root:
+The current FSKit work is source validation. GitHub's `macos-26` runner includes
+Xcode 26.6 at `/Applications/Xcode_26.6.app`; CI selects that toolchain explicitly
+and compiles both architecture slices. Runner inventory:
+https://github.com/actions/runner-images/blob/main/images/macos/macos-26-arm64-Readme.md
+Compile checks and unit tests do not establish extension activation or a working
+mount. Automatic release publication is disabled until a signed, enabled module
+passes mounted filesystem tests on macOS 26.
+
+Builds also require a Go launcher, Python 3, and network access for pinned
+XcodeGen 2.46.0. Distribution packaging bundles verified official GitHub CLI
+2.102.0. The engine compiler is pinned to Go 1.26.8 and fetched through Go's
+toolchain mechanism without replacing the host's Go installation.
+
+From the repository root on a compatible Mac, validate compilation without
+creating release archives or changing any website download metadata:
 
 ```sh
-scripts/build-macos.sh --arch arm64 --version 0.1.0-beta.3 --unsigned
-scripts/build-macos.sh --arch x86_64 --version 0.1.0-beta.3 --unsigned
-python3 scripts/release-manifest.py stage \
-  --directory dist/releases/0.1.0-beta.3 --version 0.1.0-beta.3
-npm ci --prefix site
-npm run build --prefix site
-npx --yes wrangler@4.147.0 deploy --config wrangler.jsonc
+python3 scripts/test-fskit-packaging.py
+scripts/build-macos.sh --backend fskit --compile-only --arch arm64 --unsigned
+scripts/build-macos.sh --backend fskit --compile-only --arch x86_64 --unsigned
 ```
 
-The two architecture builds contain the native app, Finder extension, ArtifactFS
-engine, and verified official GitHub CLI. Each produces a ZIP and DMG. The
+For legacy management/source checks with Xcode 16, use the explicit
+`--backend macfuse --compile-only` option. This generates the legacy project
+specification, excludes the FSKit target, and never creates release archives.
+The legacy and FSKit derived builds use separate private output directories.
+Legacy distribution packaging is disabled because the current Darwin engine
+uses the bundled FSKit module.
+
+After real backend validation and source freeze, distribution packaging requires
+an existing Developer ID identity and the actual extension-specific Developer
+ID provisioning profile in `REPOREACH_FSKIT_PROFILE`. Choose a new release
+version in `VERSION`; existing archive filenames cannot be overwritten:
+
+```sh
+: "${VERSION:?Choose a new frozen release version}"
+: "${REPOREACH_SIGN_IDENTITY:?Developer ID identity required}"
+: "${REPOREACH_FSKIT_PROFILE:?Matching FSKit provisioning profile path required}"
+scripts/build-macos.sh --backend fskit --arch arm64 --version "$VERSION"
+scripts/build-macos.sh --backend fskit --arch x86_64 --version "$VERSION"
+python3 scripts/release-manifest.py stage \
+  --directory "dist/releases/$VERSION" --version "$VERSION"
+```
+
+RepoReach's production guard requires the profile embedded in the FSKit module's
+own `Contents/embedded.provisionprofile` before signing. It authenticates the CMS
+signature using public macOS Security APIs, explicit Apple roots from the system
+keychain, the profile-authority and WWDR certificate markers, certificate
+validity and OCSP policy. Decoding an unsigned CMS payload is insufficient.
+Validation rejects expired, development, wildcard, host-app,
+Finder, wrong-team, wrong-certificate, and missing-FSKit-capability profiles.
+The final signed claims must match the profile's module App ID and team, retain
+sandbox and hardened runtime, and disable debug task access. Production FSKit
+archives cannot use ad-hoc signing. `codesign --verify` is a packaging check;
+system policy assessment, extension enablement and an actual mount remain
+required for release validation. Apple documentation:
+https://developer.apple.com/documentation/technotes/tn3125-inside-code-signing-provisioning-profiles
+https://developer.apple.com/documentation/xcode/creating-distribution-signed-code-for-the-mac
+
+The two architecture builds contain the native app, Finder extension, FSKit module, ArtifactFS
+engine, and verified official GitHub CLI. Authorized distribution builds each produce a ZIP and DMG. The
 staging command checks their SHA-256 hashes and Cloudflare's 25 MiB asset limit,
 then copies them into `site/public/releases/<version>` and writes `latest.json`.
+The manifest records the backend, app minimum OS and separate virtual-mount
+minimum OS, and rejects mixing backends across architectures.
 Commit and freeze source before the final builds. Manifest generation refuses
 artifacts built from different source contents. Rebuild both architectures when
 source changes. `source.dirty` and the source content hash remain visible in
@@ -44,8 +92,9 @@ and are not bundled.
 For Developer ID signing, pass `--sign-identity` with an identity already in the
 Keychain, or set `REPOREACH_SIGN_IDENTITY`. Nested helpers and the Finder extension
 are signed individually before the outer app. The Finder extension uses its
-explicit entitlement file. Unsigned builds use ad-hoc signatures, as required by
-Apple Silicon, and are identified as such in the manifest.
+explicit entitlement file. Unsigned validation uses `--compile-only`; distributable
+FSKit builds require the authorized Developer ID profile and identity described
+above.
 
 Add `--notarize` with either `REPOREACH_NOTARY_PROFILE`, or the three environment
 variables `APPLE_API_KEY_PATH`, `APPLE_API_KEY_ID`, and `APPLE_API_ISSUER`. The API
@@ -55,11 +104,15 @@ Signing without notarization is supported and represented accurately by
 
 The RepoReach workflow validates Go, native tests, the Swift client's control
 contract against the real Go engine with synthetic authentication, website
-formatting and builds, and Linux FUSE behavior. Pull requests produce unsigned
-packages. Repository signing secrets are optional. A `reporeach-v<version>` tag,
-or a manual run with `publish` enabled,
-publishes architecture packages to GitHub after checks pass. Website publication
-uses the staging and deploy steps above and remains a separate release step.
+formatting and builds, Linux FUSE behavior, and bundled FSKit source compilation.
+Both Mac ARM jobs also exercise the real Go filesystem bridge with the Swift
+extension client, including authenticated sessions, paged large responses,
+binary reads/writes and handle cleanup. The standalone invocation is documented
+in [the bridge smoke guide](../native/Tools/README.fsbridge-smoke.md).
+Pull requests compile without signing keys, profiles or release archives. The
+FSKit job uploads compilation logs only. GitHub release publication is disabled
+while the new backend is being validated. No source-validation command updates
+the live downloads; publication remains a separate release step.
 
 Run mounted filesystem tests without changing the Mac's driver or security:
 

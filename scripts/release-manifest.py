@@ -58,14 +58,22 @@ def record(args):
         "xcode": subprocess.check_output(["xcodebuild", "-version"], text=True).strip(),
         "xcodegen": subprocess.check_output(["xcodegen", "--version"], text=True).strip(),
     }
-    metadata = {"version": args.version, "source": json.loads(args.source_file.read_text()),
+    metadata = {"version": args.version, "filesystemBackend": args.backend, "source": json.loads(args.source_file.read_text()),
                 "architecture": args.arch, "toolchain": toolchain, "artifacts": artifacts}
+    if args.backend == "fskit":
+        if args.signature != "developer-id" or args.fskit_profile is None or not args.fskit_profile.is_file():
+            raise SystemExit("FSKit distribution metadata requires Developer ID signing and the actual embedded module profile.")
+        metadata["filesystemModule"] = {
+            "bundleIdentifier": "com.enoughtools.reporeach.fskit",
+            "embeddedProfileSha256": digest(args.fskit_profile),
+        }
     (args.directory / f".metadata-{args.arch}.json").write_text(json.dumps(metadata, indent=2) + "\n")
 
 
 def manifest(args):
     artifacts = []
     builds = []
+    backends = set()
     identity = source_identity()
     for metadata in sorted(args.directory.glob(".metadata-*.json")):
         build = json.loads(metadata.read_text())
@@ -74,9 +82,22 @@ def manifest(args):
         if build["version"] != args.version or build["source"]["contentSha256"] != identity["contentSha256"]:
             raise SystemExit("Source changed since packaging, or architecture versions differ. Rebuild before publishing.")
         artifacts.extend(build["artifacts"])
-        builds.append({"architecture": build["architecture"], "source": build["source"], "toolchain": build["toolchain"]})
+        backends.add(build.get("filesystemBackend", "macfuse"))
+        built = {"architecture": build["architecture"], "source": build["source"], "toolchain": build["toolchain"]}
+        if "filesystemModule" in build:
+            built["filesystemModule"] = build["filesystemModule"]
+        builds.append(built)
     if not artifacts:
         raise SystemExit("No packaged artifacts found. Run build-macos.sh first.")
+    if len(backends) != 1:
+        raise SystemExit("Architecture packages use different filesystem backends. Rebuild before publishing.")
+    backend = backends.pop()
+    if backend == "fskit":
+        modules = [build.get("filesystemModule") for build in builds]
+        if not all(module and module.get("embeddedProfileSha256") for module in modules) or not all(module == modules[0] for module in modules):
+            raise SystemExit("FSKit builds must contain the same authorized module provisioning profile.")
+        if any(item["signature"] != "developer-id" for item in artifacts):
+            raise SystemExit("FSKit release archives must use Developer ID signing.")
     for item in artifacts:
         archive = args.directory / item["filename"]
         if digest(archive) != item["sha256"] or archive.stat().st_size != item["bytes"]:
@@ -85,7 +106,9 @@ def manifest(args):
         "product": "RepoReach", "version": args.version,
         "releasedAt": datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z"),
         "source": identity,
-        "minimumMacOS": "13.0", "requirements": {
+        "minimumMacOS": "13.0", "filesystemBackend": backend,
+        "minimumMountMacOS": "26.0" if backend == "fskit" else "13.0",
+        "requirements": {
             "macFUSE": True, "macFUSEBackend": "kernel", "macFUSEURL": "https://macfuse.io/",
             "git": True,
             "setupURL": "https://github.com/enoughtools/reporeach/blob/main/docs/reporeach/platform-setup.md",
@@ -93,6 +116,13 @@ def manifest(args):
         },
         "githubCLI": {"version": "2.102.0"}, "builds": builds, "artifacts": artifacts,
     }
+    if backend == "fskit":
+        document["requirements"] = {
+            "macFUSE": False, "fsKit": True, "fsKitModuleBundled": True,
+            "git": True,
+            "setupURL": "https://github.com/enoughtools/reporeach/blob/main/docs/reporeach/platform-setup.md",
+            "extensionEnablement": "Enable the bundled RepoReach FSKit extension in System Settings. Virtual mounts require macOS 26 or later.",
+        }
     (args.directory / "release.json").write_text(json.dumps(document, indent=2) + "\n")
     (args.directory / "SHA256SUMS").write_text("".join(f"{item['sha256']}  {item['filename']}\n" for item in artifacts))
     return document
@@ -121,6 +151,8 @@ for name in ("record", "manifest", "stage"):
     command.add_argument("--version", required=True)
     if name == "record":
         command.add_argument("--arch", choices=["arm64", "x86_64"], required=True)
+        command.add_argument("--backend", choices=["fskit", "macfuse"], default="macfuse")
+        command.add_argument("--fskit-profile", type=pathlib.Path)
         command.add_argument("--signature", choices=["developer-id", "ad-hoc"], required=True)
         command.add_argument("--notarized", choices=["true", "false"], required=True)
         command.add_argument("--source-file", type=pathlib.Path, required=True)

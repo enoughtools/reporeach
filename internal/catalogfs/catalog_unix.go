@@ -62,7 +62,8 @@ type handle struct {
 	backend      *fusefs.ArtifactFuse
 	local        fuseops.HandleID
 	inode        fuseops.InodeID
-	entries      []catalogEntry // immutable snapshot for synthetic directory handles
+	globalInode  fuseops.InodeID // retained even after the lookup identity is forgotten
+	entries      []catalogEntry  // immutable snapshot for synthetic directory handles
 	directory    bool
 	direntInodes map[fuseops.InodeID]struct{}
 }
