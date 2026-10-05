@@ -7,7 +7,7 @@ This is a narrow acceptance harness, not complete native release qualification. 
 ## Prerequisites
 
 - macOS 26 or later, with the `reporeach` FSKit module already installed and enabled in normal System Settings.
-- An installed `RepoReach.app` containing `Contents/Extensions/RepoReachFSKit.appex`, whose compiled filesystem implementation matches the verified native source under test. Record separate app and helper revisions and any validation-only bundle-metadata changes as described below. Building the extension requires Xcode 26 or later and the macOS 26 SDK; installation also requires the appropriate signing and FSKit entitlement authorization.
+- An installed `RepoReach.app` containing `Contents/Extensions/RepoReachFSKit.appex`, whose compiled filesystem implementation matches the verified native source under test. Record separate app and helper revisions and any validation-only bundle-metadata changes as described below. Building the extension requires Xcode 26 or later and a macOS SDK at version 26 or later; Xcode 27 with its macOS 27 SDK is a valid local toolchain while retaining the module's macOS 26 deployment target. Installation also requires the appropriate signing and FSKit entitlement authorization.
 - Native Git available on `PATH`, and Go 1.26.8 or toolchain download access.
 - Public FSKit discovery must identify the selected module identifier and exact module path as the sole enabled filesystem advertising `reporeach`. The read-only inspector fails on absent candidates, duplicate registrations, competing enabled modules, unreadable metadata, or incomplete output before the harness creates a fixture or asks to mount.
 - A disposable test session in which you can retain the private fixture and helper process if normal cleanup is refused.
@@ -36,13 +36,27 @@ from the current checkout with local Swift, then queries the public
 `FSClient.installedExtensions` API. Compilation is limited to 60 seconds and
 inspection to 20 seconds; the inspector itself stops after 15 seconds and bounds
 its JSON output. On this development host, the SDK 15.5 build reported only three
-Apple modules even after owner enablement of RepoReach Validation. That result
-does not establish that the validation extension is disabled, absent, or selected;
-it cannot satisfy the precondition and must not be bypassed.
+Apple modules even after owner enablement of RepoReach Validation. Host logs for
+the unentitled inspector recorded a Team ID lookup failure before returning the
+module set. A separate inspector signed with the existing Developer ID identity
+for team `FGXHYHH9MC` also reported only those three Apple modules; the ad-hoc
+validation extension has no Team ID. These observations make caller/signing
+visibility a possible explanation, not a proven cause or a documented SDK defect.
+Apple's [newer public mount API](https://developer.apple.com/documentation/fskit/fsclient/mountsinglevolume%28resource%3Abundleid%3Aoptions%3Acompletionhandler%3A%29)
+acknowledges a caller's module-visibility boundary; the
+[enumeration documentation](https://developer.apple.com/documentation/fskit/fsclient/fetchinstalledextensions%28completionhandler%3A%29)
+does not specify a same-Team-ID rule or an SDK-based visibility difference.
+They do not establish that the validation extension is disabled, absent, or
+selected. The earlier system mount dispatcher did find the old module and check
+its enabled state while public enumeration omitted it, so these are distinct
+discovery paths. The incomplete inventory cannot satisfy this harness's
+precondition and must not be bypassed.
 
-If local discovery is incomplete, use `AFS_FSKIT_INSPECTOR` to name the absolute
-path of the standalone SDK 26 inspection executable exported by a manual
-`validation_artifacts=true` CI run. The separate `fskit-module-inspector-arm64`
+An independently built inspector can be selected with `AFS_FSKIT_INSPECTOR`, which
+must name its absolute executable path. Build it locally with the selected Xcode
+26-or-later toolchain, or obtain the standalone SDK 26 executable exported by a
+manual `validation_artifacts=true` CI run. A newer SDK is a diagnostic comparison,
+not a promised fix for caller visibility. The separate `fskit-module-inspector-arm64`
 artifact contains `inspect-fskit-module.zip`, `inspect-fskit-module.json`, and
 `SHA256SUMS`. Before executing it, verify the ZIP hash, extracted executable hash,
 clean source revision, architecture, SDK/Xcode versions, and
@@ -50,7 +64,18 @@ clean source revision, architecture, SDK/Xcode versions, and
 test. Record these facts separately from the installed app's native revision.
 This artifact is a read-only diagnostic and does not modify, sign, install, or
 enable an app. A newer SDK build must still prove the exact selected module; its
-compilation alone is insufficient.
+compilation alone is insufficient. Even a positive public inventory is a
+precondition rather than proof of which module the system mount dispatcher
+actually executed; retain execution and mounted-behavior evidence separately.
+
+For the requested local app build, first confirm that `xcodebuild -version` and
+`xcrun --sdk macosx --show-sdk-version` select the newly installed toolchain rather
+than Xcode 16.4/SDK 15.5. Xcode 27 and its SDK meet the required minimum of 26.
+Then run `scripts/build-macos.sh --backend fskit --compile-only --arch arm64 --unsigned`
+to validate the app and module locally. This compilation step does not install,
+sign for distribution, enable, or mount the extension. Record the actual local
+toolchain and source revision; signing authorization and installed execution
+remain separate requirements.
 
 ## Run
 
