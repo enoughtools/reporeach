@@ -92,7 +92,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
     func application(_ application: NSApplication, open urls: [URL]) {
         openingAction = true
-        for url in urls { Task { @MainActor in
+        for url in urls { Task { @MainActor [self] in
             if store == nil { store = RepositoryStore(demoMode: ProcessInfo.processInfo.arguments.contains("--demo")); store.showSettingsHandler = { [weak self] in self?.showSettings() } }
             await store.handleActionURL(url)
         } }

@@ -84,7 +84,8 @@ xcodegen generate --spec "$PROJECT_SPEC" --project "$ROOT/native"
 xcodebuild -project "$ROOT/native/RepoReach.xcodeproj" -scheme "$SCHEME" \
   -configuration Release -derivedDataPath "$DERIVED" \
   ARCHS="$ARCH" ONLY_ACTIVE_ARCH=NO \
-  CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO build
+  CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO \
+  REGISTER_APP_WITH_LAUNCH_SERVICES=NO build
 if [ "$COMPILE_ONLY" = true ]; then
   if [ "$BACKEND" = fskit ]; then
     python3 "$ROOT/scripts/validate-fskit-bundle.py" compile \

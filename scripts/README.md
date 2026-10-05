@@ -28,6 +28,11 @@ scripts/build-macos.sh --backend fskit --compile-only --arch arm64 --unsigned
 scripts/build-macos.sh --backend fskit --compile-only --arch x86_64 --unsigned
 ```
 
+The build script sets `REGISTER_APP_WITH_LAUNCH_SERVICES=NO` so Xcode does not
+automatically register its compiled app with LaunchServices. Build products stay
+in their separate output directory; installing and registering a validation app
+remain explicit steps.
+
 For legacy management/source checks with Xcode 16, use the explicit
 `--backend macfuse --compile-only` option. This generates the legacy project
 specification, excludes the FSKit target, and never creates release archives.
