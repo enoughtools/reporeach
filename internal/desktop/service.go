@@ -26,11 +26,12 @@ import (
 )
 
 type Options struct {
-	StateDir  string
-	MountRoot string
-	Socket    string
-	GHPath    string
-	Logger    *slog.Logger
+	StateDir       string
+	MountRoot      string
+	Socket         string
+	GHPath         string
+	FSKitSocketDir string
+	Logger         *slog.Logger
 }
 
 // Service owns the catalogue, daemon runtimes, and background operations.
@@ -97,6 +98,18 @@ func New(ctx context.Context, opts Options) (*Service, error) {
 	}
 	if pathsOverlap(state.MountRoot, opts.StateDir) {
 		return nil, errors.New("mount folder and state directory must be separate")
+	}
+	if opts.FSKitSocketDir != "" {
+		if !filepath.IsAbs(opts.FSKitSocketDir) || pathsLexicallyOverlap(state.MountRoot, opts.FSKitSocketDir) {
+			return nil, errors.New("the File System Extension connection folder must be absolute and outside the repository mount folder")
+		}
+		if err := privateDirectory(opts.FSKitSocketDir, false); err != nil {
+			return nil, errors.New("the private shared File System Extension connection folder is unavailable")
+		}
+		opts.FSKitSocketDir, err = filepath.EvalSymlinks(opts.FSKitSocketDir)
+		if err != nil || pathsOverlap(state.MountRoot, opts.FSKitSocketDir) {
+			return nil, errors.New("mount folder and File System Extension connection folder must be separate")
+		}
 	}
 	engine, err := daemon.New(ctx, filepath.Join(opts.StateDir, "engine"), opts.Logger)
 	if err != nil {
@@ -390,6 +403,9 @@ func (s *Service) mountLocked(ctx context.Context) error {
 	if !s.dependencyReady() {
 		return errors.New(platformDependencyMessage())
 	}
+	if s.opts.FSKitSocketDir != "" && pathsOverlap(root, s.opts.FSKitSocketDir) {
+		return errors.New("mount folder and File System Extension connection folder must be separate")
+	}
 	if err := safeMountDirectory(root); err != nil {
 		return err
 	}
@@ -555,6 +571,10 @@ func (s *Service) Settings(ctx context.Context, root string) error {
 		s.mu.Unlock()
 		return errors.New("choose a folder outside the current repository folder")
 	}
+	if s.opts.FSKitSocketDir != "" && pathsLexicallyOverlap(root, s.opts.FSKitSocketDir) {
+		s.mu.Unlock()
+		return errors.New("mount folder and File System Extension connection folder must be separate")
+	}
 	var localRepositories []Repository
 	for _, repo := range s.state.Repositories {
 		if repo.Source != "manual" {
@@ -588,6 +608,9 @@ func (s *Service) Settings(ctx context.Context, root string) error {
 	}
 	if pathsOverlap(root, s.opts.StateDir) {
 		return errors.New("mount folder and state directory must be separate")
+	}
+	if s.opts.FSKitSocketDir != "" && pathsOverlap(root, s.opts.FSKitSocketDir) {
+		return errors.New("mount folder and File System Extension connection folder must be separate")
 	}
 	for _, repo := range localRepositories {
 		if err := validateManualSourceLocation(repo, oldRoot, s.opts.StateDir); err != nil {

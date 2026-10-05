@@ -5,10 +5,12 @@ package fsbridge
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -29,6 +31,7 @@ type Server struct {
 	descriptorPath string
 	socketInfo     os.FileInfo
 	descriptorInfo os.FileInfo
+	lease          *os.File
 	http           *http.Server
 	handler        *Handler
 	done           chan struct{}
@@ -42,34 +45,87 @@ type Server struct {
 // never removes an existing socket: recovery must first establish that no
 // surviving mount or bridge owns that session.
 func Start(ctx context.Context, sourceDir string, filesystem fuseutil.FileSystem) (*Server, error) {
+	return start(ctx, sourceDir, sourceDir, "bridge.sock", filesystem)
+}
+
+// StartWithSocketDirectory keeps the descriptor and FSKit resource in sourceDir,
+// while placing the Unix listener directly in a shared app-group container.
+// A canonical source identity gives each private state root its own short name.
+func StartWithSocketDirectory(ctx context.Context, sourceDir, socketDir string, filesystem fuseutil.FileSystem) (*Server, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if !filepath.IsAbs(sourceDir) {
-		return nil, errors.New("filesystem bridge source must be an absolute private directory")
+	if _, err := bridgeDirectory(sourceDir); err != nil {
+		return nil, err
 	}
-	info, err := os.Lstat(sourceDir)
+	if _, err := bridgeDirectory(socketDir); err != nil {
+		return nil, err
+	}
+	canonicalSource, err := filepath.EvalSymlinks(sourceDir)
+	if err != nil {
+		return nil, errors.New("filesystem bridge source directory could not be resolved")
+	}
+	canonicalSocket, err := filepath.EvalSymlinks(socketDir)
+	if err != nil {
+		return nil, errors.New("filesystem bridge socket directory could not be resolved")
+	}
+	digest := sha256.Sum256([]byte(canonicalSource))
+	return start(ctx, sourceDir, canonicalSocket, "b"+hex.EncodeToString(digest[:8]), filesystem)
+}
+
+func bridgeDirectory(path string) (os.FileInfo, error) {
+	if !filepath.IsAbs(path) {
+		return nil, errors.New("filesystem bridge directories must be absolute private directories")
+	}
+	info, err := os.Lstat(path)
 	if err != nil {
 		return nil, err
 	}
 	stat, ok := info.Sys().(*syscall.Stat_t)
 	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0o077 != 0 || !ok || int(stat.Uid) != os.Getuid() {
-		return nil, errors.New("filesystem bridge source must be a private directory owned by the current user")
+		return nil, errors.New("filesystem bridge directories must be private real directories owned by the current user")
 	}
-	socket := filepath.Join(sourceDir, "bridge.sock")
+	return info, nil
+}
+
+func start(ctx context.Context, sourceDir, socketDir, socketName string, filesystem fuseutil.FileSystem) (*Server, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	sourceInfo, err := bridgeDirectory(sourceDir)
+	if err != nil {
+		return nil, err
+	}
+	socketDirectoryInfo, err := bridgeDirectory(socketDir)
+	if err != nil {
+		return nil, err
+	}
+	socket := filepath.Join(socketDir, socketName)
+	if len(socket) >= len(syscall.RawSockaddrUnix{}.Path) {
+		return nil, errors.New("filesystem bridge socket path exceeds the Unix socket limit")
+	}
 	descriptorPath := filepath.Join(sourceDir, "connection.json")
-	if _, err := os.Lstat(socket); !errors.Is(err, os.ErrNotExist) {
-		if err != nil {
-			return nil, err
-		}
-		return nil, errors.New("filesystem bridge socket already exists")
+	if err := checkSessionPaths(sourceDir, socket, descriptorPath); err != nil {
+		return nil, err
 	}
-	if old, err := os.Lstat(descriptorPath); err == nil {
-		owner, ok := old.Sys().(*syscall.Stat_t)
-		if !old.Mode().IsRegular() || old.Mode().Perm()&0o077 != 0 || !ok || int(owner.Uid) != os.Getuid() {
-			return nil, errors.New("filesystem bridge descriptor must be a private regular file owned by the current user")
+	lease, err := acquireSourceLease(sourceDir)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if lease != nil {
+			_ = lease.Close()
 		}
-	} else if !errors.Is(err, os.ErrNotExist) {
+	}()
+	// Validation before the lease leaves refused unsafe paths untouched. Repeat
+	// under the lease so concurrent starts cannot replace a live descriptor.
+	for path, expected := range map[string]os.FileInfo{sourceDir: sourceInfo, socketDir: socketDirectoryInfo} {
+		current, err := bridgeDirectory(path)
+		if err != nil || !os.SameFile(current, expected) {
+			return nil, errors.New("filesystem bridge directory changed during startup")
+		}
+	}
+	if err := checkSessionPaths(sourceDir, socket, descriptorPath); err != nil {
 		return nil, err
 	}
 	token := make([]byte, 32)
@@ -105,7 +161,8 @@ func Start(ctx context.Context, sourceDir string, filesystem fuseutil.FileSystem
 		cleanup()
 		return nil, err
 	}
-	server := &Server{directory: sourceDir, socket: socket, descriptorPath: descriptorPath, socketInfo: socketInfo, descriptorInfo: descriptorInfo, handler: handler, done: make(chan struct{})}
+	server := &Server{directory: sourceDir, socket: socket, descriptorPath: descriptorPath, socketInfo: socketInfo, descriptorInfo: descriptorInfo, lease: lease, handler: handler, done: make(chan struct{})}
+	lease = nil
 	server.http = &http.Server{Handler: handler, ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 2 * time.Minute, IdleTimeout: 2 * time.Minute, MaxHeaderBytes: 16 << 10}
 	go func() {
 		err := server.http.Serve(listener)
@@ -118,6 +175,77 @@ func Start(ctx context.Context, sourceDir string, filesystem fuseutil.FileSystem
 		close(server.done)
 	}()
 	return server, nil
+}
+
+func checkSessionPaths(sourceDir, socket, descriptorPath string) error {
+	for _, path := range []string{socket, filepath.Join(sourceDir, "bridge.sock")} {
+		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+			if err != nil {
+				return err
+			}
+			return errors.New("filesystem bridge socket already exists")
+		}
+	}
+	fd, err := syscall.Open(descriptorPath, syscall.O_RDONLY|syscall.O_CLOEXEC|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return errors.New("filesystem bridge descriptor is unavailable or unsafe")
+	}
+	file := os.NewFile(uintptr(fd), descriptorPath)
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return errors.New("filesystem bridge descriptor could not be checked")
+	}
+	owner, ok := info.Sys().(*syscall.Stat_t)
+	if !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 || !ok || int(owner.Uid) != os.Getuid() || info.Size() <= 0 || info.Size() > 16<<10 {
+		return errors.New("filesystem bridge descriptor must be a bounded private regular file owned by the current user")
+	}
+	data, err := io.ReadAll(io.LimitReader(file, (16<<10)+1))
+	var descriptor Descriptor
+	if err != nil || len(data) > 16<<10 || json.Unmarshal(data, &descriptor) != nil || descriptor.Version != Version || len(descriptor.Token) != 64 {
+		return errors.New("filesystem bridge descriptor is invalid; preserve the session until its mount is safely detached")
+	}
+	for _, value := range descriptor.Token {
+		if !(value >= '0' && value <= '9' || value >= 'a' && value <= 'f') {
+			return errors.New("filesystem bridge descriptor is invalid; preserve the session until its mount is safely detached")
+		}
+	}
+	if descriptor.Socket != socket {
+		return errors.New("filesystem bridge descriptor belongs to a different socket location; preserve the session until its mount is safely detached")
+	}
+	return nil
+}
+
+func acquireSourceLease(sourceDir string) (*os.File, error) {
+	path := filepath.Join(sourceDir, ".bridge.lock")
+	fd, err := syscall.Open(path, syscall.O_RDWR|syscall.O_CREAT|syscall.O_CLOEXEC|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0o600)
+	if err != nil {
+		return nil, errors.New("filesystem bridge session lease is unavailable or unsafe")
+	}
+	file := os.NewFile(uintptr(fd), path)
+	info, err := file.Stat()
+	if err != nil {
+		_ = file.Close()
+		return nil, err
+	}
+	owner, ok := info.Sys().(*syscall.Stat_t)
+	if !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 || !ok || int(owner.Uid) != os.Getuid() {
+		_ = file.Close()
+		return nil, errors.New("filesystem bridge session lease must be a private regular file owned by the current user")
+	}
+	if err := syscall.Flock(fd, syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		_ = file.Close()
+		if errors.Is(err, syscall.EWOULDBLOCK) {
+			return nil, errors.New("filesystem bridge resource already has an active session")
+		}
+		return nil, errors.New("filesystem bridge session lease could not be acquired")
+	}
+	// Never unlink this inode: another process could then lock a different file
+	// at the same path while this session still holds its original lease.
+	return file, nil
 }
 
 func publishDescriptor(directory, path string, descriptor Descriptor) (os.FileInfo, error) {
@@ -187,6 +315,13 @@ func (s *Server) CloseDrain(ctx context.Context) error {
 	result = errors.Join(result, removeOwned(s.descriptorPath, s.descriptorInfo))
 	if result != nil {
 		return result
+	}
+	if s.lease != nil {
+		err := s.lease.Close()
+		s.lease = nil
+		if err != nil {
+			return err
+		}
 	}
 	s.closed = true
 	return nil

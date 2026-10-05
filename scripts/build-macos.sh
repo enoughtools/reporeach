@@ -8,6 +8,7 @@ VERSION=0.1.0-beta.3
 BACKEND=fskit
 COMPILE_ONLY=false
 VALIDATION_ARTIFACT=false
+VALIDATION_ROOT=""
 SIGN_IDENTITY="${REPOREACH_SIGN_IDENTITY:-}"
 NOTARIZE=false
 while [ "$#" -gt 0 ]; do
@@ -17,14 +18,27 @@ while [ "$#" -gt 0 ]; do
     --backend) BACKEND="$2"; shift 2 ;;
     --compile-only) COMPILE_ONLY=true; shift ;;
     --validation-artifact) COMPILE_ONLY=true; VALIDATION_ARTIFACT=true; SIGN_IDENTITY=""; shift ;;
+    --validation-root) test "$#" -ge 2 && test -n "$2" || { echo "--validation-root requires an absolute generation path." >&2; exit 2; }; VALIDATION_ROOT="$2"; shift 2 ;;
     --unsigned) SIGN_IDENTITY=""; shift ;;
     --sign-identity) SIGN_IDENTITY="$2"; shift 2 ;;
     --notarize) NOTARIZE=true; shift ;;
-    *) echo "Usage: $0 [--arch arm64|x86_64] [--version VERSION] [--backend fskit|macfuse] [--compile-only|--validation-artifact] [--unsigned|--sign-identity ID] [--notarize]" >&2; exit 2 ;;
+    *) echo "Usage: $0 [--arch arm64|x86_64] [--version VERSION] [--backend fskit|macfuse] [--compile-only|--validation-artifact [--validation-root ABSOLUTE_PATH]] [--unsigned|--sign-identity ID] [--notarize]" >&2; exit 2 ;;
   esac
 done
 case "$ARCH" in arm64) GO_ARCH=arm64 ;; x86_64) GO_ARCH=amd64 ;; *) echo "Unsupported architecture: $ARCH" >&2; exit 2 ;; esac
 case "$VERSION" in *[!A-Za-z0-9.+-]*|"") echo "Invalid release version" >&2; exit 2 ;; esac
+if [ -n "$VALIDATION_ROOT" ]; then
+  test "$VALIDATION_ARTIFACT" = true || { echo "--validation-root is only valid with --validation-artifact." >&2; exit 2; }
+  python3 - "$ROOT" "$VALIDATION_ROOT" <<'PY'
+import os, pathlib, sys
+base = pathlib.Path(sys.argv[1]) / "build/fskit-validation/generations"
+path = pathlib.Path(sys.argv[2])
+if not path.is_absolute() or os.path.abspath(sys.argv[2]) != sys.argv[2] or base not in path.parents:
+    raise SystemExit("--validation-root must be a normalized absolute generation path under build/fskit-validation/generations.")
+if any(parent.is_symlink() or (parent.exists() and not parent.is_dir()) for parent in (path, *path.parents)):
+    raise SystemExit("--validation-root cannot pass through symlinks or non-directory paths.")
+PY
+fi
 test "$(uname -s)" = Darwin || { echo "Run macOS packaging on macOS." >&2; exit 1; }
 if [ "$VALIDATION_ARTIFACT" = true ] && { [ "$BACKEND" != fskit ] || [ -n "$SIGN_IDENTITY" ] || [ "$NOTARIZE" = true ]; }; then
   echo "--validation-artifact only exports unsigned FSKit products for local validation; it cannot sign, notarize or publish." >&2
@@ -61,8 +75,9 @@ OUTPUT="$ROOT/dist/releases/$VERSION"
 STAGE="$ROOT/build/package/$BACKEND/$ARCH"
 DERIVED="$ROOT/build/native/$BACKEND/$ARCH"
 if [ "$VALIDATION_ARTIFACT" = true ]; then
-  OUTPUT="$ROOT/build/fskit-validation/products/$ARCH"
-  STAGE="$ROOT/build/fskit-validation/stage/$ARCH"
+  VALIDATION_ROOT="${VALIDATION_ROOT:-$ROOT/build/fskit-validation}"
+  OUTPUT="$VALIDATION_ROOT/products/$ARCH"
+  STAGE="$VALIDATION_ROOT/stage/$ARCH"
   BASENAME="RepoReach-local-validation-$ARCH"
   if [ -e "$OUTPUT/$BASENAME.zip" ]; then
     echo "Local validation archive already exists; refusing to overwrite it: $OUTPUT/$BASENAME.zip" >&2
@@ -131,6 +146,7 @@ if [ "$VALIDATION_ARTIFACT" = true ]; then
   python3 "$ROOT/scripts/validation-artifact.py" --app "$APP" --arch "$ARCH" \
     --source-file "$STAGE/source.json" --output "$OUTPUT"
   echo "Exported unsigned local-validation product: $OUTPUT (requires local authorized signing before extension activation)"
+  echo "The app group remains unresolved until signing binds the app, engine and module to the actual developer team."
   exit 0
 fi
 MARKETING_VERSION="${VERSION%%-*}"
@@ -147,21 +163,32 @@ done
 SIGNATURE=ad-hoc
 if [ -n "$SIGN_IDENTITY" ]; then
   SIGNATURE=developer-id
-  for HELPER in artifact-fs gh; do
-    codesign --force --timestamp --options runtime --sign "$SIGN_IDENTITY" "$APP/Contents/Helpers/$HELPER"
-  done
+  # Inspect an actual signed component to resolve the team; identity display
+  # names and App ID prefixes are not authoritative TeamIdentifier values.
+  codesign --force --timestamp --options runtime --sign "$SIGN_IDENTITY" "$APP/Contents/Helpers/gh"
   if [ "$BACKEND" = fskit ]; then
     FSMODULE="$APP/Contents/Extensions/RepoReachFSKit.appex"
-    FSKIT_ENTITLEMENTS="$STAGE/fskit-signing.entitlements"
+    FSKIT_CLAIMS="$STAGE/fskit-signing"
     python3 "$ROOT/scripts/validate-fskit-bundle.py" prepare \
       --profile "$REPOREACH_FSKIT_PROFILE" --bundle-id com.enoughtools.reporeach.fskit \
-      --entitlements "$ROOT/native/FSKitExtension/FSKit.entitlements" --output "$FSKIT_ENTITLEMENTS"
+      --entitlements "$ROOT/native/FSKitExtension/FSKit.entitlements" \
+      --app "$APP" --signing-component "$APP/Contents/Helpers/gh" \
+      --app-entitlements "$ROOT/native/App/App.entitlements" \
+      --helper-entitlements "$ROOT/native/Helpers/artifact-fs.entitlements" \
+      --output-directory "$FSKIT_CLAIMS"
+    codesign --force --timestamp --options runtime --entitlements "$FSKIT_CLAIMS/helper.entitlements" --sign "$SIGN_IDENTITY" "$APP/Contents/Helpers/artifact-fs"
     cp "$REPOREACH_FSKIT_PROFILE" "$FSMODULE/Contents/embedded.provisionprofile"
-    codesign --force --timestamp --options runtime --entitlements "$FSKIT_ENTITLEMENTS" --sign "$SIGN_IDENTITY" "$FSMODULE"
+    codesign --force --timestamp --options runtime --entitlements "$FSKIT_CLAIMS/module.entitlements" --sign "$SIGN_IDENTITY" "$FSMODULE"
+  else
+    codesign --force --timestamp --options runtime --sign "$SIGN_IDENTITY" "$APP/Contents/Helpers/artifact-fs"
   fi
   codesign --force --timestamp --options runtime --entitlements "$ROOT/native/FinderExtension/Finder.entitlements" --sign "$SIGN_IDENTITY" \
     "$APP/Contents/PlugIns/RepoReachFinder.appex"
-  codesign --force --timestamp --options runtime --sign "$SIGN_IDENTITY" "$APP"
+  if [ "$BACKEND" = fskit ]; then
+    codesign --force --timestamp --options runtime --entitlements "$FSKIT_CLAIMS/app.entitlements" --sign "$SIGN_IDENTITY" "$APP"
+  else
+    codesign --force --timestamp --options runtime --sign "$SIGN_IDENTITY" "$APP"
+  fi
 else
   # Apple Silicon requires an executable signature even for unsigned betas.
   for HELPER in artifact-fs gh; do codesign --force --sign - "$APP/Contents/Helpers/$HELPER"; done

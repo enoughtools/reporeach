@@ -39,6 +39,7 @@ func desktopCommand(ctx context.Context, stdout, stderr io.Writer) ucli.Command 
 					ucli.StringFlag{Name: "mount-root", Value: filepath.Join(home, "Repos")},
 					ucli.StringFlag{Name: "socket", Value: socket},
 					ucli.StringFlag{Name: "gh", Usage: "path to the bundled official GitHub CLI"},
+					ucli.StringFlag{Name: "fskit-socket-dir", Usage: "private shared File System Extension socket folder"},
 				},
 				Action: func(c *ucli.Context) error {
 					ghPath := c.String("gh")
@@ -70,7 +71,7 @@ func desktopCommand(ctx context.Context, stdout, stderr io.Writer) ucli.Command 
 							return err
 						}
 					}
-					return desktop.Serve(ctx, desktop.Options{StateDir: c.String("state-dir"), MountRoot: c.String("mount-root"), Socket: c.String("socket"), GHPath: ghPath, Logger: logging.NewJSONLogger(stderr, slog.LevelInfo)})
+					return desktop.Serve(ctx, desktop.Options{StateDir: c.String("state-dir"), MountRoot: c.String("mount-root"), Socket: c.String("socket"), GHPath: ghPath, FSKitSocketDir: c.String("fskit-socket-dir"), Logger: logging.NewJSONLogger(stderr, slog.LevelInfo)})
 				},
 			},
 			{

@@ -203,6 +203,15 @@ def components(app, arch, entitlements):
     return [*paths, module, finder, app]
 
 
+def participant_entitlements(revision, team):
+    claims = {}
+    for name, source in (("app", "native/App/App.entitlements"), ("helper", "native/Helpers/artifact-fs.entitlements")):
+        template = plistlib.loads(run("git", "-C", str(ROOT), "show", revision + ":" + source))
+        require(template == {packaging.APP_GROUPS: [packaging.GROUP_TEMPLATE]}, "Committed app and engine templates must claim only the Team-prefix app group")
+        claims[name] = packaging.resolve_entitlements(template, team)
+    return claims
+
+
 def verify_signature(path, fingerprint, team, private):
     run("codesign", "--verify", "--strict", str(path))
     result = subprocess.run(["codesign", "-d", "--verbose=4", str(path)], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -243,22 +252,33 @@ def sign(args):
         require(digest(archive) == args.archive_sha256, "Validation archive changed before signing")
         profile = private / "module.provisionprofile"
         profile.write_bytes(args.profile.read_bytes())
-        entitlements = plistlib.loads(run("git", "-C", str(ROOT), "show", args.source_revision + ":native/FSKitExtension/FSKit.entitlements"))
+        template = plistlib.loads(run("git", "-C", str(ROOT), "show", args.source_revision + ":native/FSKitExtension/FSKit.entitlements"))
+        require(template.get(packaging.APP_GROUPS) == [packaging.GROUP_TEMPLATE], "Committed FSKit source must configure its Team-prefix IPC group")
+        entitlements = packaging.resolve_entitlements(template, args.team)
         claims = packaging.authorize_profile(packaging.decode_profile(profile), packaging.MODULE_ID, entitlements, certificate=certificate, team=args.team)
         claims_path = private / "module.entitlements"
         claims_path.write_bytes(plistlib.dumps(claims))
         finder_claims = private / "finder.entitlements"
         finder_claims.write_bytes(run("git", "-C", str(ROOT), "show", args.source_revision + ":native/FinderExtension/Finder.entitlements"))
         require(isinstance(plistlib.loads(finder_claims.read_bytes()), dict), "Invalid committed Finder entitlements")
+        participant_claims = {}
+        for name, value in participant_entitlements(args.source_revision, args.team).items():
+            participant_claims[name] = private / (name + ".entitlements")
+            participant_claims[name].write_bytes(plistlib.dumps(value))
         app = extract_app(archive, private)
         paths = components(app, args.arch, entitlements)
+        app_group = packaging.configure_app_group(app, args.team)
         shutil.copyfile(profile, paths[2] / "Contents/embedded.provisionprofile")
         for index, path in enumerate(paths):
             arguments = ["codesign", "--force", "--timestamp", "--options", "runtime"]
-            if index == 2:
+            if index == 0:
+                arguments += ["--entitlements", str(participant_claims["helper"])]
+            elif index == 2:
                 arguments += ["--entitlements", str(claims_path)]
             elif index == 3:
                 arguments += ["--entitlements", str(finder_claims)]
+            elif index == 4:
+                arguments += ["--entitlements", str(participant_claims["app"])]
             run(*arguments, "--sign", args.identity, str(path))
         for path in paths:
             verify_signature(path, args.identity, args.team, private)
@@ -275,6 +295,7 @@ def sign(args):
             "workflow": workflow, "architecture": args.arch, "filesystemBackend": "fskit",
             "inputArtifact": document["artifact"], "signature": "developer-id",
             "signingIdentitySha1": args.identity, "teamIdentifier": args.team,
+            "appGroupIdentifier": app_group,
             "embeddedProfileSha256": digest(profile), "notarized": False,
             "extensionActivationAuthorized": False, "mountedValidationPassed": False,
             "signedAt": datetime.datetime.now(datetime.timezone.utc).isoformat(),

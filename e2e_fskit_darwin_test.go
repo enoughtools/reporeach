@@ -5,7 +5,9 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha1"
 	"crypto/sha256"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -22,6 +24,7 @@ import (
 	"syscall"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/cloudflare/artifact-fs/internal/auth"
 	"github.com/cloudflare/artifact-fs/internal/desktop"
@@ -43,7 +46,7 @@ func TestFSKitMountedAcceptance(t *testing.T) {
 	if err != nil || major < 25 {
 		t.Skipf("real FSKit acceptance requires macOS 26+ (Darwin 25+); host Darwin %s provides no mounted proof", release)
 	}
-	fsKitAcceptanceModule(t)
+	prerequisites := fsKitAcceptanceModule(t)
 
 	root, err := os.MkdirTemp("/tmp", "rr-fskit-")
 	if err != nil {
@@ -53,7 +56,7 @@ func TestFSKitMountedAcceptance(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	h := &fsKitAcceptanceHarness{root: root, state: filepath.Join(root, "state"), mount: filepath.Join(root, "mount")}
+	h := &fsKitAcceptanceHarness{root: root, state: filepath.Join(root, "state"), mount: filepath.Join(root, "mount"), prerequisites: prerequisites}
 	t.Cleanup(func() { h.cleanup(t) })
 	t.Setenv("GIT_CONFIG_GLOBAL", filepath.Join(root, "global-config"))
 	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
@@ -317,7 +320,11 @@ func TestSelectedFSKitModuleIdentifier(t *testing.T) {
 	}
 }
 
-func fsKitAcceptanceModule(t *testing.T) {
+type fsKitAcceptancePrerequisites struct {
+	identity, team, group, socketDir string
+}
+
+func fsKitAcceptanceModule(t *testing.T) fsKitAcceptancePrerequisites {
 	t.Helper()
 	moduleID, err := selectedFSKitModuleIdentifier(os.Getenv("AFS_FSKIT_MODULE_ID"))
 	if err != nil {
@@ -327,10 +334,14 @@ func fsKitAcceptanceModule(t *testing.T) {
 	if os.Getenv("AFS_FSKIT_MODULE_CONFIRMED") != "1" || !filepath.IsAbs(app) {
 		t.Fatal("prerequisite: AFS_FSKIT_APP must name the installed matching RepoReach.app and AFS_FSKIT_MODULE_CONFIRMED=1 must confirm its matching native module is already enabled; see docs/reporeach/fskit-acceptance.md")
 	}
+	app, err = filepath.EvalSymlinks(app)
+	if err != nil {
+		t.Fatalf("canonical installed native app path: %v", err)
+	}
 	module := filepath.Join(app, "Contents", "Extensions", "RepoReachFSKit.appex")
 	plist := filepath.Join(module, "Contents", "Info.plist")
 	read := func(key string) string {
-		return strings.TrimSpace(run(t, "", "/usr/libexec/PlistBuddy", "-c", "Print :"+key, plist))
+		return fsKitReadPlistValue(t, plist, key)
 	}
 	for key, wanted := range map[string]string{
 		"CFBundleIdentifier": moduleID,
@@ -350,7 +361,442 @@ func fsKitAcceptanceModule(t *testing.T) {
 		t.Fatalf("installed native module executable: %v, %v", info, err)
 	}
 	fsKitInspectInstalledModule(t, moduleID, module)
+	prerequisites := fsKitAcceptanceAppGroup(t, app, module, moduleID)
 	t.Logf("Darwin native acceptance uses already installed module %s with identifier %s version %s (%s); matching source and enablement explicitly confirmed by operator", module, moduleID, read("CFBundleShortVersionString"), read("CFBundleVersion"))
+	return prerequisites
+}
+
+func fsKitReadPlistValue(t *testing.T, plist, key string) string {
+	t.Helper()
+	output := fsKitAcceptanceCommand(t, nil, "/usr/libexec/PlistBuddy", "-c", "Print :"+key, plist)
+	return strings.TrimSpace(string(output))
+}
+
+func validateFSKitSigningIdentity(identity string) error {
+	if len(identity) != 40 || strings.IndexFunc(identity, func(r rune) bool {
+		return !(r >= '0' && r <= '9' || r >= 'A' && r <= 'F')
+	}) >= 0 {
+		return errors.New("prerequisite: AFS_FSKIT_SIGNING_IDENTITY must provide the full uppercase SHA-1 fingerprint of the module's existing local signing identity")
+	}
+	return nil
+}
+
+func fsKitCanonicalAppGroup(team string) (string, error) {
+	if len(team) != 10 || strings.IndexFunc(team, func(r rune) bool {
+		return !(r >= '0' && r <= '9' || r >= 'A' && r <= 'Z')
+	}) >= 0 {
+		return "", errors.New("signed component has no canonical ten-character developer team")
+	}
+	return team + ".rr", nil
+}
+
+func validateFSKitGroupClaims(claims map[string]any, group string, onlyGroup bool) error {
+	groups, ok := claims["com.apple.security.application-groups"].([]any)
+	if !ok || len(groups) != 1 || groups[0] != group {
+		return errors.New("signed component must claim exactly the shared TeamID.rr app group")
+	}
+	for _, key := range []string{"get-task-allow", "com.apple.security.get-task-allow"} {
+		if _, present := claims[key]; present {
+			return errors.New("debugger access is forbidden in native acceptance components")
+		}
+	}
+	if onlyGroup && len(claims) != 1 {
+		return errors.New("native acceptance helper must have only its shared app-group entitlement")
+	}
+	return nil
+}
+
+func validateFSKitModuleClaims(claims map[string]any, team, moduleID string) error {
+	// Inspect signed claims only; provisioning CMS authorization is a separate
+	// prerequisite. An older App ID prefix may differ from the signing team.
+	if claims["com.apple.developer.fskit.fsmodule"] != true || claims["com.apple.security.app-sandbox"] != true || claims["com.apple.developer.team-identifier"] != team {
+		return errors.New("native module must claim its FSKit capability, sandbox and exact signing team")
+	}
+	identifierCount := 0
+	for _, key := range []string{"com.apple.application-identifier", "application-identifier"} {
+		if value, present := claims[key]; present {
+			identifier, ok := value.(string)
+			prefix, suffixOK := strings.CutSuffix(identifier, "."+moduleID)
+			if _, err := fsKitCanonicalAppGroup(prefix); !ok || !suffixOK || err != nil {
+				return errors.New("native module must have one signed explicit application identifier for its exact bundle")
+			}
+			identifierCount++
+		}
+	}
+	if identifierCount != 1 || len(claims) != 5 {
+		return errors.New("native module must have only its group, FSKit capability, sandbox and signed identifier/team claims")
+	}
+	return nil
+}
+
+type fsKitSignedComponent struct {
+	identity, team string
+	claims         map[string]any
+}
+
+func fsKitInspectSignedComponent(t *testing.T, path string) fsKitSignedComponent {
+	t.Helper()
+	fsKitAcceptanceCommand(t, nil, "/usr/bin/codesign", "--verify", "--strict", path)
+	// Display details go to stderr; keep them separate from typed entitlement XML.
+	_, details, err := fsKitBoundedCommand(context.Background(), nil, "/usr/bin/codesign", "-d", "--verbose=4", path)
+	if err != nil {
+		t.Fatalf("inspect native component signature: %v\n%s", err, auth.RedactString(string(details)))
+	}
+	var team string
+	authority, hardened := false, false
+	for _, line := range strings.Split(string(details), "\n") {
+		if value, ok := strings.CutPrefix(line, "TeamIdentifier="); ok {
+			if team != "" {
+				t.Fatal("native component signature repeats its developer team")
+			}
+			team = value
+		}
+		authority = authority || strings.HasPrefix(line, "Authority=Apple Development:") || strings.HasPrefix(line, "Authority=Developer ID Application:")
+		hardened = hardened || strings.HasPrefix(line, "CodeDirectory ") && strings.Contains(line, "(runtime)")
+	}
+	if _, err := fsKitCanonicalAppGroup(team); err != nil || !authority || !hardened {
+		t.Fatal("native component requires Apple Development or Developer ID Application signing, its developer team, and hardened runtime")
+	}
+	private := t.TempDir()
+	prefix := filepath.Join(private, "certificate")
+	fsKitAcceptanceCommand(t, nil, "/usr/bin/codesign", "-d", "--extract-certificates="+prefix, path)
+	file, err := os.Open(prefix + "0")
+	if err != nil {
+		t.Fatalf("read public native signing certificate: %v", err)
+	}
+	encoded, readErr := io.ReadAll(io.LimitReader(file, 64*1024+1))
+	closeErr := file.Close()
+	if readErr != nil || closeErr != nil || len(encoded) > 64*1024 {
+		t.Fatal("public native signing certificate is unreadable or exceeds its bound")
+	}
+	certificate, err := x509.ParseCertificate(encoded)
+	now := time.Now()
+	if err != nil || len(certificate.Subject.OrganizationalUnit) != 1 || certificate.Subject.OrganizationalUnit[0] != team || now.Before(certificate.NotBefore) || !now.Before(certificate.NotAfter) {
+		t.Fatal("native signing certificate does not establish the current developer team and validity")
+	}
+	xml := fsKitAcceptanceCommand(t, nil, "/usr/bin/codesign", "-d", "--entitlements", "-", "--xml", path)
+	encodedClaims := fsKitAcceptanceCommand(t, xml, "/usr/bin/plutil", "-convert", "json", "-o", "-", "-")
+	var claims map[string]any
+	if err := json.Unmarshal(encodedClaims, &claims); err != nil || claims == nil {
+		t.Fatal("native signature entitlements are not a typed dictionary")
+	}
+	return fsKitSignedComponent{identity: fmt.Sprintf("%X", sha1.Sum(encoded)), team: team, claims: claims}
+}
+
+func fsKitAcceptanceAppGroup(t *testing.T, app, module, moduleID string) fsKitAcceptancePrerequisites {
+	t.Helper()
+	identity := os.Getenv("AFS_FSKIT_SIGNING_IDENTITY")
+	if err := validateFSKitSigningIdentity(identity); err != nil {
+		t.Fatal(err)
+	}
+	moduleSignature := fsKitInspectSignedComponent(t, module)
+	group, err := fsKitCanonicalAppGroup(moduleSignature.team)
+	if err != nil || identity != moduleSignature.identity {
+		t.Fatal("AFS_FSKIT_SIGNING_IDENTITY must match the enabled module's exact existing certificate")
+	}
+	parentInfo := filepath.Join(app, "Contents", "Info.plist")
+	if fsKitReadPlistValue(t, parentInfo, "CFBundleIdentifier") != strings.TrimSuffix(moduleID, ".fskit") {
+		t.Fatal("native module and containing app identifiers do not match")
+	}
+	for _, info := range []string{parentInfo, filepath.Join(module, "Contents", "Info.plist")} {
+		if fsKitReadPlistValue(t, info, "RepoReachAppGroupIdentifier") != group {
+			t.Fatal("native app and filesystem module must declare their exact signed TeamID.rr app group")
+		}
+	}
+	for _, path := range []string{module, app, filepath.Join(app, "Contents", "Helpers", "artifact-fs")} {
+		signature := moduleSignature
+		if path != module {
+			signature = fsKitInspectSignedComponent(t, path)
+		}
+		if signature.identity != identity || signature.team != moduleSignature.team {
+			t.Fatal("native parent, filesystem and engine must share the enabled module's exact certificate and developer team")
+		}
+		if err := validateFSKitGroupClaims(signature.claims, group, path != module); err != nil {
+			t.Fatalf("native app-group prerequisite: %v", err)
+		}
+		if path == module {
+			if err := validateFSKitModuleClaims(signature.claims, moduleSignature.team, moduleID); err != nil {
+				t.Fatalf("native module signing prerequisite: %v", err)
+			}
+		}
+	}
+	executable := fsKitReadPlistValue(t, parentInfo, "CFBundleExecutable")
+	if executable == "" || filepath.Base(executable) != executable || executable == "." || executable == ".." || strings.ContainsAny(executable, "\\\x00") {
+		t.Fatal("native parent has an unsafe executable name")
+	}
+	path := filepath.Join(app, "Contents", "MacOS", executable)
+	info, err := os.Lstat(path)
+	canonical, canonicalErr := filepath.EvalSymlinks(path)
+	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 || canonicalErr != nil || canonical != path {
+		t.Fatal("native parent resolver must be its exact regular signed executable")
+	}
+	output := fsKitAcceptanceCommand(t, nil, path, "--resolve-fsbridge-container")
+	directory, err := parseFSKitContainerResolution(output, group)
+	if err != nil {
+		t.Fatalf("native app-group container resolution: %v", err)
+	}
+	if err := validateFSKitContainerDirectory(directory); err != nil {
+		t.Fatalf("native app-group container access: %v", err)
+	}
+	t.Logf("native acceptance app-group prerequisites verified for team %s and exact existing signing certificate; resolved container %s", moduleSignature.team, directory)
+	return fsKitAcceptancePrerequisites{identity: identity, team: moduleSignature.team, group: group, socketDir: directory}
+}
+
+func parseFSKitContainerResolution(output []byte, group string) (string, error) {
+	if len(output) == 0 || len(output) > 4096 || !utf8.Valid(output) {
+		return "", errors.New("resolver JSON is absent or exceeds its bound")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(output))
+	token, err := decoder.Token()
+	if err != nil || token != json.Delim('{') {
+		return "", errors.New("resolver must return a JSON object")
+	}
+	values := make(map[string]string, 2)
+	for decoder.More() {
+		token, err := decoder.Token()
+		key, ok := token.(string)
+		if err != nil || !ok || key != "groupIdentifier" && key != "directory" {
+			return "", errors.New("resolver returned an unknown field")
+		}
+		if _, duplicate := values[key]; duplicate {
+			return "", errors.New("resolver returned a duplicate field")
+		}
+		var value string
+		if err := decoder.Decode(&value); err != nil {
+			return "", errors.New("resolver fields must be strings")
+		}
+		values[key] = value
+	}
+	if token, err := decoder.Token(); err != nil || token != json.Delim('}') {
+		return "", errors.New("resolver object is incomplete")
+	}
+	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
+		return "", errors.New("resolver returned trailing output")
+	}
+	directory := values["directory"]
+	if len(values) != 2 || values["groupIdentifier"] != group || !filepath.IsAbs(directory) || directory == "/" || filepath.Clean(directory) != directory || strings.ContainsRune(directory, '\x00') {
+		return "", errors.New("resolver did not establish the exact signed group and canonical absolute directory")
+	}
+	return directory, nil
+}
+
+func validateFSKitContainerDirectory(directory string) error {
+	info, err := os.Lstat(directory)
+	if err != nil {
+		return err
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	canonical, canonicalErr := filepath.EvalSymlinks(directory)
+	if !info.IsDir() || info.Mode().Perm() != 0o700 || !ok || stat.Uid != uint32(os.Getuid()) || canonicalErr != nil || canonical != directory {
+		return errors.New("resolved container must be a canonical private directory owned by the current user")
+	}
+	return nil
+}
+
+func fsKitAcceptanceCommand(t *testing.T, stdin []byte, program string, args ...string) []byte {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	stdout, stderr, err := fsKitBoundedCommand(ctx, stdin, program, args...)
+	if err != nil {
+		t.Fatalf("native acceptance prerequisite command %s: %v\n%s", filepath.Base(program), err, auth.RedactString(string(stderr)))
+	}
+	return stdout
+}
+
+func fsKitBoundedCommand(ctx context.Context, stdin []byte, program string, args ...string) ([]byte, []byte, error) {
+	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	command := exec.CommandContext(ctx, program, args...)
+	command.Stdin = bytes.NewReader(stdin)
+	command.WaitDelay = 2 * time.Second
+	stdout, stderr := &fsKitInspectorOutput{}, &fsKitInspectorOutput{}
+	command.Stdout, command.Stderr = stdout, stderr
+	err := command.Run()
+	if stdout.truncated || stderr.truncated {
+		return nil, nil, errors.New("native acceptance prerequisite command output exceeded its bound")
+	}
+	return stdout.data, stderr.data, err
+}
+
+func TestFSKitAcceptanceSigningIdentity(t *testing.T) {
+	const fingerprint = "0123456789ABCDEF0123456789ABCDEF01234567"
+	for _, test := range []struct {
+		name, identity string
+		valid          bool
+	}{
+		{name: "explicit full fingerprint", identity: fingerprint, valid: true},
+		{name: "absent identity"},
+		{name: "signing name", identity: "Apple Development: Fixture"},
+		{name: "lowercase fingerprint", identity: strings.ToLower(fingerprint)},
+		{name: "short fingerprint", identity: fingerprint[:39]},
+		{name: "leading whitespace", identity: " " + fingerprint},
+		{name: "invalid character", identity: "G" + fingerprint[1:]},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if err := validateFSKitSigningIdentity(test.identity); (err == nil) != test.valid {
+				t.Fatalf("identity accepted=%v want %v: %v", err == nil, test.valid, err)
+			}
+		})
+	}
+}
+
+func TestFSKitAcceptanceGroupClaims(t *testing.T) {
+	const group = "FIXTURE123.rr"
+	for _, team := range []string{"", "FIXTURE12", "fixture123", "FIXTURE12_", "FIXTURE123\n", "FIXTURE12é"} {
+		if actual, err := fsKitCanonicalAppGroup(team); err == nil || actual != "" {
+			t.Fatalf("invalid team %q established a group %q: %v", team, actual, err)
+		}
+	}
+	if actual, err := fsKitCanonicalAppGroup("FIXTURE123"); err != nil || actual != group {
+		t.Fatalf("canonical group=%q error=%v", actual, err)
+	}
+	for _, test := range []struct {
+		name      string
+		claims    map[string]any
+		onlyGroup bool
+		valid     bool
+	}{
+		{name: "minimum helper", claims: map[string]any{"com.apple.security.application-groups": []any{group}}, onlyGroup: true, valid: true},
+		{name: "profile-bound filesystem", claims: map[string]any{"com.apple.security.application-groups": []any{group}, "com.apple.developer.fskit.fsmodule": true, "com.apple.security.app-sandbox": true}, valid: true},
+		{name: "absent group", claims: map[string]any{}},
+		{name: "empty groups", claims: map[string]any{"com.apple.security.application-groups": []any{}}},
+		{name: "different group", claims: map[string]any{"com.apple.security.application-groups": []any{"OTHERTEAM1.rr"}}},
+		{name: "extra group", claims: map[string]any{"com.apple.security.application-groups": []any{group, "OTHERTEAM1.rr"}}},
+		{name: "non-string group", claims: map[string]any{"com.apple.security.application-groups": []any{1}}},
+		{name: "group not array", claims: map[string]any{"com.apple.security.application-groups": group}},
+		{name: "modern group", claims: map[string]any{"com.apple.security.application-groups": []any{"group.com.enoughtools.reporeach"}}},
+		{name: "extra helper entitlement", claims: map[string]any{"com.apple.security.application-groups": []any{group}, "com.apple.security.network.client": true}, onlyGroup: true},
+		{name: "debug access", claims: map[string]any{"com.apple.security.application-groups": []any{group}, "com.apple.security.get-task-allow": true}},
+		{name: "false debugger claim", claims: map[string]any{"com.apple.security.application-groups": []any{group}, "get-task-allow": false}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if err := validateFSKitGroupClaims(test.claims, group, test.onlyGroup); (err == nil) != test.valid {
+				t.Fatalf("group claims accepted=%v want %v: %v", err == nil, test.valid, err)
+			}
+		})
+	}
+}
+
+func TestFSKitContainerResolution(t *testing.T) {
+	const group = "FIXTURE123.rr"
+	for _, test := range []struct {
+		name, output string
+		valid        bool
+	}{
+		{name: "exact resolver result", output: `{"groupIdentifier":"FIXTURE123.rr","directory":"/fixture/container"}`, valid: true},
+		{name: "whitespace and key order", output: " {\"directory\":\"/fixture/container\",\"groupIdentifier\":\"FIXTURE123.rr\"}\n", valid: true},
+		{name: "missing output"},
+		{name: "different group", output: `{"groupIdentifier":"OTHERTEAM1.rr","directory":"/fixture/container"}`},
+		{name: "unknown field", output: `{"groupIdentifier":"FIXTURE123.rr","directory":"/fixture/container","extra":true}`},
+		{name: "duplicate field", output: `{"groupIdentifier":"FIXTURE123.rr","directory":"/fixture/container","directory":"/fixture/other"}`},
+		{name: "missing directory", output: `{"groupIdentifier":"FIXTURE123.rr"}`},
+		{name: "missing group", output: `{"directory":"/fixture/container"}`},
+		{name: "relative directory", output: `{"groupIdentifier":"FIXTURE123.rr","directory":"fixture/container"}`},
+		{name: "traversal", output: `{"groupIdentifier":"FIXTURE123.rr","directory":"/fixture/../container"}`},
+		{name: "trailing separator", output: `{"groupIdentifier":"FIXTURE123.rr","directory":"/fixture/container/"}`},
+		{name: "root directory", output: `{"groupIdentifier":"FIXTURE123.rr","directory":"/"}`},
+		{name: "NUL directory", output: `{"groupIdentifier":"FIXTURE123.rr","directory":"/fixture/container\u0000"}`},
+		{name: "non-string directory", output: `{"groupIdentifier":"FIXTURE123.rr","directory":false}`},
+		{name: "JSON array", output: `[{"groupIdentifier":"FIXTURE123.rr","directory":"/fixture/container"}]`},
+		{name: "trailing object", output: `{"groupIdentifier":"FIXTURE123.rr","directory":"/fixture/container"}{}`},
+		{name: "trailing diagnostics", output: `{"groupIdentifier":"FIXTURE123.rr","directory":"/fixture/container"}diagnostic`},
+		{name: "truncated object", output: `{"groupIdentifier":"FIXTURE123.rr","directory":"/fixture/container"`},
+		{name: "excessive output", output: strings.Repeat(" ", 4097)},
+		{name: "invalid UTF8", output: "{\"groupIdentifier\":\"FIXTURE123.rr\",\"directory\":\"/fixture/\xff\"}"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			directory, err := parseFSKitContainerResolution([]byte(test.output), group)
+			if (err == nil) != test.valid || test.valid && directory != "/fixture/container" || !test.valid && directory != "" {
+				t.Fatalf("resolver result directory=%q error=%v valid=%v", directory, err, test.valid)
+			}
+		})
+	}
+}
+
+func TestFSKitAcceptanceModuleClaims(t *testing.T) {
+	const team, moduleID = "FIXTURE123", "com.enoughtools.reporeach.validation.fskit"
+	base := map[string]any{
+		"com.apple.security.application-groups": []any{team + ".rr"},
+		"com.apple.developer.fskit.fsmodule":    true,
+		"com.apple.security.app-sandbox":        true,
+		"com.apple.developer.team-identifier":   team,
+		"com.apple.application-identifier":      team + "." + moduleID,
+	}
+	for _, test := range []struct {
+		name   string
+		change func(map[string]any)
+		valid  bool
+	}{
+		{name: "exact module claims", change: func(map[string]any) {}, valid: true},
+		{name: "alternate profile identifier key", change: func(c map[string]any) {
+			c["application-identifier"] = c["com.apple.application-identifier"]
+			delete(c, "com.apple.application-identifier")
+		}, valid: true},
+		{name: "older App ID prefix differs from signing team", change: func(c map[string]any) {
+			c["com.apple.application-identifier"] = "OLDERID123." + moduleID
+		}, valid: true},
+		{name: "missing capability", change: func(c map[string]any) { delete(c, "com.apple.developer.fskit.fsmodule") }},
+		{name: "sandbox false", change: func(c map[string]any) { c["com.apple.security.app-sandbox"] = false }},
+		{name: "untyped capability", change: func(c map[string]any) { c["com.apple.developer.fskit.fsmodule"] = "true" }},
+		{name: "other team", change: func(c map[string]any) { c["com.apple.developer.team-identifier"] = "OTHERTEAM1" }},
+		{name: "other app", change: func(c map[string]any) { c["com.apple.application-identifier"] = team + ".com.example.fskit" }},
+		{name: "wildcard app", change: func(c map[string]any) { c["com.apple.application-identifier"] = team + ".*" }},
+		{name: "noncanonical App ID prefix", change: func(c map[string]any) { c["com.apple.application-identifier"] = "legacy." + moduleID }},
+		{name: "non-string App ID", change: func(c map[string]any) { c["com.apple.application-identifier"] = true }},
+		{name: "duplicate identifier claims", change: func(c map[string]any) { c["application-identifier"] = c["com.apple.application-identifier"] }},
+		{name: "missing identifier", change: func(c map[string]any) { delete(c, "com.apple.application-identifier") }},
+		{name: "network client", change: func(c map[string]any) { c["com.apple.security.network.client"] = true }},
+		{name: "network server", change: func(c map[string]any) { c["com.apple.security.network.server"] = true }},
+		{name: "debugger", change: func(c map[string]any) { c["get-task-allow"] = true }},
+		{name: "unknown entitlement", change: func(c map[string]any) { c["com.apple.security.files.user-selected.read-write"] = true }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			claims := make(map[string]any, len(base))
+			for key, value := range base {
+				claims[key] = value
+			}
+			test.change(claims)
+			if err := validateFSKitModuleClaims(claims, team, moduleID); (err == nil) != test.valid {
+				t.Fatalf("module claims accepted=%v want %v: %v", err == nil, test.valid, err)
+			}
+		})
+	}
+}
+
+func TestFSKitContainerDirectory(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	container := filepath.Join(root, "container")
+	if err := os.Mkdir(container, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateFSKitContainerDirectory(container); err != nil {
+		t.Fatalf("owned private real container: %v", err)
+	}
+	alias := filepath.Join(root, "alias")
+	if err := os.Symlink(container, alias); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateFSKitContainerDirectory(alias); err == nil {
+		t.Fatal("symlink accepted as an actual app-group container")
+	}
+	if err := os.Chmod(container, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateFSKitContainerDirectory(container); err == nil {
+		t.Fatal("group-accessible container accepted")
+	}
+	if err := validateFSKitContainerDirectory(filepath.Join(root, "missing")); err == nil {
+		t.Fatal("absent container accepted")
+	}
+	regular := filepath.Join(root, "regular")
+	fsKitWrite(t, regular, nil, 0o700)
+	if err := validateFSKitContainerDirectory(regular); err == nil {
+		t.Fatal("regular file accepted as a container")
+	}
 }
 
 type fsKitInspectionCandidate struct {
@@ -498,6 +944,7 @@ func TestFSKitInstalledInspectionEvidence(t *testing.T) {
 
 type fsKitAcceptanceHarness struct {
 	root, state, mount, gh, image string
+	prerequisites                 fsKitAcceptancePrerequisites
 	server                        *desktopAdoptionServer
 	preserve                      bool
 }
@@ -523,6 +970,17 @@ func (h *fsKitAcceptanceHarness) copyServerImage(t *testing.T) {
 	if copyErr != nil || closeErr != nil {
 		t.Fatalf("copy private daemon image: %v, %v", copyErr, closeErr)
 	}
+	claimsPath := filepath.Join(h.root, "test-engine.entitlements")
+	claims := []byte("<?xml version=\"1.0\" encoding=\"UTF-8\"?><plist version=\"1.0\"><dict><key>com.apple.security.application-groups</key><array><string>" + h.prerequisites.group + "</string></array></dict></plist>")
+	fsKitWrite(t, claimsPath, claims, 0o600)
+	fsKitAcceptanceCommand(t, nil, "/usr/bin/codesign", "--force", "--sign", h.prerequisites.identity, "--options", "runtime", "--timestamp=none", "--identifier", "com.enoughtools.reporeach.acceptance-engine", "--entitlements", claimsPath, h.image)
+	signature := fsKitInspectSignedComponent(t, h.image)
+	if signature.identity != h.prerequisites.identity || signature.team != h.prerequisites.team {
+		t.Fatal("copied acceptance daemon does not use the module's exact existing certificate and developer team")
+	}
+	if err := validateFSKitGroupClaims(signature.claims, h.prerequisites.group, true); err != nil {
+		t.Fatalf("copied acceptance daemon signing claims: %v", err)
+	}
 }
 
 func (h *fsKitAcceptanceHarness) start(t *testing.T) {
@@ -537,7 +995,7 @@ func (h *fsKitAcceptanceHarness) start(t *testing.T) {
 	s.cmd = exec.Command(h.image, "-test.run=^TestDesktopAdoptionServer$", "-test.v", "-test.timeout=0")
 	s.cmd.Stdout, s.cmd.Stderr = log, log
 	s.cmd.Dir = h.root
-	s.cmd.Env = append(os.Environ(), "AFS_E2E_DESKTOP_SERVER=1", "AFS_E2E_DESKTOP_STATE="+h.state, "AFS_E2E_DESKTOP_MOUNT="+h.mount, "AFS_E2E_DESKTOP_SOCKET="+s.socket, "AFS_E2E_DESKTOP_GH="+h.gh)
+	s.cmd.Env = append(os.Environ(), "AFS_E2E_DESKTOP_SERVER=1", "AFS_E2E_DESKTOP_STATE="+h.state, "AFS_E2E_DESKTOP_MOUNT="+h.mount, "AFS_E2E_DESKTOP_SOCKET="+s.socket, "AFS_E2E_DESKTOP_GH="+h.gh, "AFS_E2E_DESKTOP_FSKIT_SOCKET_DIR="+h.prerequisites.socketDir)
 	if err := s.cmd.Start(); err != nil {
 		_ = log.Close()
 		t.Fatal(err)

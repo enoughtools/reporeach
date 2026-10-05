@@ -9,8 +9,10 @@ final class EngineService {
     let isIsolated: Bool
     private var process: Process?
     private var outputHandle: FileHandle?
+    private let bundle: Bundle
 
     init(bundle: Bundle = .main) {
+        self.bundle = bundle
         let environment = ProcessInfo.processInfo.environment
         let defaultDirectory = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("RepoReach", isDirectory: true)
         if let path = environment["REPOREACH_STATE_DIR"], path.hasPrefix("/") {
@@ -34,6 +36,11 @@ final class EngineService {
         guard FileManager.default.isExecutableFile(atPath: engine.path), FileManager.default.isExecutableFile(atPath: gh.path) else {
             throw EngineFailure(message: "The bundled repository tools are missing. Download the complete RepoReach app, or see the source build instructions.")
         }
+        var arguments = ["desktop", "serve", "--state-dir", stateDirectory.path, "--mount-root", mountRoot, "--socket", socket.path, "--gh", gh.path]
+        #if REPOREACH_NATIVE_FSKIT
+        let bridgeContainer = try FSBridgeContainer.resolve(bundle: bundle)
+        arguments += ["--fskit-socket-dir", bridgeContainer.directory.path]
+        #endif
         try FileManager.default.createDirectory(at: stateDirectory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         let log = stateDirectory.appendingPathComponent("service.log")
         if let size = (try? FileManager.default.attributesOfItem(atPath: log.path)[.size]) as? NSNumber, size.intValue > 1_048_576 {
@@ -44,7 +51,7 @@ final class EngineService {
         try outputHandle?.seekToEnd()
         let service = Process()
         service.executableURL = engine
-        service.arguments = ["desktop", "serve", "--state-dir", stateDirectory.path, "--mount-root", mountRoot, "--socket", socket.path, "--gh", gh.path]
+        service.arguments = arguments
         service.environment = ProcessInfo.processInfo.environment
         service.standardOutput = outputHandle; service.standardError = outputHandle
         try service.run()

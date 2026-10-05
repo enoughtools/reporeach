@@ -9,6 +9,7 @@ This is a narrow acceptance harness, not complete native release qualification. 
 - macOS 26 or later, with the `reporeach` FSKit module already installed and enabled in normal System Settings.
 - An installed `RepoReach.app` containing `Contents/Extensions/RepoReachFSKit.appex`, whose compiled filesystem implementation matches the verified native source under test. Record separate app and helper revisions and any validation-only bundle-metadata changes as described below. Building the extension requires Xcode 26 or later and a macOS SDK at version 26 or later; Xcode 27 with its macOS 27 SDK is a valid local toolchain while retaining the module's macOS 26 deployment target. Installation also requires the appropriate signing and FSKit entitlement authorization.
 - Native Git available on `PATH`, and Go 1.26.8 or toolchain download access.
+- The app, Go engine and module claim the same Team-ID-prefixed app group. `AFS_FSKIT_SIGNING_IDENTITY` names the verified local certificate SHA-1 used by that installed module. The harness signs only its disposable copied Go test helper with that identity and group, and strictly verifies it before launch. It obtains the real group container through the installed app’s headless Foundation resolver; it never constructs a Group Containers path.
 - Public FSKit discovery must identify the selected module identifier and exact module path as the sole enabled filesystem advertising `reporeach`. The read-only inspector fails on absent candidates, duplicate registrations, competing enabled modules, unreadable metadata, or incomplete output before the harness creates a fixture or asks to mount.
 - A disposable test session in which you can retain the private fixture and helper process if normal cleanup is refused.
 
@@ -86,6 +87,7 @@ GOTOOLCHAIN=go1.26.8 \
 AFS_RUN_FSKIT_E2E_TESTS=1 \
 AFS_FSKIT_APP=/Applications/RepoReach.app \
 AFS_FSKIT_MODULE_CONFIRMED=1 \
+AFS_FSKIT_SIGNING_IDENTITY=VERIFIED_LOCAL_CERTIFICATE_SHA1 \
 go test -run '^TestFSKitMountedAcceptance$' -count=1 -v -timeout=20m .
 ```
 
@@ -101,12 +103,13 @@ AFS_FSKIT_APP=/absolute/path/to/isolated/RepoReach.app \
 AFS_FSKIT_MODULE_ID=com.enoughtools.reporeach.validation.fskit \
 AFS_FSKIT_MODULE_CONFIRMED=1 \
 AFS_FSKIT_INSPECTOR=/absolute/path/to/verified/inspect-fskit-module \
+AFS_FSKIT_SIGNING_IDENTITY=VERIFIED_LOCAL_CERTIFICATE_SHA1 \
 go test -run '^TestFSKitMountedAcceptance$' -count=1 -v -timeout=20m .
 ```
 
 Both identities retain the same platform, source confirmation, installed
 executable, extension-point, filesystem-name and path-resource prerequisites.
-The harness never installs, enables or signs either identity.
+The harness never installs, enables or signs the selected app or extension; only its disposable Go test helper is signed.
 
 The core sequence checks:
 

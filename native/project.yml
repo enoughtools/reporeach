@@ -3,6 +3,10 @@ include:
   - project-base.yml
 targets:
   RepoReach:
+    settings:
+      base:
+        CODE_SIGN_ENTITLEMENTS: App/App.entitlements
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: '$(inherited) REPOREACH_NATIVE_FSKIT'
     dependencies:
       - target: RepoReachFSKit
         embed: true
@@ -15,6 +19,7 @@ targets:
         excludes:
           - README.md
           - '*.entitlements'
+      - path: Shared/FSBridgeContainer.swift
     settings:
       base:
         MACOSX_DEPLOYMENT_TARGET: '26.0'

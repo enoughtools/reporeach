@@ -18,6 +18,69 @@ MODULE_PATH = "Contents/Extensions/RepoReachFSKit.appex"
 FSMODULE = "com.apple.developer.fskit.fsmodule"
 SANDBOX = "com.apple.security.app-sandbox"
 IDENTIFIERS = ("com.apple.application-identifier", "application-identifier")
+APP_GROUPS = "com.apple.security.application-groups"
+GROUP_TEMPLATE = "$(TeamIdentifierPrefix)rr"
+GROUP_INFO = "RepoReachAppGroupIdentifier"
+UNRESOLVED_GROUPS = (".rr", "$(DEVELOPMENT_TEAM).rr")
+
+
+def app_group_identifier(team):
+    require(isinstance(team, str) and re.fullmatch(r"[A-Z0-9]{10}", team), "Developer team must be a ten-character team ID")
+    return team + ".rr"
+
+
+def resolve_entitlements(requested, team):
+    require(isinstance(requested, dict), "Entitlements must be a dictionary")
+    result = dict(requested)
+    if APP_GROUPS in result:
+        groups = result[APP_GROUPS]
+        require(isinstance(groups, list) and bool(groups) and all(isinstance(group, str) for group in groups), "App groups must be a nonempty array of identifiers")
+        group = app_group_identifier(team)
+        result[APP_GROUPS] = [group if value == GROUP_TEMPLATE else value for value in groups]
+    return result
+
+
+def validate_app_groups(requested, team, allowed):
+    if APP_GROUPS not in requested:
+        return
+    groups = requested[APP_GROUPS]
+    require(isinstance(groups, list) and len(groups) == 1 and isinstance(groups[0], str), "RepoReach must claim exactly one app group identifier")
+    group = groups[0]
+    if group.startswith("group."):
+        require(re.fullmatch(r"group\.[A-Za-z0-9]+(?:[.-][A-Za-z0-9]+)*", group), "Invalid modern app group identifier")
+        authorized = allowed.get(APP_GROUPS, [])
+        require(isinstance(authorized, list) and all(isinstance(value, str) for value in authorized) and group in authorized, "Profile does not authorize the modern app group")
+    else:
+        # macOS Team-prefix groups are code-signature claims; they are not
+        # restricted capabilities requiring a profile or portal registration.
+        # The prefix comes from the signing team, never an older App ID prefix.
+        require(group == app_group_identifier(team), "RepoReach app group must match the actual signing team and rr identifier")
+
+
+def check_group_metadata(app, team=None, allow_unresolved=False):
+    values = []
+    for bundle in (app, app / MODULE_PATH):
+        info = plistlib.loads((bundle / "Contents/Info.plist").read_bytes())
+        values.append(info.get(GROUP_INFO))
+    require(all(isinstance(value, str) for value in values) and values[0] == values[1], "App and FSKit module must declare the same app group")
+    group = values[0]
+    if allow_unresolved and group in UNRESOLVED_GROUPS:
+        return group
+    require(re.fullmatch(r"[A-Z0-9]{10}\.rr", group) is not None, "App group metadata is unresolved or invalid; authorized local signing is required")
+    require(team is None or group == app_group_identifier(team), "Runtime app group differs from the actual signing team")
+    return group
+
+
+def configure_app_group(app, team):
+    group = app_group_identifier(team)
+    prior = check_group_metadata(app, allow_unresolved=True)
+    require(prior in (*UNRESOLVED_GROUPS, group), "Compiled app group belongs to another developer team")
+    for bundle in (app, app / MODULE_PATH):
+        path = bundle / "Contents/Info.plist"
+        info = plistlib.loads(path.read_bytes())
+        info[GROUP_INFO] = group
+        path.write_bytes(plistlib.dumps(info))
+    return group
 
 
 def require(condition, message):
@@ -124,6 +187,7 @@ def utc(value):
 
 def authorize_profile(profile, bundle_id, requested, now=None, certificate=None, team=None, require_bound=False):
     now = now or datetime.datetime.now(datetime.timezone.utc)
+    require(isinstance(requested, dict), "Requested entitlements must be a dictionary")
     require("OSX" in profile.get("Platform", []), "FSKit needs a macOS provisioning profile")
     require(utc(profile.get("CreationDate")) <= now < utc(profile.get("ExpirationDate")), "Provisioning profile is not currently valid")
     require(profile.get("ProvisionsAllDevices") is True, "FSKit distribution needs a Developer ID profile")
@@ -134,9 +198,13 @@ def authorize_profile(profile, bundle_id, requested, now=None, certificate=None,
     for debug_key in ("get-task-allow", "com.apple.security.get-task-allow"):
         require(not allowed.get(debug_key, False) and not requested.get(debug_key, False), "Debug task access is forbidden in distribution")
     teams = profile.get("TeamIdentifier", [])
-    require(isinstance(teams, list) and len(teams) == 1 and bool(teams[0]), "Profile must identify one developer team")
+    require(isinstance(teams, list) and len(teams) == 1, "Profile must identify one developer team")
     profile_team = teams[0]
+    app_group_identifier(profile_team)
     require(team is None or team == profile_team, "Signing identity and profile developer teams differ")
+    if require_bound:
+        validate_app_groups(requested, profile_team, allowed)
+    requested = resolve_entitlements(requested, profile_team)
     require(allowed.get("com.apple.developer.team-identifier") == profile_team, "Profile team entitlement does not match its team")
     prefixes = profile.get("ApplicationIdentifierPrefix", [])
     require(isinstance(prefixes, list) and bool(prefixes) and all(isinstance(prefix, str) for prefix in prefixes), "Profile has no valid application identifier prefix")
@@ -156,9 +224,7 @@ def authorize_profile(profile, bundle_id, requested, now=None, certificate=None,
     for key, value in requested.items():
         if key.startswith("com.apple.developer."):
             require(allowed.get(key) == value, f"Profile does not authorize requested capability {key}")
-    for group in requested.get("com.apple.security.application-groups", []):
-        if group.startswith("group."):
-            require(group in allowed.get("com.apple.security.application-groups", []), "Profile does not authorize the modern app group")
+    validate_app_groups(requested, profile_team, allowed)
     certificates = profile.get("DeveloperCertificates", [])
     require(bool(certificates) and all(isinstance(cert, bytes) for cert in certificates), "Profile has no authorized signing certificates")
     if certificate is not None:
@@ -171,7 +237,7 @@ def authorize_profile(profile, bundle_id, requested, now=None, certificate=None,
     return result
 
 
-def check_bundle(app, arch, expected_entitlements):
+def check_bundle(app, arch, expected_entitlements, allow_unresolved=True):
     module = app / MODULE_PATH
     require(module.is_dir(), "FSKit module is missing from Contents/Extensions")
     require(not (app / "Contents/PlugIns/RepoReachFSKit.appex").exists(), "FSKit must use the ExtensionKit embedding directory")
@@ -189,6 +255,14 @@ def check_bundle(app, arch, expected_entitlements):
     version = tuple(int(component) for component in str(info.get("LSMinimumSystemVersion", "0")).split("."))
     require(version >= (26, 0), "FSKit module must require macOS 26")
     require(expected_entitlements.get(FSMODULE) is True and expected_entitlements.get(SANDBOX) is True, "FSKit capability and sandbox must be configured")
+    require(set(expected_entitlements) == {FSMODULE, SANDBOX, APP_GROUPS}, "FSKit source must configure only its capability, sandbox and IPC group")
+    require(expected_entitlements.get(APP_GROUPS) == [GROUP_TEMPLATE] or (
+        isinstance(expected_entitlements.get(APP_GROUPS), list)
+        and len(expected_entitlements[APP_GROUPS]) == 1
+        and isinstance(expected_entitlements[APP_GROUPS][0], str)
+        and re.fullmatch(r"[A-Z0-9]{10}\.rr", expected_entitlements[APP_GROUPS][0]) is not None
+    ), "FSKit must configure its single Team-prefix app group")
+    check_group_metadata(app, allow_unresolved=allow_unresolved)
     for bundle, properties in ((app, app_info), (module, info)):
         binary = bundle / "Contents/MacOS" / properties["CFBundleExecutable"]
         slices, _ = run("lipo", "-archs", str(binary))
@@ -196,32 +270,74 @@ def check_bundle(app, arch, expected_entitlements):
     return module
 
 
-def signature_entitlements(path):
+def signature_entitlements(path, allow_empty=False):
     # Request a property list explicitly; default display may be human-readable.
     claims, _ = run("codesign", "-d", "--entitlements", "-", "--xml", str(path))
+    if allow_empty and not claims.strip():
+        return {}
     actual = plistlib.loads(claims)
     require(isinstance(actual, dict), "Actual signature entitlements must be a dictionary")
     return actual
 
 
-def signed(app, arch, expected_entitlements):
-    module = check_bundle(app, arch, expected_entitlements)
-    embedded = module / "Contents/embedded.provisionprofile"
-    require(embedded.is_file(), "Signed FSKit module lacks its own embedded provisioning profile")
-    run("codesign", "--verify", "--strict", str(module))
-    details_out, details_err = run("codesign", "-d", "--verbose=4", str(module))
+def signing_identity(path):
+    run("codesign", "--verify", "--strict", str(path))
+    details_out, details_err = run("codesign", "-d", "--verbose=4", str(path))
     details = (details_out + details_err).decode()
-    require("Authority=Developer ID Application:" in details, "FSKit distribution requires a Developer ID identity")
+    require("Authority=Developer ID Application:" in details, "FSKit distribution requires a Developer ID Application identity")
     require("runtime" in details and "Timestamp=" in details, "FSKit distribution requires hardened runtime and a signing timestamp")
-    team = next((line.split("=", 1)[1] for line in details.splitlines() if line.startswith("TeamIdentifier=")), None)
-    actual = signature_entitlements(module)
-    require(all(actual.get(key) == value for key, value in expected_entitlements.items()), "Actual FSKit signature omits configured entitlement claims")
+    teams = [line.split("=", 1)[1] for line in details.splitlines() if line.startswith("TeamIdentifier=")]
+    require(len(teams) == 1, "Signed component must identify one developer team")
+    team = teams[0]
+    app_group_identifier(team)
     with tempfile.TemporaryDirectory(prefix="reporeach-fskit-cert-") as private:
         certificate_path = pathlib.Path(private) / "certificate"
-        run("codesign", "-d", f"--extract-certificates={certificate_path}", str(module))
+        run("codesign", "-d", f"--extract-certificates={certificate_path}", str(path))
         certificate = pathlib.Path(str(certificate_path) + "0").read_bytes()
+    require(certificate_extensions(certificate).get(encoded_oid("1.2.840.113635.100.6.1.13")) == b"\x05\0", "Actual signing certificate lacks the Developer ID Application marker")
+    return team, certificate
+
+
+def signed(app, arch, expected_entitlements):
+    module = check_bundle(app, arch, expected_entitlements, allow_unresolved=False)
+    embedded = module / "Contents/embedded.provisionprofile"
+    require(embedded.is_file(), "Signed FSKit module lacks its own embedded provisioning profile")
+    team, certificate = signing_identity(module)
+    group = check_group_metadata(app, team=team)
+    actual = signature_entitlements(module)
+    expected = resolve_entitlements(expected_entitlements, team)
+    require(all(actual.get(key) == value for key, value in expected.items()), "Actual FSKit signature omits configured entitlement claims")
+    require(actual.get(APP_GROUPS) == [group], "FSKit signature app group differs from runtime metadata")
+    require(set(actual) <= set(expected) | set(IDENTIFIERS) | {"com.apple.developer.team-identifier"}, "Actual FSKit signature contains unexpected entitlement claims")
     authorize_profile(decode_profile(embedded), MODULE_ID, actual, certificate=certificate, team=team, require_bound=True)
-    run("codesign", "--verify", "--strict", str(app))
+    participants = (app / "Contents/Helpers/artifact-fs", app)
+    for component in participants:
+        component_team, component_certificate = signing_identity(component)
+        require((component_team, component_certificate) == (team, certificate), "IPC participants must use the same actual signing team and certificate")
+        require(signature_entitlements(component) == {APP_GROUPS: [group]}, "App and engine must claim only their matching Team-prefix app group")
+    for component in (app / "Contents/Helpers/gh", app / "Contents/PlugIns/RepoReachFinder.appex"):
+        component_team, component_certificate = signing_identity(component)
+        require((component_team, component_certificate) == (team, certificate), "Bundled component used a different signing team or certificate")
+        claims = signature_entitlements(component, allow_empty=True)
+        require(APP_GROUPS not in claims, "GitHub CLI and Finder extension must not claim the filesystem IPC group")
+        require(not any(claims.get(key, False) for key in ("get-task-allow", "com.apple.security.get-task-allow")), "Debug task access is forbidden in distribution")
+
+
+def prepare_signing(args):
+    team, certificate = signing_identity(args.signing_component)
+    requested = plistlib.loads(args.entitlements.read_bytes())
+    require(isinstance(requested, dict) and set(requested) == {FSMODULE, SANDBOX, APP_GROUPS}, "FSKit source must configure only its capability, sandbox and IPC group")
+    module_claims = authorize_profile(decode_profile(args.profile), args.bundle_id, requested, certificate=certificate, team=team)
+    require(module_claims.get(APP_GROUPS) == [app_group_identifier(team)], "FSKit must claim its matching Team-prefix app group")
+    participant_claims = {}
+    for name, source in (("app", args.app_entitlements), ("helper", args.helper_entitlements)):
+        claims = resolve_entitlements(plistlib.loads(source.read_bytes()), team)
+        require(claims == {APP_GROUPS: [app_group_identifier(team)]}, "App and engine entitlement templates must claim only the matching app group")
+        participant_claims[name] = claims
+    configure_app_group(args.app, team)
+    args.output_directory.mkdir(parents=True, exist_ok=True)
+    for name, claims in {"module": module_claims, **participant_claims}.items():
+        (args.output_directory / (name + ".entitlements")).write_bytes(plistlib.dumps(claims))
 
 
 def main():
@@ -236,18 +352,21 @@ def main():
     prepare.add_argument("--profile", type=pathlib.Path, required=True)
     prepare.add_argument("--bundle-id", required=True)
     prepare.add_argument("--entitlements", type=pathlib.Path, required=True)
-    prepare.add_argument("--output", type=pathlib.Path, required=True)
+    prepare.add_argument("--app", type=pathlib.Path, required=True)
+    prepare.add_argument("--signing-component", type=pathlib.Path, required=True)
+    prepare.add_argument("--app-entitlements", type=pathlib.Path, required=True)
+    prepare.add_argument("--helper-entitlements", type=pathlib.Path, required=True)
+    prepare.add_argument("--output-directory", type=pathlib.Path, required=True)
     args = parser.parse_args()
     try:
         entitlements = plistlib.loads(args.entitlements.read_bytes())
         if args.command == "prepare":
-            claims = authorize_profile(decode_profile(args.profile), args.bundle_id, entitlements)
-            args.output.write_bytes(plistlib.dumps(claims))
+            prepare_signing(args)
         elif args.command == "compile":
             check_bundle(args.app, args.arch, entitlements)
         else:
             signed(args.app, args.arch, entitlements)
-    except (ValueError, OSError, plistlib.InvalidFileException, KeyError) as failure:
+    except (ValueError, OSError, plistlib.InvalidFileException, KeyError, TypeError) as failure:
         raise SystemExit(f"FSKit packaging validation failed: {failure}")
     print(f"FSKit {args.command} packaging checks passed")
 

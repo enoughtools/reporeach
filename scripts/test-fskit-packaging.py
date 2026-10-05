@@ -6,6 +6,7 @@ import importlib.util
 import json
 import pathlib
 import plistlib
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -26,7 +27,7 @@ validation_spec.loader.exec_module(local_validation)
 class ProfileAuthorizationTests(unittest.TestCase):
     def setUp(self):
         self.now = datetime.datetime(2026, 10, 4, tzinfo=datetime.timezone.utc)
-        self.team = "FIXTURE1234"
+        self.team = "FIXTURE123"
         self.module = packaging.MODULE_ID
         self.certificate = b"fixture certificate bytes, never used for signing"
         self.profile = {
@@ -119,6 +120,54 @@ class ProfileAuthorizationTests(unittest.TestCase):
         profile["Entitlements"]["com.apple.security.application-groups"] = requested["com.apple.security.application-groups"]
         self.authorize(profile, requested)
 
+    def test_team_prefix_group_uses_signing_team_instead_of_app_id_prefix(self):
+        profile = copy.deepcopy(self.profile)
+        profile["ApplicationIdentifierPrefix"] = ["OLDPREFIX1"]
+        profile["Entitlements"]["com.apple.application-identifier"] = "OLDPREFIX1." + self.module
+        requested = dict(self.requested, **{packaging.APP_GROUPS: [packaging.GROUP_TEMPLATE]})
+        claims = self.authorize(profile, requested)
+        self.assertEqual(claims[packaging.APP_GROUPS], [self.team + ".rr"])
+        self.assertNotIn(packaging.APP_GROUPS, profile["Entitlements"])
+
+    def test_team_prefix_group_rejects_malformed_or_foreign_claims(self):
+        groups = (None, True, self.team + ".rr", [], [None], [True], [123],
+                  [self.team + ".rr", self.team + ".rr"], [self.team + ".rr", "group.example"],
+                  ["OTHERTEAM1.rr"], [self.team + ".other"], ["rr"], [".rr"],
+                  [self.team + ".*"], [self.team + ".rr/path"], [self.team + ".rr\0"],
+                  [self.team + ".r\u0440"])
+        for value in groups:
+            with self.subTest(groups=value), self.assertRaises(ValueError):
+                self.authorize(requested=dict(self.requested, **{packaging.APP_GROUPS: value}))
+
+    def test_final_signature_cannot_keep_unresolved_group_template(self):
+        requested = dict(self.requested, **{packaging.APP_GROUPS: [packaging.GROUP_TEMPLATE]})
+        claims = self.authorize(requested=requested)
+        self.authorize(requested=claims, require_bound=True)
+        claims[packaging.APP_GROUPS] = [packaging.GROUP_TEMPLATE]
+        with self.assertRaisesRegex(ValueError, "actual signing team"):
+            self.authorize(requested=claims, require_bound=True)
+
+    def test_malformed_modern_group_or_profile_authorization_is_rejected(self):
+        for group in ("group.", "group.*", "group.example/path", "group..example", "group.\u0435xample"):
+            requested = dict(self.requested, **{packaging.APP_GROUPS: [group]})
+            profile = copy.deepcopy(self.profile)
+            profile["Entitlements"][packaging.APP_GROUPS] = [group]
+            with self.subTest(group=group), self.assertRaises(ValueError):
+                self.authorize(profile, requested)
+        requested = dict(self.requested, **{packaging.APP_GROUPS: ["group.example"]})
+        for authorization in ("group.example", ["group.*"], [None], True):
+            profile = copy.deepcopy(self.profile)
+            profile["Entitlements"][packaging.APP_GROUPS] = authorization
+            with self.subTest(authorization=authorization), self.assertRaises(ValueError):
+                self.authorize(profile, requested)
+
+    def test_invalid_profile_team_cannot_resolve_a_group(self):
+        for team in (None, True, "", "SHORT", "TOO_LONG123", "fixture123", "FIXTURE12\0"):
+            profile = copy.deepcopy(self.profile)
+            profile["TeamIdentifier"] = [team]
+            with self.subTest(team=team), self.assertRaises(ValueError):
+                self.authorize(profile)
+
     def test_final_signature_application_identifier_must_match(self):
         requested = dict(self.requested, **{"com.apple.application-identifier": f"{self.team}.com.enoughtools.reporeach.finder"})
         with self.assertRaises(ValueError):
@@ -191,7 +240,7 @@ class CMSAuthenticationTests(unittest.TestCase):
 
 class SignedEntitlementTests(unittest.TestCase):
     def test_extracts_typed_claims_with_explicit_xml_output(self):
-        claims = {packaging.FSMODULE: True, "fixture.identifier": "FIXTURE1234.example", "fixture.groups": ["fixture-group"], "fixture.data": b"binary\0\xff"}
+        claims = {packaging.FSMODULE: True, "fixture.identifier": "FIXTURE123.example", "fixture.groups": ["fixture-group"], "fixture.data": b"binary\0\xff"}
         for format in (plistlib.FMT_XML, plistlib.FMT_BINARY):
             with self.subTest(format=format), mock.patch.object(packaging, "run", return_value=(plistlib.dumps(claims, fmt=format), b"display diagnostics")) as run:
                 self.assertEqual(packaging.signature_entitlements(pathlib.Path("fixture.appex")), claims)
@@ -222,15 +271,22 @@ class SignedCertificateExtractionTests(unittest.TestCase):
         self.module = self.app / packaging.MODULE_PATH
         (self.module / "Contents").mkdir(parents=True)
         (self.module / "Contents/embedded.provisionprofile").write_bytes(b"fixture, not a profile")
-        self.claims = {packaging.FSMODULE: True, packaging.SANDBOX: True}
-        self.certificate = b"fixture public certificate bytes, not signing material"
+        self.claims = {packaging.FSMODULE: True, packaging.SANDBOX: True, packaging.APP_GROUPS: ["FIXTURE123.rr"]}
+        self.certificate = certificate_shape([("1.2.840.113635.100.6.1.13", b"\x05\0")])
+        for bundle in (self.app, self.module):
+            (bundle / "Contents/Info.plist").write_bytes(plistlib.dumps({packaging.GROUP_INFO: "FIXTURE123.rr"}))
 
     def display(self, *args):
         if args[2] == "--verbose=4":
-            return b"", b"Authority=Developer ID Application: Fixture\nTeamIdentifier=FIXTURE1234\nflags=10000(runtime)\nTimestamp=fixture\n"
+            return b"", b"Authority=Developer ID Application: Fixture\nTeamIdentifier=FIXTURE123\nflags=10000(runtime)\nTimestamp=fixture\n"
         if args[2] == "--entitlements":
             self.assertIn("--xml", args)
-            return plistlib.dumps(self.claims), b""
+            path = pathlib.Path(args[-1])
+            if path == self.module:
+                return plistlib.dumps(self.claims), b""
+            if path == self.app or path.name == "artifact-fs":
+                return plistlib.dumps({packaging.APP_GROUPS: ["FIXTURE123.rr"]}), b""
+            return b"", b""
         if args[2].startswith("--extract-certificates="):
             # An optional long-option argument must be attached; otherwise
             # codesign treats the destination prefix as another signed path.
@@ -244,7 +300,7 @@ class SignedCertificateExtractionTests(unittest.TestCase):
         profile = {"fixture": True}
         with mock.patch.object(packaging, "check_bundle", return_value=self.module), mock.patch.object(packaging, "run", side_effect=self.display), mock.patch.object(packaging, "decode_profile", return_value=profile), mock.patch.object(packaging, "authorize_profile") as authorize:
             packaging.signed(self.app, "arm64", dict(self.claims))
-        authorize.assert_called_once_with(profile, packaging.MODULE_ID, self.claims, certificate=self.certificate, team="FIXTURE1234", require_bound=True)
+        authorize.assert_called_once_with(profile, packaging.MODULE_ID, self.claims, certificate=self.certificate, team="FIXTURE123", require_bound=True)
 
     def test_missing_signed_capability_is_rejected_before_profile_authorization(self):
         expected = dict(self.claims)
@@ -253,6 +309,41 @@ class SignedCertificateExtractionTests(unittest.TestCase):
             packaging.signed(self.app, "arm64", expected)
         authorize.assert_not_called()
 
+    def test_actual_module_cannot_claim_extra_network_debug_or_security_access(self):
+        expected = dict(self.claims)
+        for key in ("com.apple.security.network.client", "com.apple.security.network.server", "get-task-allow", "com.apple.security.get-task-allow", "com.apple.security.files.user-selected.read-write"):
+            self.claims[key] = True
+            with self.subTest(key=key), mock.patch.object(packaging, "check_bundle", return_value=self.module), mock.patch.object(packaging, "run", side_effect=self.display), mock.patch.object(packaging, "authorize_profile") as authorize, self.assertRaisesRegex(ValueError, "unexpected entitlement"):
+                packaging.signed(self.app, "arm64", expected)
+            authorize.assert_not_called()
+            del self.claims[key]
+
+    def test_group_membership_and_certificate_must_match_for_every_ipc_participant(self):
+        expected_group = {packaging.APP_GROUPS: ["FIXTURE123.rr"]}
+        for component in (self.app / "Contents/Helpers/artifact-fs", self.app):
+            for claims in ({}, {packaging.APP_GROUPS: ["OTHERTEAM1.rr"]}, {packaging.APP_GROUPS: [packaging.GROUP_TEMPLATE]}, dict(expected_group, **{packaging.SANDBOX: True})):
+                def entitlements(path, allow_empty=False):
+                    return claims if path == component else (self.claims if path == self.module else expected_group)
+                with self.subTest(component=str(component), claims=claims), mock.patch.object(packaging, "check_bundle", return_value=self.module), mock.patch.object(packaging, "signing_identity", return_value=("FIXTURE123", self.certificate)), mock.patch.object(packaging, "signature_entitlements", side_effect=entitlements), mock.patch.object(packaging, "decode_profile"), mock.patch.object(packaging, "authorize_profile"), self.assertRaisesRegex(ValueError, "only their matching"):
+                    packaging.signed(self.app, "arm64", dict(self.claims))
+            for identity in (("OTHERTEAM1", self.certificate), ("FIXTURE123", b"another certificate")):
+                def identity_for(path):
+                    return identity if path == component else ("FIXTURE123", self.certificate)
+                with self.subTest(component=str(component), identity=identity[0]), mock.patch.object(packaging, "check_bundle", return_value=self.module), mock.patch.object(packaging, "signing_identity", side_effect=identity_for), mock.patch.object(packaging, "signature_entitlements", side_effect=lambda path: self.claims if path == self.module else expected_group), mock.patch.object(packaging, "decode_profile"), mock.patch.object(packaging, "authorize_profile"), self.assertRaisesRegex(ValueError, "same actual signing"):
+                    packaging.signed(self.app, "arm64", dict(self.claims))
+
+    def test_nonparticipants_cannot_receive_the_ipc_group(self):
+        group = {packaging.APP_GROUPS: ["FIXTURE123.rr"]}
+        for excluded in (self.app / "Contents/Helpers/gh", self.app / "Contents/PlugIns/RepoReachFinder.appex"):
+            def entitlements(path, allow_empty=False):
+                if path == self.module:
+                    return self.claims
+                if path in (self.app, self.app / "Contents/Helpers/artifact-fs", excluded):
+                    return group
+                return {}
+            with self.subTest(component=str(excluded)), mock.patch.object(packaging, "check_bundle", return_value=self.module), mock.patch.object(packaging, "signing_identity", return_value=("FIXTURE123", self.certificate)), mock.patch.object(packaging, "signature_entitlements", side_effect=entitlements), mock.patch.object(packaging, "decode_profile"), mock.patch.object(packaging, "authorize_profile"), self.assertRaisesRegex(ValueError, "must not claim"):
+                packaging.signed(self.app, "arm64", dict(self.claims))
+
 
 class CompiledBundleTests(unittest.TestCase):
     def setUp(self):
@@ -260,16 +351,16 @@ class CompiledBundleTests(unittest.TestCase):
         self.addCleanup(self.temporary.cleanup)
         self.app = pathlib.Path(self.temporary.name) / "RepoReach.app"
         self.module = self.app / packaging.MODULE_PATH
-        self.app_info = {"CFBundleIdentifier": "com.enoughtools.reporeach", "CFBundleExecutable": "RepoReach"}
+        self.app_info = {"CFBundleIdentifier": "com.enoughtools.reporeach", "CFBundleExecutable": "RepoReach", packaging.GROUP_INFO: ".rr"}
         self.module_info = {
             "CFBundleIdentifier": packaging.MODULE_ID,
-            "CFBundleExecutable": "RepoReachFSKit", "LSMinimumSystemVersion": "26.0",
+            "CFBundleExecutable": "RepoReachFSKit", "LSMinimumSystemVersion": "26.0", packaging.GROUP_INFO: ".rr",
             "EXAppExtensionAttributes": {
                 "EXExtensionPointIdentifier": "com.apple.fskit.fsmodule",
                 "FSActivateOptionSyntax": {"shortOptions": "o:"},
             },
         }
-        self.entitlements = {packaging.FSMODULE: True, packaging.SANDBOX: True}
+        self.entitlements = {packaging.FSMODULE: True, packaging.SANDBOX: True, packaging.APP_GROUPS: [packaging.GROUP_TEMPLATE]}
         for bundle, info in ((self.app, self.app_info), (self.module, self.module_info)):
             (bundle / "Contents/MacOS").mkdir(parents=True)
             (bundle / "Contents/MacOS" / info["CFBundleExecutable"]).write_bytes(b"compiled binary fixture\0\xff")
@@ -282,6 +373,64 @@ class CompiledBundleTests(unittest.TestCase):
 
     def test_accepts_compiled_mount_only_module_with_common_options(self):
         self.assertEqual(self.check(), self.module)
+
+    def test_unresolved_group_is_compile_only_and_signed_metadata_must_match(self):
+        self.assertEqual(self.check(), self.module)
+        with self.assertRaisesRegex(ValueError, "unresolved"):
+            packaging.check_group_metadata(self.app)
+        self.assertEqual(packaging.configure_app_group(self.app, "FIXTURE123"), "FIXTURE123.rr")
+        self.assertEqual(packaging.check_group_metadata(self.app, team="FIXTURE123"), "FIXTURE123.rr")
+        with self.assertRaisesRegex(ValueError, "actual signing team"):
+            packaging.check_group_metadata(self.app, team="OTHERTEAM1")
+        self.module_info[packaging.GROUP_INFO] = "OTHERTEAM1.rr"
+        with self.assertRaisesRegex(ValueError, "same app group"):
+            self.check()
+
+    def test_compiled_group_cannot_be_missing_malformed_or_silently_reassigned(self):
+        for group in (None, "rr", "group.example", "FIXTURE123.*", "FIXTURE123.rr/path"):
+            self.module_info[packaging.GROUP_INFO] = group
+            self.app_info[packaging.GROUP_INFO] = group
+            if group is None:
+                self.module_info.pop(packaging.GROUP_INFO)
+                self.app_info.pop(packaging.GROUP_INFO)
+            (self.app / "Contents/Info.plist").write_bytes(plistlib.dumps(self.app_info))
+            with self.subTest(group=group), self.assertRaises(ValueError):
+                self.check()
+        for bundle in (self.app, self.module):
+            path = bundle / "Contents/Info.plist"
+            info = plistlib.loads(path.read_bytes())
+            info[packaging.GROUP_INFO] = "OTHERTEAM1.rr"
+            path.write_bytes(plistlib.dumps(info))
+        before = [(bundle / "Contents/Info.plist").read_bytes() for bundle in (self.app, self.module)]
+        with self.assertRaisesRegex(ValueError, "another developer team"):
+            packaging.configure_app_group(self.app, "FIXTURE123")
+        self.assertEqual(before, [(bundle / "Contents/Info.plist").read_bytes() for bundle in (self.app, self.module)])
+
+    def test_source_module_cannot_add_unrelated_entitlements(self):
+        for key in ("com.apple.security.network.client", "com.apple.security.network.server", "com.apple.security.files.user-selected.read-write"):
+            self.entitlements[key] = True
+            with self.subTest(key=key), self.assertRaisesRegex(ValueError, "only its capability"):
+                self.check()
+            del self.entitlements[key]
+
+    def test_preparation_binds_copied_runtime_metadata_and_all_claims_to_verified_signer(self):
+        folder = pathlib.Path(self.temporary.name)
+        module_source = folder / "module-template"
+        module_source.write_bytes(plistlib.dumps(self.entitlements))
+        participant_source = folder / "participant-template"
+        participant_source.write_bytes(plistlib.dumps({packaging.APP_GROUPS: [packaging.GROUP_TEMPLATE]}))
+        args = SimpleNamespace(app=self.app, signing_component=self.app / "Contents/Helpers/gh", profile=folder / "profile", bundle_id=packaging.MODULE_ID, entitlements=module_source, app_entitlements=participant_source, helper_entitlements=participant_source, output_directory=folder / "claims")
+        resolved = packaging.resolve_entitlements(self.entitlements, "FIXTURE123")
+        with mock.patch.object(packaging, "signing_identity", return_value=("FIXTURE123", b"selected certificate")) as identity, mock.patch.object(packaging, "decode_profile", return_value={"profile": "authenticated"}), mock.patch.object(packaging, "authorize_profile", return_value=resolved) as authorize:
+            packaging.prepare_signing(args)
+        identity.assert_called_once_with(args.signing_component)
+        authorize.assert_called_once_with({"profile": "authenticated"}, packaging.MODULE_ID, self.entitlements, certificate=b"selected certificate", team="FIXTURE123")
+        self.assertEqual(packaging.check_group_metadata(self.app, team="FIXTURE123"), "FIXTURE123.rr")
+        self.assertEqual(plistlib.loads((args.output_directory / "module.entitlements").read_bytes()), resolved)
+        for name in ("app", "helper"):
+            self.assertEqual(plistlib.loads((args.output_directory / (name + ".entitlements")).read_bytes()), {packaging.APP_GROUPS: ["FIXTURE123.rr"]})
+        self.assertEqual(plistlib.loads(module_source.read_bytes()), self.entitlements)
+        self.assertEqual(plistlib.loads(participant_source.read_bytes()), {packaging.APP_GROUPS: [packaging.GROUP_TEMPLATE]})
 
     def test_missing_activation_metadata_is_rejected_before_native_tools(self):
         del self.module_info["EXAppExtensionAttributes"]["FSActivateOptionSyntax"]
@@ -387,6 +536,29 @@ class LocalValidationArtifactTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "architecture"):
                 local_validation.export(self.args)
         self.assertFalse(self.args.output.exists())
+
+
+class ValidationGenerationFlagsTests(unittest.TestCase):
+    def test_generation_override_requires_explicit_local_export_and_safe_absolute_path(self):
+        script = pathlib.Path(__file__).with_name("build-macos.sh")
+        root = script.resolve().parents[1]
+        generation = root / "build/fskit-validation/generations/flag-fixture"
+        cases = (
+            (["--validation-root"], "requires an absolute"),
+            (["--validation-root", ""], "requires an absolute"),
+            (["--compile-only", "--validation-root", str(generation)], "only valid with"),
+            (["--validation-artifact", "--validation-root", "relative/generation"], "normalized absolute"),
+            (["--validation-artifact", "--validation-root", "/"], "normalized absolute"),
+            (["--validation-artifact", "--validation-root", str(root / "build/fskit-validation")], "normalized absolute"),
+            (["--validation-artifact", "--validation-root", str(generation) + "/../other"], "normalized absolute"),
+        )
+        for arguments, expected in cases:
+            with self.subTest(arguments=arguments):
+                result = subprocess.run(["bash", str(script), *arguments], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(expected, result.stderr)
+                self.assertEqual(result.stdout, "")
+        self.assertFalse(generation.exists())
 
 
 if __name__ == "__main__":

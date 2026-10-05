@@ -29,7 +29,8 @@ final class RepoReachFileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations 
         }
         let client: FSBridgeClient
         do {
-            client = try FSBridgeClient(configURL: pathResource.url.appendingPathComponent("connection.json"))
+            client = try FSBridgeClient(configURL: pathResource.url.appendingPathComponent("connection.json"),
+                                        container: FSBridgeContainer.resolve())
         } catch {
             pathResource.url.stopAccessingSecurityScopedResource()
             replyHandler(nil, Self.posixError(error))
@@ -79,7 +80,8 @@ final class RepoReachFileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations 
         }
         let client: FSBridgeClient
         do {
-            client = try FSBridgeClient(configURL: pathResource.url.appendingPathComponent("connection.json"))
+            client = try FSBridgeClient(configURL: pathResource.url.appendingPathComponent("connection.json"),
+                                        container: FSBridgeContainer.resolve())
         } catch {
             pathResource.url.stopAccessingSecurityScopedResource()
             failLoad(reservation, error: Self.posixError(error))
@@ -171,6 +173,7 @@ final class RepoReachFileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations 
     private static func posixError(_ error: Error) -> POSIXError {
         if let error = error as? POSIXError { return error }
         if let error = error as? FSBridgeError { return POSIXError(POSIXError.Code(rawValue: error.errno) ?? .EIO) }
+        if error is FSBridgeContainer.Failure { return POSIXError(.EACCES) }
         return POSIXError(.EIO)
     }
 }

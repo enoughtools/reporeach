@@ -65,11 +65,21 @@ func newFakeFSKitMount(t *testing.T) *fakeFSKitMount {
 	if err != nil {
 		t.Fatal(err)
 	}
-	f := &fakeFSKitMount{service: &Service{opts: Options{StateDir: t.TempDir()}}, root: root,
+	socketDir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(socketDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	f := &fakeFSKitMount{service: &Service{opts: Options{StateDir: t.TempDir(), FSKitSocketDir: socketDir}}, root: root,
 		bridge: &fakePlatformBridge{done: make(chan struct{})}}
 	f.ops = fsKitMountOperations{
 		ready: func() bool { return true },
-		start: func(ctx context.Context, source string, fs *catalogfs.FileSystem) (platformBridge, error) {
+		start: func(ctx context.Context, source, socketDir string, fs *catalogfs.FileSystem) (platformBridge, error) {
+			if socketDir != f.service.opts.FSKitSocketDir {
+				t.Error("bridge did not receive the private shared socket directory")
+			}
 			f.starts++
 			f.bridge.source = source
 			if ctx.Done() != nil {
@@ -131,6 +141,49 @@ func TestNativeFSKitOSAvailability(t *testing.T) {
 	}
 	if !strings.Contains(platformDependencyMessage(), "macOS 26") || strings.Contains(platformDependencyMessage(), "macFUSE") {
 		t.Fatal(platformDependencyMessage())
+	}
+}
+
+func TestNativeFSKitRejectsUnavailableOrOverlappingSocketDirectoryBeforeStartup(t *testing.T) {
+	for _, name := range []string{"missing option", "relative", "absent", "symlink", "nonprivate", "nested in mount", "mount below socket directory", "physical alias"} {
+		t.Run(name, func(t *testing.T) {
+			f := newFakeFSKitMount(t)
+			switch name {
+			case "missing option":
+				f.service.opts.FSKitSocketDir = ""
+			case "relative":
+				f.service.opts.FSKitSocketDir = "shared"
+			case "absent":
+				f.service.opts.FSKitSocketDir = filepath.Join(t.TempDir(), "absent")
+			case "symlink":
+				alias := filepath.Join(t.TempDir(), "alias")
+				if err := os.Symlink(f.service.opts.FSKitSocketDir, alias); err != nil {
+					t.Fatal(err)
+				}
+				f.service.opts.FSKitSocketDir = alias
+			case "nonprivate":
+				if err := os.Chmod(f.service.opts.FSKitSocketDir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			case "nested in mount":
+				f.service.opts.FSKitSocketDir = filepath.Join(f.root, "shared")
+			case "mount below socket directory":
+				f.root = filepath.Join(f.service.opts.FSKitSocketDir, "mount")
+			case "physical alias":
+				alias := filepath.Join(t.TempDir(), "alias")
+				if err := os.Symlink(f.service.opts.FSKitSocketDir, alias); err != nil {
+					t.Fatal(err)
+				}
+				f.root = filepath.Join(alias, "mount")
+			}
+			mounted, err := f.service.mountNativeFSKit(context.Background(), f.root, nil, f.ops)
+			if err == nil || mounted != nil || f.starts != 0 || f.commandCount() != 0 {
+				t.Fatalf("unsafe socket directory reached mount startup: mounted=%v err=%v starts=%d commands=%d", mounted, err, f.starts, f.commandCount())
+			}
+			if _, err := os.Lstat(filepath.Join(f.service.opts.StateDir, "FSKit")); !errors.Is(err, os.ErrNotExist) {
+				t.Fatal("unsafe socket directory created a fallback resource folder")
+			}
+		})
 	}
 }
 
@@ -382,8 +435,8 @@ func TestNativeFSKitCancelledBeforeCommandRetainsFailedDrain(t *testing.T) {
 	f := newFakeFSKitMount(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	start := f.ops.start
-	f.ops.start = func(ctx context.Context, source string, fs *catalogfs.FileSystem) (platformBridge, error) {
-		bridge, err := start(ctx, source, fs)
+	f.ops.start = func(ctx context.Context, source, socketDir string, fs *catalogfs.FileSystem) (platformBridge, error) {
+		bridge, err := start(ctx, source, socketDir, fs)
 		cancel()
 		return bridge, err
 	}

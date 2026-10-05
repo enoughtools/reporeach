@@ -7,15 +7,15 @@ final class FSBridgeClient: @unchecked Sendable {
     static let maximumChunkSize = 1_048_576
     private static let maximumMetadataSize = 4 * 1_048_576
     private enum ConfigurationSource: Sendable {
-        case file(URL)
+        case file(URL, FSBridgeContainer?)
         case explicit(FSBridgeConfiguration)
     }
     private let source: ConfigurationSource
     private let transport: FSBridgeTransport
 
-    init(configURL: URL) throws {
-        source = .file(configURL)
-        transport = FSBridgeTransport(configuration: try FSBridgeConfiguration.load(from: configURL))
+    init(configURL: URL, container: FSBridgeContainer? = nil) throws {
+        source = .file(configURL, container)
+        transport = FSBridgeTransport(configuration: try FSBridgeConfiguration.load(from: configURL, container: container))
     }
 
     init(configuration: FSBridgeConfiguration) {
@@ -28,7 +28,7 @@ final class FSBridgeClient: @unchecked Sendable {
     /// current descriptor. The caller continues holding the resource scope.
     func reconnected() throws -> FSBridgeClient {
         switch source {
-        case .file(let url): return try FSBridgeClient(configURL: url)
+        case .file(let url, let container): return try FSBridgeClient(configURL: url, container: container)
         case .explicit(let configuration): return FSBridgeClient(configuration: configuration)
         }
     }

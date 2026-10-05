@@ -6,7 +6,7 @@ Run from the repository root:
 
 ```sh
 mkdir -p build/fsbridge-smoke
-swiftc -parse-as-library native/FSKitExtension/BridgeConfiguration.swift \
+swiftc -parse-as-library native/Shared/FSBridgeContainer.swift native/FSKitExtension/BridgeConfiguration.swift \
   native/FSKitExtension/BridgeModels.swift native/FSKitExtension/BridgeTransport.swift \
   native/FSKitExtension/BridgeClient.swift native/Tools/fsbridge-smoke.swift \
   -o build/fsbridge-smoke/check
@@ -22,7 +22,7 @@ On macOS 15.4 or later, a second harness invokes production volume callbacks usi
 
 ```sh
 xcrun swiftc -parse-as-library -target arm64-apple-macos15.4 \
-  native/FSKitExtension/BridgeModels.swift native/FSKitExtension/BridgeConfiguration.swift \
+  native/Shared/FSBridgeContainer.swift native/FSKitExtension/BridgeModels.swift native/FSKitExtension/BridgeConfiguration.swift \
   native/FSKitExtension/BridgeTransport.swift native/FSKitExtension/BridgeClient.swift \
   native/FSKitExtension/RepoReachVolume.swift native/Tools/fsbridge-volume-smoke.swift \
   -o build/fsbridge-smoke/volume-check

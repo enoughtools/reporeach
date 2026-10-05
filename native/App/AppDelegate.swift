@@ -12,6 +12,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var terminationPending = false
 
     static func main() {
+        if ProcessInfo.processInfo.arguments.contains("--resolve-fsbridge-container") {
+            do {
+                let container = try FSBridgeContainer.resolve()
+                let document = try JSONSerialization.data(withJSONObject: ["groupIdentifier": container.groupIdentifier,
+                                                                          "directory": container.directory.path], options: [.sortedKeys])
+                guard document.count <= 4096 else { throw FSBridgeContainer.Failure.unavailable }
+                FileHandle.standardOutput.write(document + Data([10]))
+                exit(EXIT_SUCCESS)
+            } catch {
+                FileHandle.standardError.write(Data("RepoReach's private filesystem connection is unavailable.\n".utf8))
+                exit(EXIT_FAILURE)
+            }
+        }
         let application = NSApplication.shared
         let delegate = AppDelegate()
         application.delegate = delegate

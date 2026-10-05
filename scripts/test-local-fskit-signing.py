@@ -48,6 +48,7 @@ class SigningFixtures(unittest.TestCase):
             self.files[prefix + "/Contents/Info.plist"] = plistlib.dumps({
                 "CFBundleIdentifier": identifier, "CFBundleExecutable": name,
                 "LSMinimumSystemVersion": "26.0",
+                **({signing.packaging.GROUP_INFO: ".rr"} if identifier != "com.enoughtools.reporeach.finder" else {}),
                 "EXAppExtensionAttributes": {
                     "EXExtensionPointIdentifier": "com.apple.fskit.fsmodule",
                     "FSActivateOptionSyntax": {"shortOptions": "o:"},
@@ -203,7 +204,7 @@ class SignatureInspectionTests(unittest.TestCase):
     def test_extracted_leaf_must_match_selected_identity(self):
         certificate = b"fixture public certificate, not signing material"
         fingerprint = hashlib.sha1(certificate).hexdigest().upper()
-        details = b"Authority=Developer ID Application: Fixture\nTeamIdentifier=FIXTURE1234\nflags=10000(runtime)\nTimestamp=fixture\n"
+        details = b"Authority=Developer ID Application: Fixture\nTeamIdentifier=FIXTURE123\nflags=10000(runtime)\nTimestamp=fixture\n"
         result = SimpleNamespace(returncode=0, stdout=b"", stderr=details)
         with tempfile.TemporaryDirectory(prefix="reporeach-signature-test-") as folder:
             private = pathlib.Path(folder)
@@ -219,22 +220,35 @@ class SignatureInspectionTests(unittest.TestCase):
                 return b""
 
             with mock.patch.object(signing, "run", side_effect=run), mock.patch.object(signing.subprocess, "run", return_value=result):
-                signing.verify_signature(path, fingerprint, "FIXTURE1234", private)
+                signing.verify_signature(path, fingerprint, "FIXTURE123", private)
                 with self.assertRaisesRegex(ValueError, "different identity"):
-                    signing.verify_signature(path, "0" * 40, "FIXTURE1234", private)
+                    signing.verify_signature(path, "0" * 40, "FIXTURE123", private)
 
 
 class SigningBoundaryTests(SigningFixtures):
     def signing_context(self):
-        requested = {signing.packaging.FSMODULE: True, signing.packaging.SANDBOX: True}
+        requested = {signing.packaging.FSMODULE: True, signing.packaging.SANDBOX: True, signing.packaging.APP_GROUPS: [signing.packaging.GROUP_TEMPLATE]}
         calls = []
+        self.captured_claims = {}
 
         def run(*arguments):
             calls.append(arguments)
             if arguments[0] == "git":
-                return plistlib.dumps(requested if "FSKitExtension" in arguments[-1] else {signing.packaging.SANDBOX: True})
+                if "FSKitExtension" in arguments[-1]:
+                    value = requested
+                elif "FinderExtension" in arguments[-1]:
+                    value = {signing.packaging.SANDBOX: True}
+                else:
+                    value = {signing.packaging.APP_GROUPS: [signing.packaging.GROUP_TEMPLATE]}
+                return plistlib.dumps(value)
             if arguments[0] == "lipo":
                 return b"arm64"
+            if arguments[0] == "codesign":
+                if "--entitlements" in arguments:
+                    path = pathlib.Path(arguments[arguments.index("--entitlements") + 1])
+                    self.captured_claims[pathlib.Path(arguments[-1]).name] = plistlib.loads(path.read_bytes())
+                else:
+                    self.captured_claims[pathlib.Path(arguments[-1]).name] = {}
             return b""
 
         stack = __import__("contextlib").ExitStack()
@@ -244,17 +258,23 @@ class SigningBoundaryTests(SigningFixtures):
         stack.enter_context(mock.patch.object(signing.sys, "platform", "darwin"))
         stack.enter_context(mock.patch.object(signing.packaging, "run", return_value=(b"arm64", b"")))
         stack.enter_context(mock.patch.object(signing.packaging, "decode_profile", return_value={"fixture": True}))
-        authorize = stack.enter_context(mock.patch.object(signing.packaging, "authorize_profile", return_value=requested))
+        authorize = stack.enter_context(mock.patch.object(signing.packaging, "authorize_profile", return_value=signing.packaging.resolve_entitlements(requested, self.args.team)))
         signed = stack.enter_context(mock.patch.object(signing.packaging, "signed"))
         return calls, authorize, signed
 
     def test_only_verified_profile_bound_components_are_published_in_isolated_output(self):
         calls, authorize, signed = self.signing_context()
         signing.sign(self.args)
-        authorize.assert_called_once_with({"fixture": True}, signing.packaging.MODULE_ID, {signing.packaging.FSMODULE: True, signing.packaging.SANDBOX: True}, certificate=b"fixture certificate", team=self.args.team)
+        authorize.assert_called_once_with({"fixture": True}, signing.packaging.MODULE_ID, {signing.packaging.FSMODULE: True, signing.packaging.SANDBOX: True, signing.packaging.APP_GROUPS: [self.args.team + ".rr"]}, certificate=b"fixture certificate", team=self.args.team)
         order = [pathlib.Path(call[-1]).name for call in calls if call[0] == "codesign"]
         self.assertEqual(order, ["artifact-fs", "gh", "RepoReachFSKit.appex", "RepoReachFinder.appex", "RepoReach.app"])
         self.assertEqual(signing.verify_signature.call_count, 5)
+        group = {signing.packaging.APP_GROUPS: [self.args.team + ".rr"]}
+        self.assertEqual(self.captured_claims["artifact-fs"], group)
+        self.assertEqual(self.captured_claims["RepoReach.app"], group)
+        self.assertEqual(self.captured_claims["RepoReachFSKit.appex"][signing.packaging.APP_GROUPS], group[signing.packaging.APP_GROUPS])
+        self.assertEqual(self.captured_claims["gh"], {})
+        self.assertNotIn(signing.packaging.APP_GROUPS, self.captured_claims["RepoReachFinder.appex"])
         signed.assert_called_once()
         products = list((self.folder / "build/fskit-validation/signed").glob("arm64-*"))
         self.assertEqual(len(products), 1)
@@ -264,8 +284,14 @@ class SigningBoundaryTests(SigningFixtures):
         self.assertFalse(metadata["distribution"])
         self.assertFalse(metadata["mountedValidationPassed"])
         self.assertFalse(metadata["extensionActivationAuthorized"])
+        self.assertEqual(metadata["appGroupIdentifier"], self.args.team + ".rr")
+        self.assertEqual(signing.digest(self.archive), self.args.archive_sha256)
         module = products[0] / "RepoReach.app" / signing.packaging.MODULE_PATH
         self.assertEqual((module / "Contents/embedded.provisionprofile").read_bytes(), self.profile.read_bytes())
+        for bundle in (products[0] / "RepoReach.app", module):
+            self.assertEqual(plistlib.loads((bundle / "Contents/Info.plist").read_bytes())[signing.packaging.GROUP_INFO], self.args.team + ".rr")
+        with zipfile.ZipFile(self.archive) as archive:
+            self.assertEqual(plistlib.loads(archive.read("RepoReach.app/Contents/Info.plist"))[signing.packaging.GROUP_INFO], ".rr")
         with self.assertRaisesRegex(ValueError, "overwrite"):
             signing.sign(self.args)
 
@@ -276,6 +302,23 @@ class SigningBoundaryTests(SigningFixtures):
             signing.sign(self.args)
         self.assertFalse(any(call[0] == "codesign" for call in calls))
         self.assertEqual(list((self.folder / "build/fskit-validation/signed").iterdir()), [])
+
+    def test_input_without_group_metadata_cannot_gain_new_ipc_claims(self):
+        info_path = "RepoReach.app/" + signing.packaging.MODULE_PATH + "/Contents/Info.plist"
+        info = plistlib.loads(self.files[info_path])
+        del info[signing.packaging.GROUP_INFO]
+        self.files[info_path] = plistlib.dumps(info)
+        self.write_archive()
+        calls, _, _ = self.signing_context()
+        with self.assertRaisesRegex(ValueError, "same app group"):
+            signing.sign(self.args)
+        self.assertFalse(any(call[0] == "codesign" for call in calls))
+        self.assertEqual(list((self.folder / "build/fskit-validation/signed").iterdir()), [])
+
+    def test_participant_source_cannot_add_network_or_foreign_group_claims(self):
+        for template in ({signing.packaging.APP_GROUPS: ["OTHERTEAM1.rr"]}, {signing.packaging.APP_GROUPS: [signing.packaging.GROUP_TEMPLATE], "com.apple.security.network.client": True}, {}):
+            with self.subTest(template=template), mock.patch.object(signing, "run", return_value=plistlib.dumps(template)), self.assertRaisesRegex(ValueError, "only the Team-prefix"):
+                signing.participant_entitlements(self.args.source_revision, self.args.team)
 
     def test_changed_archive_is_rechecked_before_profile_or_signing(self):
         calls, _, _ = self.signing_context()
@@ -303,7 +346,7 @@ class SigningBoundaryTests(SigningFixtures):
 
     def test_invalid_identity_is_rejected_before_certificate_export(self):
         with mock.patch.object(signing, "run") as run, self.assertRaisesRegex(ValueError, "fingerprint"):
-            signing.identity_certificate("Developer ID name", "FIXTURE1234")
+            signing.identity_certificate("Developer ID name", "FIXTURE123")
         run.assert_not_called()
 
     def test_output_parents_writable_by_other_users_are_rejected(self):

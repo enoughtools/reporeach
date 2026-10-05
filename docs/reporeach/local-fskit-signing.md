@@ -55,6 +55,8 @@ case or Unicode collisions, privileged modes and excessive expansion. Inert
 AppleDouble metadata is omitted. The app, both extensions and helpers must have
 the selected architecture and their expected identities.
 
+The utility resolves the runtime app-group identifier and entitlement templates from the verified signing team. The app, `artifact-fs` and FSKit module claim the same macOS Team-ID-prefixed `<TeamID>.rr` group; `gh` and Finder do not need that connection. A Team-ID-prefixed macOS group needs no separate group profile or portal registration. The FSKit module still requires its own profile to authorize the restricted filesystem capability.
+
 The utility signs `artifact-fs`, `gh`, the profile-bound FSKit module, the Finder
 extension and the app in that order. Every component must pass strict signature,
 certificate, team, hardened-runtime and timestamp checks. The FSKit module then

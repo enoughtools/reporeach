@@ -50,7 +50,7 @@ type fsKitMountIdentity struct {
 
 type fsKitMountOperations struct {
 	ready       func() bool
-	start       func(context.Context, string, *catalogfs.FileSystem) (platformBridge, error)
+	start       func(context.Context, string, string, *catalogfs.FileSystem) (platformBridge, error)
 	command     func(context.Context, string, ...string) error
 	rootFSID    func(string) ([2]int32, error)
 	mounts      func() ([]fsKitMountIdentity, error)
@@ -62,8 +62,8 @@ type fsKitMountOperations struct {
 func nativeFSKitOperations(logger *slog.Logger) fsKitMountOperations {
 	return fsKitMountOperations{
 		ready: platformDependencyReady,
-		start: func(ctx context.Context, source string, fs *catalogfs.FileSystem) (platformBridge, error) {
-			return fsbridge.Start(ctx, source, fs)
+		start: func(ctx context.Context, source, socketDir string, fs *catalogfs.FileSystem) (platformBridge, error) {
+			return fsbridge.StartWithSocketDirectory(ctx, source, socketDir, fs)
 		},
 		command: func(ctx context.Context, program string, args ...string) error {
 			return runFSKitMountCommandLogged(ctx, logger, program, args...)
@@ -207,8 +207,21 @@ func (s *Service) mountNativeFSKit(ctx context.Context, root string, fs *catalog
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	if s.opts.FSKitSocketDir == "" {
+		return nil, errors.New("the shared File System Extension connection folder is missing; start the service from the RepoReach app")
+	}
+	if !filepath.IsAbs(s.opts.FSKitSocketDir) || pathsLexicallyOverlap(root, s.opts.FSKitSocketDir) {
+		return nil, errors.New("the File System Extension connection folder must be absolute and outside the repository mount folder")
+	}
 	if !ops.ready() {
 		return nil, errors.New(platformDependencyMessage())
+	}
+	if err := privateDirectory(s.opts.FSKitSocketDir, false); err != nil {
+		return nil, errors.New("the private shared File System Extension connection folder is unavailable")
+	}
+	socketDir, err := filepath.EvalSymlinks(s.opts.FSKitSocketDir)
+	if err != nil || pathsOverlap(root, socketDir) {
+		return nil, errors.New("mount folder and File System Extension connection folder must be separate")
 	}
 	canonicalRoot, err := filepath.EvalSymlinks(root)
 	if err != nil {
@@ -240,7 +253,7 @@ func (s *Service) mountNativeFSKit(ctx context.Context, root string, fs *catalog
 	}
 	// Starting a bridge does not grant the requesting context ownership of its
 	// eventual kernel mount. Cancellation is handled explicitly below.
-	bridge, err := ops.start(context.WithoutCancel(ctx), source, fs)
+	bridge, err := ops.start(context.WithoutCancel(ctx), source, socketDir, fs)
 	if err != nil {
 		return nil, errors.New("the File System Extension connection could not be started")
 	}

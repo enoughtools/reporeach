@@ -21,7 +21,7 @@ struct FSBridgeConfiguration: CustomDebugStringConvertible, Sendable {
         self.token = token
     }
 
-    static func load(from url: URL) throws -> FSBridgeConfiguration {
+    static func load(from url: URL, container: FSBridgeContainer? = nil) throws -> FSBridgeConfiguration {
         guard url.isFileURL else { throw FSBridgeError.invalidConfiguration }
         let fd = Darwin.open(url.path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK)
         guard fd >= 0 else { throw FSBridgeError.invalidConfiguration }
@@ -54,7 +54,12 @@ struct FSBridgeConfiguration: CustomDebugStringConvertible, Sendable {
         guard let document = try? JSONDecoder().decode(Document.self, from: bytes), document.version == 1 else {
             throw FSBridgeError.invalidConfiguration
         }
-        return try FSBridgeConfiguration(socketPath: document.socket, token: document.token)
+        let configuration = try FSBridgeConfiguration(socketPath: document.socket, token: document.token)
+        if let container {
+            do { try container.validateSocket(path: configuration.socketPath) }
+            catch { throw FSBridgeError.invalidConfiguration }
+        }
+        return configuration
     }
 
     var authorizationHeader: String { "Bearer \(token)" }

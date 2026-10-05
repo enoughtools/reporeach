@@ -53,7 +53,7 @@ gh run download RUN_ID --repo enoughtools/reporeach --name fskit-local-validatio
 
 The optional artifacts contain the compiled app, bundled FSKit module, real Go
 engine, verified GitHub CLI and dependency notices. The `--validation-artifact`
-build option writes them under `build/fskit-validation/products/<architecture>`
+build option writes them under `build/fskit-validation/products/<architecture>` (or a generation-specific absolute `--validation-root` directory)
 with source identity, toolchain versions, SHA-256 checksums and an explicit
 local-validation marker. They require a clean committed source checkout.
 They are unprovisioned and unsigned for distribution. Local signing may require

@@ -435,6 +435,9 @@ func TestDesktopAdoptionServer(t *testing.T) {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	args := []string{"desktop", "serve", "--state-dir", os.Getenv("AFS_E2E_DESKTOP_STATE"), "--mount-root", os.Getenv("AFS_E2E_DESKTOP_MOUNT"), "--socket", os.Getenv("AFS_E2E_DESKTOP_SOCKET"), "--gh", os.Getenv("AFS_E2E_DESKTOP_GH")}
+	if directory := os.Getenv("AFS_E2E_DESKTOP_FSKIT_SOCKET_DIR"); directory != "" {
+		args = append(args, "--fskit-socket-dir", directory)
+	}
 	if code := cli.Run(ctx, args, os.Stdout, os.Stderr); code != 0 {
 		t.Fatalf("desktop server returned exit code %d", code)
 	}

@@ -94,7 +94,7 @@ jobs:
       - name: FSKit acceptance module selection regressions
         if: matrix.architecture == 'arm64'
         # Pure selection validation; no installed module, confirmation or mount.
-        run: go test -run '^(TestSelectedFSKitModuleIdentifier|TestFSKitInstalledInspectionEvidence)$' -count=1 .
+        run: go test -run '^(TestSelectedFSKitModuleIdentifier|TestFSKitInstalledInspectionEvidence|TestFSKitAcceptanceSigningIdentity|TestFSKitAcceptanceGroupClaims|TestFSKitContainerResolution|TestFSKitAcceptanceModuleClaims|TestFSKitContainerDirectory)$' -count=1 .
       - name: Native unit tests
         run: |
           xcodebuild -project native/RepoReach.xcodeproj -scheme RepoReach \
@@ -114,7 +114,8 @@ jobs:
         if: matrix.architecture == 'arm64'
         run: |
           mkdir -p build/fsbridge-smoke
-          swiftc -parse-as-library native/FSKitExtension/BridgeConfiguration.swift \
+          swiftc -parse-as-library native/Shared/FSBridgeContainer.swift \
+            native/FSKitExtension/BridgeConfiguration.swift \
             native/FSKitExtension/BridgeModels.swift native/FSKitExtension/BridgeTransport.swift \
             native/FSKitExtension/BridgeClient.swift native/Tools/fsbridge-smoke.swift \
             -o build/fsbridge-smoke/check
@@ -126,6 +127,7 @@ jobs:
         run: |
           mkdir -p build/fsbridge-smoke
           xcrun swiftc -parse-as-library -target arm64-apple-macos15.4 \
+            native/Shared/FSBridgeContainer.swift \
             native/FSKitExtension/BridgeModels.swift native/FSKitExtension/BridgeConfiguration.swift \
             native/FSKitExtension/BridgeTransport.swift native/FSKitExtension/BridgeClient.swift \
             native/FSKitExtension/RepoReachVolume.swift native/Tools/fsbridge-volume-smoke.swift \
@@ -206,7 +208,7 @@ jobs:
       - name: FSKit acceptance module selection regressions
         if: matrix.architecture == 'arm64'
         # Keep the root Darwin tests covered on both supported CI OS versions.
-        run: go test -run '^(TestSelectedFSKitModuleIdentifier|TestFSKitInstalledInspectionEvidence)$' -count=1 .
+        run: go test -run '^(TestSelectedFSKitModuleIdentifier|TestFSKitInstalledInspectionEvidence|TestFSKitAcceptanceSigningIdentity|TestFSKitAcceptanceGroupClaims|TestFSKitContainerResolution|TestFSKitAcceptanceModuleClaims|TestFSKitContainerDirectory)$' -count=1 .
       - name: Compile bundled FSKit app and check ExtensionKit layout
         env:
           ARCHITECTURE: ${{ matrix.architecture }}
@@ -234,7 +236,8 @@ jobs:
         if: matrix.architecture == 'arm64'
         run: |
           mkdir -p build/fsbridge-smoke
-          swiftc -parse-as-library native/FSKitExtension/BridgeConfiguration.swift \
+          swiftc -parse-as-library native/Shared/FSBridgeContainer.swift \
+            native/FSKitExtension/BridgeConfiguration.swift \
             native/FSKitExtension/BridgeModels.swift native/FSKitExtension/BridgeTransport.swift \
             native/FSKitExtension/BridgeClient.swift native/Tools/fsbridge-smoke.swift \
             -o build/fsbridge-smoke/check
@@ -246,6 +249,7 @@ jobs:
         run: |
           mkdir -p build/fsbridge-smoke
           xcrun swiftc -parse-as-library -target arm64-apple-macos15.4 \
+            native/Shared/FSBridgeContainer.swift \
             native/FSKitExtension/BridgeModels.swift native/FSKitExtension/BridgeConfiguration.swift \
             native/FSKitExtension/BridgeTransport.swift native/FSKitExtension/BridgeClient.swift \
             native/FSKitExtension/RepoReachVolume.swift native/Tools/fsbridge-volume-smoke.swift \

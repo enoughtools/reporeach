@@ -25,6 +25,8 @@ targets:
     platform: macOS
     sources:
       - path: App
+        excludes:
+          - '*.entitlements'
       - path: Resources
       - path: Shared
     settings:
@@ -65,6 +67,7 @@ targets:
       - path: FSKitExtension/BridgeClient.swift
       - path: FSKitExtension/BridgeConfiguration.swift
       - path: FSKitExtension/BridgeTransport.swift
+      - path: Shared/FSBridgeContainer.swift
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.enoughtools.reporeach.tests
