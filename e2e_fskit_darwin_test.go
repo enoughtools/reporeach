@@ -16,6 +16,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -348,7 +349,151 @@ func fsKitAcceptanceModule(t *testing.T) {
 	if info, err := os.Stat(filepath.Join(module, "Contents", "MacOS", executable)); err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 {
 		t.Fatalf("installed native module executable: %v, %v", info, err)
 	}
+	fsKitInspectInstalledModule(t, moduleID, module)
 	t.Logf("Darwin native acceptance uses already installed module %s with identifier %s version %s (%s); matching source and enablement explicitly confirmed by operator", module, moduleID, read("CFBundleShortVersionString"), read("CFBundleVersion"))
+}
+
+type fsKitInspectionCandidate struct {
+	ModuleID   string `json:"module_id"`
+	ModulePath string `json:"module_path"`
+}
+
+type fsKitInstalledInspection struct {
+	OK                 bool                       `json:"ok"`
+	ExpectedModuleID   string                     `json:"expected_module_id"`
+	ExpectedModulePath string                     `json:"expected_module_path"`
+	ShortName          string                     `json:"short_name"`
+	CandidateCount     int                        `json:"candidate_count"`
+	Candidates         []fsKitInspectionCandidate `json:"candidates"`
+	Unknowns           *[]json.RawMessage         `json:"unknowns"`
+	OutputTruncated    *bool                      `json:"output_truncated"`
+}
+
+func validateFSKitInstalledInspection(result fsKitInstalledInspection, moduleID, modulePath string) error {
+	if !result.OK || result.OutputTruncated == nil || *result.OutputTruncated || result.Unknowns == nil || len(*result.Unknowns) != 0 ||
+		result.ExpectedModuleID != moduleID || result.ExpectedModulePath != modulePath || result.ShortName != "reporeach" ||
+		result.CandidateCount != 1 || len(result.Candidates) != 1 || result.Candidates[0].ModuleID != moduleID || result.Candidates[0].ModulePath != modulePath {
+		return errors.New("public FSKit discovery did not establish the selected module as the sole enabled reporeach filesystem")
+	}
+	return nil
+}
+
+func fsKitInspectInstalledModule(t *testing.T, moduleID, modulePath string) {
+	t.Helper()
+	canonical, err := filepath.EvalSymlinks(modulePath)
+	if err != nil {
+		t.Fatalf("canonical installed native module path: %v", err)
+	}
+	inspector := os.Getenv("AFS_FSKIT_INSPECTOR")
+	if inspector == "" {
+		architecture := map[string]string{"arm64": "arm64", "amd64": "x86_64"}[runtime.GOARCH]
+		if architecture == "" {
+			t.Fatal("public FSKit inspector requires Apple Silicon or Intel macOS")
+		}
+		inspector = filepath.Join(t.TempDir(), "inspect-fskit-module")
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		output, err := fsKitInspectorCommand(ctx, "/usr/bin/xcrun", "swiftc", "-parse-as-library", "-target", architecture+"-apple-macos15.4",
+			"native/Tools/inspect-fskit-module.swift", "-o", inspector)
+		cancel()
+		if err != nil {
+			t.Fatalf("build read-only FSKit discovery inspector: %v\n%s", err, auth.RedactString(string(output)))
+		}
+	} else {
+		info, err := os.Stat(inspector)
+		if !filepath.IsAbs(inspector) || err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 {
+			t.Fatal("AFS_FSKIT_INSPECTOR must name an absolute, regular executable built from the matching inspection source")
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	output, err := fsKitInspectorCommand(ctx, inspector, moduleID, canonical)
+	if err != nil {
+		t.Fatalf("public FSKit installed-module selection could not be established: %v\n%s", err, auth.RedactString(string(output)))
+	}
+	var result fsKitInstalledInspection
+	if err := json.Unmarshal(output, &result); err != nil {
+		t.Fatalf("invalid public FSKit discovery response: %v", err)
+	}
+	if err := validateFSKitInstalledInspection(result, moduleID, canonical); err != nil {
+		t.Fatalf("%v\n%s", err, auth.RedactString(string(output)))
+	}
+	t.Logf("public FSKit discovery verified the sole enabled reporeach identifier and exact module path: %s", auth.RedactString(string(output)))
+}
+
+type fsKitInspectorOutput struct {
+	data      []byte
+	truncated bool
+}
+
+func (w *fsKitInspectorOutput) Write(p []byte) (int, error) {
+	const limit = 64 * 1024
+	n := min(len(p), limit-len(w.data))
+	w.data = append(w.data, p[:n]...)
+	w.truncated = w.truncated || n != len(p)
+	return len(p), nil
+}
+
+func fsKitInspectorCommand(ctx context.Context, program string, args ...string) ([]byte, error) {
+	command := exec.CommandContext(ctx, program, args...)
+	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	command.Cancel = func() error {
+		if command.Process == nil {
+			return os.ErrProcessDone
+		}
+		err := unix.Kill(-command.Process.Pid, unix.SIGKILL)
+		if errors.Is(err, unix.ESRCH) {
+			return os.ErrProcessDone
+		}
+		return err
+	}
+	command.WaitDelay = 2 * time.Second
+	output := &fsKitInspectorOutput{}
+	// Identical comparable output writers are copied by one exec goroutine.
+	command.Stdout, command.Stderr = output, output
+	err := command.Run()
+	if output.truncated {
+		return nil, errors.New("public FSKit inspector output exceeded its bound")
+	}
+	return output.data, err
+}
+
+func TestFSKitInstalledInspectionEvidence(t *testing.T) {
+	const identifier, path = "com.enoughtools.reporeach.validation.fskit", "/fixture/RepoReachFSKit.appex"
+	empty := []json.RawMessage{}
+	falseValue := false
+	base := fsKitInstalledInspection{
+		OK: true, ExpectedModuleID: identifier, ExpectedModulePath: path, ShortName: "reporeach",
+		CandidateCount: 1, Candidates: []fsKitInspectionCandidate{{ModuleID: identifier, ModulePath: path}},
+		Unknowns: &empty, OutputTruncated: &falseValue,
+	}
+	for _, test := range []struct {
+		name   string
+		change func(*fsKitInstalledInspection)
+		valid  bool
+	}{
+		{name: "verified exact selection", change: func(*fsKitInstalledInspection) {}, valid: true},
+		{name: "absent discovery", change: func(r *fsKitInstalledInspection) { r.OK = false }},
+		{name: "ambiguous discovery", change: func(r *fsKitInstalledInspection) { r.CandidateCount = 2 }},
+		{name: "other module selected", change: func(r *fsKitInstalledInspection) { r.Candidates[0].ModuleID = "com.enoughtools.reporeach.fskit" }},
+		{name: "different installed copy", change: func(r *fsKitInstalledInspection) { r.Candidates[0].ModulePath = "/another/copy.appex" }},
+		{name: "unknown competing metadata", change: func(r *fsKitInstalledInspection) {
+			unknown := []json.RawMessage{json.RawMessage(`{"reason":"unreadable"}`)}
+			r.Unknowns = &unknown
+		}},
+		{name: "missing unknown inventory", change: func(r *fsKitInstalledInspection) { r.Unknowns = nil }},
+		{name: "missing output bound", change: func(r *fsKitInstalledInspection) { r.OutputTruncated = nil }},
+		{name: "truncated output", change: func(r *fsKitInstalledInspection) { value := true; r.OutputTruncated = &value }},
+		{name: "self-test result cannot establish module selection", change: func(r *fsKitInstalledInspection) { r.ExpectedModuleID = ""; r.CandidateCount = 0; r.Candidates = nil }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			result := base
+			result.Candidates = append([]fsKitInspectionCandidate(nil), base.Candidates...)
+			test.change(&result)
+			if err := validateFSKitInstalledInspection(result, identifier, path); (err == nil) != test.valid {
+				t.Fatalf("selection evidence accepted=%v want %v: %v", err == nil, test.valid, err)
+			}
+		})
+	}
 }
 
 type fsKitAcceptanceHarness struct {

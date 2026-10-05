@@ -9,6 +9,7 @@ This is a narrow acceptance harness, not complete native release qualification. 
 - macOS 26 or later, with the `reporeach` FSKit module already installed and enabled in normal System Settings.
 - An installed `RepoReach.app` containing `Contents/Extensions/RepoReachFSKit.appex`, whose compiled filesystem implementation matches the verified native source under test. Record separate app and helper revisions and any validation-only bundle-metadata changes as described below. Building the extension requires Xcode 26 or later and the macOS 26 SDK; installation also requires the appropriate signing and FSKit entitlement authorization.
 - Native Git available on `PATH`, and Go 1.26.8 or toolchain download access.
+- Public FSKit discovery must identify the selected module identifier and exact module path as the sole enabled filesystem advertising `reporeach`. The read-only inspector fails on absent candidates, duplicate registrations, competing enabled modules, unreadable metadata, or incomplete output before the harness creates a fixture or asks to mount.
 - A disposable test session in which you can retain the private fixture and helper process if normal cleanup is refused.
 
 Set `AFS_FSKIT_APP` to the absolute path of that installed app. `AFS_FSKIT_MODULE_CONFIRMED=1` is your explicit assertion that the selected installed module matches the source being tested and is already enabled. Bundle metadata checks cannot prove source provenance or extension activation; an actual successful mount is required. Do not set the assertion merely because an app bundle exists.
@@ -29,6 +30,27 @@ metadata, signing or registration alone does not establish enablement. Record
 the native app's CI source revision separately from the test/helper checkout
 revision when they differ, including the relevant differences; do not claim
 source equality from the presence of an executable or a successful mount.
+
+The harness normally builds [the read-only inspector](../../native/Tools/inspect-fskit-module.swift)
+from the current checkout with local Swift, then queries the public
+`FSClient.installedExtensions` API. Compilation is limited to 60 seconds and
+inspection to 20 seconds; the inspector itself stops after 15 seconds and bounds
+its JSON output. On this development host, the SDK 15.5 build reported only three
+Apple modules even after owner enablement of RepoReach Validation. That result
+does not establish that the validation extension is disabled, absent, or selected;
+it cannot satisfy the precondition and must not be bypassed.
+
+If local discovery is incomplete, use `AFS_FSKIT_INSPECTOR` to name the absolute
+path of the standalone SDK 26 inspection executable exported by a manual
+`validation_artifacts=true` CI run. The separate `fskit-module-inspector-arm64`
+artifact contains `inspect-fskit-module.zip`, `inspect-fskit-module.json`, and
+`SHA256SUMS`. Before executing it, verify the ZIP hash, extracted executable hash,
+clean source revision, architecture, SDK/Xcode versions, and
+`inspectorSourceSha256` against the exact inspector source in the checkout under
+test. Record these facts separately from the installed app's native revision.
+This artifact is a read-only diagnostic and does not modify, sign, install, or
+enable an app. A newer SDK build must still prove the exact selected module; its
+compilation alone is insufficient.
 
 ## Run
 
@@ -53,6 +75,7 @@ AFS_RUN_FSKIT_E2E_TESTS=1 \
 AFS_FSKIT_APP=/absolute/path/to/isolated/RepoReach.app \
 AFS_FSKIT_MODULE_ID=com.enoughtools.reporeach.validation.fskit \
 AFS_FSKIT_MODULE_CONFIRMED=1 \
+AFS_FSKIT_INSPECTOR=/absolute/path/to/verified/inspect-fskit-module \
 go test -run '^TestFSKitMountedAcceptance$' -count=1 -v -timeout=20m .
 ```
 
@@ -89,3 +112,7 @@ Only after that command succeeds and the fixture volume is confirmed detached sh
 ## Record evidence
 
 Save the full test output together with the source revision and working-tree state, macOS and Xcode versions, architecture, installed app/module build, and signing/profile facts. Record whether the test completed a real mount and whether cleanup succeeded. Keep historical FUSE release records unchanged; they are evidence for their own backend and release.
+
+Include the inspector's source/build provenance and its successful bounded JSON
+selection report. GUI enablement and public discovery are separate evidence;
+neither substitutes for the subsequent mounted filesystem checks.

@@ -16,7 +16,7 @@ on:
         type: boolean
         default: false
       validation_artifacts:
-        description: Export unsigned bundled FSKit apps for local authorized signing and testing; never publish a release
+        description: Export unsigned FSKit test apps and a read-only module inspector; never publish a release
         type: boolean
         default: false
 
@@ -91,10 +91,10 @@ jobs:
         env:
           ARCHITECTURE: ${{ matrix.architecture }}
         run: scripts/build-macos.sh --backend macfuse --compile-only --arch "$ARCHITECTURE" --unsigned
-      - name: FSKit acceptance module selection regression
+      - name: FSKit acceptance module selection regressions
         if: matrix.architecture == 'arm64'
         # Pure selection validation; no installed module, confirmation or mount.
-        run: go test -run '^TestSelectedFSKitModuleIdentifier$' -count=1 .
+        run: go test -run '^(TestSelectedFSKitModuleIdentifier|TestFSKitInstalledInspectionEvidence)$' -count=1 .
       - name: Native unit tests
         run: |
           xcodebuild -project native/RepoReach.xcodeproj -scheme RepoReach \
@@ -155,12 +155,58 @@ jobs:
           xcodebuild -version
           xcrun --sdk macosx --show-sdk-version
           test "$(xcodebuild -version | awk '/^Xcode / {print $2}')" = 26.6
+      - name: Compile and test standalone FSKit module inspector
+        if: matrix.architecture == 'arm64'
+        # A read-only diagnostic, kept outside every app and release package.
+        run: |
+          set -euo pipefail
+          stage=build/fskit-validation/inspector-build/arm64
+          output=build/fskit-validation/inspector/arm64
+          mkdir -p "$stage" "$output"
+          xcrun swiftc -warnings-as-errors -parse-as-library -target arm64-apple-macos26.0 \
+            native/Tools/inspect-fskit-module.swift -o "$stage/inspect-fskit-module"
+          "$stage/inspect-fskit-module" --self-test
+          test "$(xcrun lipo -archs "$stage/inspect-fskit-module")" = arm64
+          python3 scripts/release-manifest.py source --output "$stage/source.json"
+          ditto -c -k --sequesterRsrc "$stage/inspect-fskit-module" "$output/inspect-fskit-module.zip"
+          python3 - <<'PY'
+          import hashlib, json, pathlib, subprocess
+          stage = pathlib.Path("build/fskit-validation/inspector-build/arm64")
+          output = pathlib.Path("build/fskit-validation/inspector/arm64")
+          source = json.loads((stage / "source.json").read_text())
+          if source["dirty"]:
+              raise SystemExit("Inspector artifacts require a clean committed source checkout")
+          def record(path):
+              return {"filename": path.name, "bytes": path.stat().st_size,
+                      "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+          def tool(*arguments):
+              return subprocess.check_output(arguments, text=True).strip()
+          executable = record(stage / "inspect-fskit-module")
+          artifact = record(output / "inspect-fskit-module.zip")
+          metadata = {
+              "purpose": "read-only-fskit-module-inspection", "distribution": False,
+              "source": source, "architecture": "arm64", "minimumMacOS": "26.0",
+              "inspectorSourceSha256": record(pathlib.Path("native/Tools/inspect-fskit-module.swift"))["sha256"],
+              "toolchain": {"xcode": tool("xcodebuild", "-version"),
+                            "macOSSDK": tool("xcrun", "--sdk", "macosx", "--show-sdk-version")},
+              "executable": executable, "artifact": artifact,
+          }
+          (output / "inspect-fskit-module.json").write_text(json.dumps(metadata, indent=2) + "\n")
+          (output / "SHA256SUMS").write_text(f"{artifact['sha256']}  {artifact['filename']}\n")
+          PY
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        if: matrix.architecture == 'arm64' && github.event_name == 'workflow_dispatch' && inputs.validation_artifacts && success()
+        with:
+          name: fskit-module-inspector-arm64
+          path: build/fskit-validation/inspector/arm64/
+          if-no-files-found: error
+          retention-days: 7
       - name: FSKit distribution authorization regression checks
         run: python3 scripts/test-fskit-packaging.py
-      - name: FSKit acceptance module selection regression
+      - name: FSKit acceptance module selection regressions
         if: matrix.architecture == 'arm64'
         # Keep the root Darwin tests covered on both supported CI OS versions.
-        run: go test -run '^TestSelectedFSKitModuleIdentifier$' -count=1 .
+        run: go test -run '^(TestSelectedFSKitModuleIdentifier|TestFSKitInstalledInspectionEvidence)$' -count=1 .
       - name: Compile bundled FSKit app and check ExtensionKit layout
         env:
           ARCHITECTURE: ${{ matrix.architecture }}
