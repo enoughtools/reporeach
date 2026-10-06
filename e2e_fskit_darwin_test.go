@@ -945,6 +945,7 @@ func TestFSKitInstalledInspectionEvidence(t *testing.T) {
 type fsKitAcceptanceHarness struct {
 	root, state, mount, gh, image string
 	prerequisites                 fsKitAcceptancePrerequisites
+	capturedIdentity              fsKitAcceptanceIdentity
 	server                        *desktopAdoptionServer
 	preserve                      bool
 }
@@ -1092,12 +1093,21 @@ func (h *fsKitAcceptanceHarness) stop(t *testing.T) (safe bool) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
-	_, code, err := desktop.Request(ctx, s.socket, http.MethodPost, "/v1/prepare-quit", nil)
-	if err != nil || code != http.StatusOK {
-		t.Errorf("normal prepare-quit failed (%d, %v); preserving fixture %s and daemon PID %d. Inspect %s; close fixture users and retry normal prepare-quit. No forced unmount or process kill was attempted", code, err, h.root, s.cmd.Process.Pid, s.logPath)
+	err := fsKitPrepareQuitWithRetry(ctx, fsKitCleanupRetryOperations{
+		verify: func() error { _, err := h.cleanupInventory(); return err },
+		request: func(ctx context.Context) ([]byte, int, error) {
+			return desktop.Request(ctx, s.socket, http.MethodPost, "/v1/prepare-quit", nil)
+		},
+		pause: fsKitCleanupPause,
+		refusal: func(attempt, code int, err error, body string) {
+			t.Logf("normal prepare-quit attempt %d returned HTTP %d error=%s; refusal JSON: %s", attempt, code, fsKitCleanupErrorDiagnostic(err), body)
+		},
+	})
+	if err != nil {
+		t.Errorf("normal prepare-quit failed (%s); preserving fixture %s and daemon PID %d. Inspect %s; close fixture users and retry normal prepare-quit. No forced unmount or process kill was attempted", fsKitCleanupErrorDiagnostic(err), h.root, s.cmd.Process.Pid, s.logPath)
 		return false
 	}
-	attached, err := h.attached()
+	attached, err := h.cleanupInventory()
 	if err != nil || attached {
 		t.Errorf("cannot confirm private resource detached: attached=%v err=%v; preserving %s and daemon PID %d", attached, err, h.root, s.cmd.Process.Pid)
 		return false
@@ -1128,7 +1138,7 @@ func (h *fsKitAcceptanceHarness) cleanup(t *testing.T) {
 	if !h.stop(t) {
 		return
 	}
-	attached, err := h.attached()
+	attached, err := h.cleanupInventory()
 	if err != nil || attached {
 		t.Errorf("preserving fixture %s: resource still attached=%v or mount-table error=%v", h.root, attached, err)
 		return
@@ -1136,6 +1146,114 @@ func (h *fsKitAcceptanceHarness) cleanup(t *testing.T) {
 	if err := os.RemoveAll(h.root); err != nil {
 		t.Errorf("remove detached private fixture %s: %v", h.root, err)
 	}
+}
+
+type fsKitCleanupRetryOperations struct {
+	verify  func() error
+	request func(context.Context) ([]byte, int, error)
+	pause   func(context.Context, time.Duration) error
+	refusal func(attempt, code int, err error, body string)
+}
+
+func fsKitPrepareQuitWithRetry(ctx context.Context, ops fsKitCleanupRetryOperations) error {
+	const attempts = 3
+	for attempt := 1; attempt <= attempts; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		// A complete cached inventory must establish the same captured session,
+		// or its complete absence, before every normal endpoint attempt.
+		if err := ops.verify(); err != nil {
+			return fmt.Errorf("normal cleanup ownership is uncertain: %w", err)
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		body, code, err := ops.request(ctx)
+		if err == nil && code == http.StatusOK {
+			return nil
+		}
+		ops.refusal(attempt, code, err, fsKitCleanupRefusalDiagnostic(body))
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if attempt == attempts {
+			return fmt.Errorf("normal endpoint refused after %d attempts (last HTTP %d, error=%s)", attempts, code, fsKitCleanupErrorDiagnostic(err))
+		}
+		// Total backoff is 1.5 seconds; all requests share the caller's single
+		// 90-second deadline rather than starting a new deadline per attempt.
+		if err := ops.pause(ctx, time.Duration(attempt)*500*time.Millisecond); err != nil {
+			return err
+		}
+	}
+	panic("unreachable cleanup attempt count")
+}
+
+func fsKitCleanupPause(ctx context.Context, delay time.Duration) error {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+func fsKitCleanupRefusalDiagnostic(body []byte) string {
+	const limit = 4096
+	if len(body) == 0 {
+		return "<empty refusal body>"
+	}
+	if len(body) > limit || !json.Valid(body) {
+		return "<invalid or oversized refusal JSON omitted>"
+	}
+	redacted := auth.RedactString(string(body))
+	if len(redacted) > limit || !json.Valid([]byte(redacted)) {
+		return "<refusal JSON omitted after bounded redaction>"
+	}
+	return redacted
+}
+
+func fsKitCleanupErrorDiagnostic(err error) string {
+	if err == nil {
+		return "<none>"
+	}
+	text := auth.RedactString(err.Error())
+	if len(text) > 4096 {
+		return "<oversized error omitted>"
+	}
+	return text
+}
+
+func (h *fsKitAcceptanceHarness) cleanupInventory() (bool, error) {
+	mounts, err := fsKitAcceptanceMounts()
+	if err != nil {
+		return false, err
+	}
+	return h.validateCleanupInventory(mounts, uint32(os.Getuid()))
+}
+
+func (h *fsKitAcceptanceHarness) validateCleanupInventory(mounts []fsKitAcceptanceIdentity, uid uint32) (bool, error) {
+	const uncertain = "cached inventory does not prove the same owned native session or its complete absence"
+	captured := h.capturedIdentity
+	known := captured.fsid != ([2]int32{})
+	if known && (captured.root != h.mount || captured.owner != uid || captured.kind == "" || !h.sourceMatches(captured.source)) {
+		return false, errors.New(uncertain)
+	}
+	found := false
+	for _, identity := range mounts {
+		byFSID := known && identity.fsid == captured.fsid
+		byRoot := identity.root == h.root || strings.HasPrefix(identity.root, h.root+string(os.PathSeparator))
+		if !byFSID && !byRoot && !h.sourceMatches(identity.source) {
+			continue
+		}
+		if !known || identity != captured || found {
+			return false, errors.New(uncertain)
+		}
+		found = true
+	}
+	return found, nil
 }
 
 // Preserve complete, bounded diagnostic lines before disposable cleanup.
@@ -1287,6 +1405,7 @@ func (h *fsKitAcceptanceHarness) identity(t *testing.T) fsKitAcceptanceIdentity 
 	}
 	for _, identity := range mounts {
 		if identity.root == h.mount && h.sourceMatches(identity.source) && identity.fsid != ([2]int32{}) && identity.kind != "" && identity.owner == uint32(os.Getuid()) {
+			h.capturedIdentity = identity
 			return identity
 		}
 	}
