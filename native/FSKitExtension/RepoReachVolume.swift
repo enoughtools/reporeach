@@ -170,7 +170,7 @@ final class RepoReachVolume: FSVolume, FSVolume.Operations,
     }
     private struct RunningOperation {
         let task: Task<Void, Never>
-        let read: Bool
+        let cancelOnDrain: Bool
     }
     private struct IOResult { let count: Int; let error: Error? }
 
@@ -354,7 +354,7 @@ final class RepoReachVolume: FSVolume, FSVolume.Operations,
             if let shutdownTask { return shutdownTask }
             isClosing = true
             sessionEpoch &+= 1
-            let reads = running.values.filter(\.read).map(\.task)
+            let reads = running.values.filter(\.cancelOnDrain).map(\.task)
             reads.forEach { $0.cancel() }
             let unmount = unmountTask
             let task = Task {
@@ -381,7 +381,7 @@ final class RepoReachVolume: FSVolume, FSVolume.Operations,
             if let unmountTask { return unmountTask }
             isClosing = true
             sessionEpoch &+= 1
-            running.values.filter(\.read).forEach { $0.task.cancel() }
+            running.values.filter(\.cancelOnDrain).forEach { $0.task.cancel() }
             let task = Task { await self.finishUnmount() }
             unmountTask = task
             return task
@@ -547,7 +547,9 @@ final class RepoReachVolume: FSVolume, FSVolume.Operations,
 
     func lookupItem(named name: FSFileName, inDirectory directory: FSItem,
                     replyHandler: @escaping (FSItem?, FSFileName?, Error?) -> Void) {
-        perform(exclusive: true, reply: replyHandler) {
+        // Lookup can run alongside other reads, but it acquires a reference.
+        // Drain must await its response so that reference is recorded first.
+        perform(exclusive: false, cancelOnDrain: false, reply: replyHandler) {
             let parent = try self.directoryState(directory)
             let component = try self.component(name, allowDots: true)
             if component == "." {
@@ -1407,7 +1409,7 @@ final class RepoReachVolume: FSVolume, FSVolume.Operations,
         return NSError(domain: NSPOSIXErrorDomain, code: Int(EIO))
     }
 
-    private func perform<T>(exclusive: Bool, reply: @escaping (T?, Error?) -> Void,
+    private func perform<T>(exclusive: Bool, cancelOnDrain: Bool? = nil, reply: @escaping (T?, Error?) -> Void,
                             operation: @escaping () async throws -> T) {
         let id = UUID()
         let accepted = locked { () -> Bool in
@@ -1430,7 +1432,7 @@ final class RepoReachVolume: FSVolume, FSVolume.Operations,
                 } catch { reply(nil, self.posix(error)) }
                 self.locked { _ = self.running.removeValue(forKey: id) }
             }
-            running[id] = RunningOperation(task: task, read: !exclusive)
+            running[id] = RunningOperation(task: task, cancelOnDrain: cancelOnDrain ?? !exclusive)
             return true
         }
         if !accepted { reply(nil, POSIXError(.ENXIO)) }
@@ -1441,9 +1443,9 @@ final class RepoReachVolume: FSVolume, FSVolume.Operations,
         perform(exclusive: exclusive, reply: { (_: Void?, error: Error?) in reply(error) }, operation: operation)
     }
 
-    private func perform(exclusive: Bool, reply: @escaping (FSItem?, FSFileName?, Error?) -> Void,
+    private func perform(exclusive: Bool, cancelOnDrain: Bool? = nil, reply: @escaping (FSItem?, FSFileName?, Error?) -> Void,
                          operation: @escaping () async throws -> (FSItem, FSFileName)) {
-        perform(exclusive: exclusive, reply: { (value: (FSItem, FSFileName)?, error: Error?) in
+        perform(exclusive: exclusive, cancelOnDrain: cancelOnDrain, reply: { (value: (FSItem, FSFileName)?, error: Error?) in
             reply(value?.0, value?.1, error)
         }, operation: operation)
     }

@@ -763,6 +763,199 @@ final class FSVolumeReadTests: XCTestCase {
          "node": VolumeReadFixture.node(inode: inode ?? UInt64(index + 7), type: "file")]
     }
 
+    func testConcurrentLookupsShareOneItemAndBalanceOutOfOrderReferences() async throws {
+        let firstAccepted = expectation(description: "First lookup accepted")
+        let secondAccepted = expectation(description: "Second lookup overlaps first")
+        let allowFirst = DispatchSemaphore(value: 0)
+        let allowSecond = DispatchSemaphore(value: 0)
+        let fixture = try lookupFixture { request in
+            let name = try self.requestName(request)
+            if name == "first" { firstAccepted.fulfill() }
+            else { XCTAssertEqual(name, "second"); secondAccepted.fulfill() }
+            let barrier = name == "first" ? allowFirst : allowSecond
+            guard barrier.wait(timeout: .now() + 5) == .success else { throw FSBridgeError.timedOut }
+            return try VolumeReadFixture.metadata(["node": VolumeReadFixture.node(inode: 7, type: "file")])
+        }
+        defer { allowFirst.signal(); allowSecond.signal(); fixture.stop() }
+        let (volume, root) = try await prepareDirectory(fixture)
+        let firstFinished = expectation(description: "First lookup replied")
+        let secondFinished = expectation(description: "Second lookup replied first")
+        let first = ItemReply(), second = ItemReply()
+        volume.lookupItem(named: FSFileName(string: "first"), inDirectory: root) { item, _, error in
+            first.store(item: item, error: error); firstFinished.fulfill()
+        }
+        await fulfillment(of: [firstAccepted], timeout: 3)
+        volume.lookupItem(named: FSFileName(string: "second"), inDirectory: root) { item, _, error in
+            second.store(item: item, error: error); secondFinished.fulfill()
+        }
+        await fulfillment(of: [secondAccepted], timeout: 3)
+        allowSecond.signal()
+        await fulfillment(of: [secondFinished], timeout: 3)
+        XCTAssertNil(first.value)
+        allowFirst.signal()
+        await fulfillment(of: [firstFinished], timeout: 3)
+        let firstReply = try XCTUnwrap(first.value), secondReply = try XCTUnwrap(second.value)
+        XCTAssertNil(firstReply.error); XCTAssertNil(secondReply.error)
+        XCTAssertTrue(try XCTUnwrap(firstReply.item) === XCTUnwrap(secondReply.item))
+        try await shutdown(volume)
+        let forgotten = fixture.requests.filter { $0.operation == "forget" }
+        XCTAssertEqual(forgotten.count, 1)
+        XCTAssertEqual(forgotten.first?.inode, 7)
+        let fields = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(forgotten.first).body) as? [String: Any])
+        XCTAssertEqual(fields["n"] as? Int, 2)
+        XCTAssertTrue(fixture.failures.isEmpty)
+    }
+
+    func testSharedLookupsKeepWritersExclusiveAndBlockLaterLookups() async throws {
+        let accepted = expectation(description: "Two shared lookup requests accepted")
+        accepted.expectedFulfillmentCount = 2
+        let allowFirst = DispatchSemaphore(value: 0), allowSecond = DispatchSemaphore(value: 0)
+        let allowWriter = DispatchSemaphore(value: 0)
+        let firstReady = CompletionFlag(), secondReady = CompletionFlag(), writerReady = CompletionFlag()
+        let writerStarted = CompletionFlag()
+        let earlyWriter = expectation(description: "Writer cannot overlap outstanding lookups")
+        earlyWriter.isInverted = true
+        let writerAccepted = expectation(description: "Queued writer accepted after both lookups")
+        let earlyLateLookup = expectation(description: "Later lookup cannot overlap writer")
+        earlyLateLookup.isInverted = true
+        let fixture = try lookupFixture { request in
+            if request.operation == "create" {
+                if !firstReady.value || !secondReady.value { earlyWriter.fulfill() }
+                writerStarted.complete(); writerAccepted.fulfill()
+                guard allowWriter.wait(timeout: .now() + 5) == .success else { throw FSBridgeError.timedOut }
+                writerReady.complete()
+                return try VolumeReadFixture.metadata(["node": VolumeReadFixture.node(inode: 8, type: "file"), "handle": 101])
+            }
+            let name = try self.requestName(request)
+            if name == "later" {
+                if !writerReady.value { earlyLateLookup.fulfill() }
+            } else {
+                accepted.fulfill()
+                let barrier = name == "first" ? allowFirst : allowSecond
+                guard barrier.wait(timeout: .now() + 5) == .success else { throw FSBridgeError.timedOut }
+                (name == "first" ? firstReady : secondReady).complete()
+            }
+            return try VolumeReadFixture.metadata(["node": VolumeReadFixture.node(inode: 7, type: "file")])
+        }
+        defer { allowFirst.signal(); allowSecond.signal(); allowWriter.signal(); fixture.stop() }
+        let (volume, root) = try await prepareDirectory(fixture)
+        let firstFinished = expectation(description: "First shared lookup finished")
+        let secondFinished = expectation(description: "Second shared lookup finished")
+        for (name, finished) in [("first", firstFinished), ("second", secondFinished)] {
+            volume.lookupItem(named: FSFileName(string: name), inDirectory: root) { item, _, error in
+                XCTAssertNotNil(item); XCTAssertNil(error); finished.fulfill()
+            }
+        }
+        await fulfillment(of: [accepted], timeout: 3)
+        let writerFinished = expectation(description: "Writer callback finished")
+        volume.createItem(named: FSFileName(string: "created"), type: .file, inDirectory: root,
+                          attributes: FSItem.SetAttributesRequest()) { item, _, error in
+            XCTAssertNotNil(item); XCTAssertNil(error); writerFinished.fulfill()
+        }
+        await fulfillment(of: [earlyWriter], timeout: 0.05)
+        allowFirst.signal()
+        await fulfillment(of: [firstFinished], timeout: 3)
+        XCTAssertFalse(writerStarted.value, "One outstanding lookup must still exclude the writer")
+        allowSecond.signal()
+        await fulfillment(of: [secondFinished, writerAccepted], timeout: 3)
+        let laterFinished = expectation(description: "Later lookup finishes after writer")
+        let later = ItemReply()
+        volume.lookupItem(named: FSFileName(string: "later"), inDirectory: root) { item, _, error in
+            later.store(item: item, error: error); laterFinished.fulfill()
+        }
+        await fulfillment(of: [earlyLateLookup], timeout: 0.05)
+        XCTAssertNil(later.value)
+        allowWriter.signal()
+        await fulfillment(of: [writerFinished, laterFinished], timeout: 3)
+        XCTAssertNil(try XCTUnwrap(later.value).error)
+        let namespace = fixture.requests.filter { $0.operation == "lookup" || $0.operation == "create" }
+        XCTAssertEqual(namespace.map(\.operation), ["lookup", "lookup", "create", "lookup"])
+        try await shutdown(volume)
+        XCTAssertTrue(fixture.failures.isEmpty)
+    }
+
+    func testLookupDrainWaitsForGrantedReferenceBeforeUnmountAndShutdown() async throws {
+        for shuttingDown in [false, true] {
+            let allocated = expectation(description: "Peer granted a lookup reference")
+            let allowReply = DispatchSemaphore(value: 0)
+            let responseReady = CompletionFlag(), referenceForgotten = CompletionFlag(), drained = CompletionFlag()
+            let fixture = try VolumeReadFixture(read: { _ in VolumeReadFixture.binary(Data()) }, metadata: { request in
+                switch request.operation {
+                case "getattr": return try VolumeReadFixture.metadata(["node": VolumeReadFixture.node(inode: 1, type: "dir")])
+                case "statfs": return try VolumeReadFixture.metadata([:])
+                case "lookup":
+                    let name = try self.requestName(request)
+                    if name == "held" {
+                        allocated.fulfill()
+                        guard allowReply.wait(timeout: .now() + 5) == .success else { throw FSBridgeError.timedOut }
+                        responseReady.complete()
+                    }
+                    return try VolumeReadFixture.metadata(["node": VolumeReadFixture.node(inode: 7, type: "file")])
+                case "forget":
+                    XCTAssertTrue(responseReady.value, "An unknown reference must not be forgotten before its response")
+                    let fields = try XCTUnwrap(JSONSerialization.jsonObject(with: request.body) as? [String: Any])
+                    XCTAssertEqual(fields["n"] as? Int, 1)
+                    XCTAssertEqual(request.inode, 7)
+                    referenceForgotten.complete()
+                    return try VolumeReadFixture.metadata([:])
+                default: return VolumeReadFixture.error(EOPNOTSUPP)
+                }
+            })
+            defer { allowReply.signal(); fixture.stop() }
+            let (volume, root) = try await prepareDirectory(fixture)
+            let lookupFinished = expectation(description: "Lookup replies with the learned item")
+            let lookupReply = ItemReply()
+            volume.lookupItem(named: FSFileName(string: "held"), inDirectory: root) { item, _, error in
+                XCTAssertTrue(responseReady.value)
+                lookupReply.store(item: item, error: error); lookupFinished.fulfill()
+            }
+            await fulfillment(of: [allocated], timeout: 3)
+            let drainFinished = expectation(description: "Drain balanced the learned reference")
+            let complete = {
+                XCTAssertTrue(responseReady.value); XCTAssertTrue(referenceForgotten.value)
+                drained.complete(); drainFinished.fulfill()
+            }
+            if shuttingDown { Task { await volume.shutdown(); complete() } }
+            else { volume.unmount(replyHandler: complete) }
+            // This exclusive callback cannot pass the held lookup. ENXIO proves
+            // drain closed admission before we release its response barrier.
+            assertPOSIX(try await close(volume, item: root, modes: []), ENXIO)
+            XCTAssertNil(lookupReply.value); XCTAssertFalse(drained.value)
+            XCTAssertFalse(referenceForgotten.value)
+            allowReply.signal()
+            await fulfillment(of: [lookupFinished, drainFinished], timeout: 3)
+            let learned = try XCTUnwrap(lookupReply.value)
+            XCTAssertNil(learned.error)
+            let oldItem = try XCTUnwrap(learned.item)
+            XCTAssertEqual(fixture.requests.filter { $0.operation == "forget" }.count, 1)
+            if !shuttingDown {
+                let activated = try await activate(volume)
+                XCTAssertNil(activated.error)
+                let fresh = try await lookup(volume, root: XCTUnwrap(activated.item))
+                XCTAssertFalse(fresh === oldItem, "Remount must not reuse the old session's item")
+                try await shutdown(volume)
+                XCTAssertEqual(fixture.requests.filter { $0.operation == "forget" }.count, 2)
+            }
+            XCTAssertTrue(fixture.failures.isEmpty)
+        }
+    }
+
+    private func lookupFixture(response: @escaping (VolumeReadFixture.Request) throws -> Data?) throws -> VolumeReadFixture {
+        try VolumeReadFixture(read: { _ in VolumeReadFixture.binary(Data()) }, metadata: { request in
+            switch request.operation {
+            case "getattr": return try VolumeReadFixture.metadata(["node": VolumeReadFixture.node(inode: 1, type: "dir")])
+            case "lookup", "create": return try response(request)
+            case "statfs", "forget", "fsync", "release": return try VolumeReadFixture.metadata([:])
+            default: return VolumeReadFixture.error(EOPNOTSUPP)
+            }
+        })
+    }
+
+    private func requestName(_ request: VolumeReadFixture.Request) throws -> String {
+        let fields = try XCTUnwrap(JSONSerialization.jsonObject(with: request.body) as? [String: Any])
+        return try XCTUnwrap(fields["name"] as? String)
+    }
+
     private func directoryFixture(entries: [[String: Any]], eof: Bool = true, lookupNode: [String: Any]? = nil,
                                   metadataFailure: @escaping (VolumeReadFixture.Request, Int) -> Int32 = { _, _ in 0 }) throws -> VolumeReadFixture {
         try VolumeReadFixture(read: { _ in VolumeReadFixture.binary(Data()) }, metadataFailure: metadataFailure,

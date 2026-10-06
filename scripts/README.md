@@ -68,6 +68,24 @@ This mode cannot sign, notarize, stage website downloads or publish releases.
 For local Developer ID signing with an authorized profile and independently
 verified CI inputs, follow the [local FSKit signing guide](../docs/reporeach/local-fskit-signing.md).
 
+For the short local fix-and-test loop on Apple Silicon, build a complete signed
+app with the existing authorized Developer ID identity and FSKit profile:
+
+```sh
+scripts/build-macos.sh --local-app --arch arm64
+```
+
+This reuses incremental build data under `build/local-macos/arm64/derived` and
+writes the verified app to `build/local-macos/arm64/stage/RepoReach.app`. It keeps
+the normal profile, entitlement, signature and compiled-product registration
+checks, then stops before ZIP, DMG, notarization or release metadata. Signing
+timestamps remain enabled. The default version is `0.1.0-local.7`; set
+`REPOREACH_BUILD_NUMBER` or `--version` for a later local iteration. The adjacent
+`source.json` and `local-build.json` record the actual source, including dirty
+changes. Installation and extension registration remain explicit steps. Local
+mode cannot be combined with unsigned compilation, validation exports or
+`--notarize`; it never writes to `dist/releases`.
+
 After real backend validation and source freeze, distribution packaging requires
 an existing Developer ID identity and the actual extension-specific Developer
 ID provisioning profile in `REPOREACH_FSKIT_PROFILE`. Choose a new release

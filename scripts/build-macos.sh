@@ -5,26 +5,37 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 export GOTOOLCHAIN=go1.26.8
 ARCH=arm64
 VERSION=0.1.0-beta.3
+VERSION_SPECIFIED=false
 BACKEND=fskit
 COMPILE_ONLY=false
 VALIDATION_ARTIFACT=false
+LOCAL_APP=false
 VALIDATION_ROOT=""
 SIGN_IDENTITY="${REPOREACH_SIGN_IDENTITY:-}"
 NOTARIZE=false
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --arch) ARCH="$2"; shift 2 ;;
-    --version) VERSION="$2"; shift 2 ;;
+    --version) VERSION="$2"; VERSION_SPECIFIED=true; shift 2 ;;
     --backend) BACKEND="$2"; shift 2 ;;
     --compile-only) COMPILE_ONLY=true; shift ;;
+    --local-app) LOCAL_APP=true; shift ;;
     --validation-artifact) COMPILE_ONLY=true; VALIDATION_ARTIFACT=true; SIGN_IDENTITY=""; shift ;;
     --validation-root) test "$#" -ge 2 && test -n "$2" || { echo "--validation-root requires an absolute generation path." >&2; exit 2; }; VALIDATION_ROOT="$2"; shift 2 ;;
     --unsigned) SIGN_IDENTITY=""; shift ;;
     --sign-identity) SIGN_IDENTITY="$2"; shift 2 ;;
     --notarize) NOTARIZE=true; shift ;;
-    *) echo "Usage: $0 [--arch arm64|x86_64] [--version VERSION] [--backend fskit|macfuse] [--compile-only|--validation-artifact [--validation-root ABSOLUTE_PATH]] [--unsigned|--sign-identity ID] [--notarize]" >&2; exit 2 ;;
+    *) echo "Usage: $0 [--arch arm64|x86_64] [--version VERSION] [--backend fskit|macfuse] [--local-app|--compile-only|--validation-artifact [--validation-root ABSOLUTE_PATH]] [--unsigned|--sign-identity ID] [--notarize]" >&2; exit 2 ;;
   esac
 done
+if [ "$LOCAL_APP" = true ]; then
+  if [ "$NOTARIZE" = true ] || [ "$COMPILE_ONLY" = true ] || [ "$VALIDATION_ARTIFACT" = true ] || [ -n "$VALIDATION_ROOT" ]; then
+    echo "--local-app cannot be combined with notarization, compile-only or validation exports." >&2; exit 2
+  fi
+  test "$ARCH" = arm64 && test "$BACKEND" = fskit || { echo "--local-app requires the native FSKit backend and --arch arm64." >&2; exit 2; }
+  test -n "$SIGN_IDENTITY" || { echo "--local-app requires the existing Developer ID signing identity and authorized FSKit profile." >&2; exit 2; }
+  if [ "$VERSION_SPECIFIED" = false ]; then VERSION="0.1.0-local.${REPOREACH_BUILD_NUMBER:-7}"; fi
+fi
 case "$ARCH" in arm64) GO_ARCH=arm64 ;; x86_64) GO_ARCH=amd64 ;; *) echo "Unsupported architecture: $ARCH" >&2; exit 2 ;; esac
 case "$VERSION" in *[!A-Za-z0-9.+-]*|"") echo "Invalid release version" >&2; exit 2 ;; esac
 if [ -n "$VALIDATION_ROOT" ]; then
@@ -40,6 +51,9 @@ if any(parent.is_symlink() or (parent.exists() and not parent.is_dir()) for pare
 PY
 fi
 test "$(uname -s)" = Darwin || { echo "Run macOS packaging on macOS." >&2; exit 1; }
+if [ "$LOCAL_APP" = true ]; then
+  test "$(uname -m)" = arm64 || { echo "--local-app is only available on an Apple Silicon host." >&2; exit 2; }
+fi
 if [ "$VALIDATION_ARTIFACT" = true ] && { [ "$BACKEND" != fskit ] || [ -n "$SIGN_IDENTITY" ] || [ "$NOTARIZE" = true ]; }; then
   echo "--validation-artifact only exports unsigned FSKit products for local validation; it cannot sign, notarize or publish." >&2
   exit 2
@@ -71,9 +85,17 @@ if [ "$COMPILE_ONLY" = true ] && [ "$NOTARIZE" = true ]; then
 fi
 XCODEGEN_BIN="$("$ROOT/scripts/vendor-xcodegen.sh")"
 export PATH="$XCODEGEN_BIN:$PATH"
-OUTPUT="$ROOT/dist/releases/$VERSION"
-STAGE="$ROOT/build/package/$BACKEND/$ARCH"
-DERIVED="$ROOT/build/native/$BACKEND/$ARCH"
+if [ "$LOCAL_APP" = true ]; then
+  OUTPUT=""
+  STAGE="$ROOT/build/local-macos/$ARCH/stage"
+  DERIVED="$ROOT/build/local-macos/$ARCH/derived"
+  mkdir -p "$STAGE"
+  python3 "$ROOT/scripts/release-manifest.py" source --output "$STAGE/source.json"
+else
+  OUTPUT="$ROOT/dist/releases/$VERSION"
+  STAGE="$ROOT/build/package/$BACKEND/$ARCH"
+  DERIVED="$ROOT/build/native/$BACKEND/$ARCH"
+fi
 if [ "$VALIDATION_ARTIFACT" = true ]; then
   VALIDATION_ROOT="${VALIDATION_ROOT:-$ROOT/build/fskit-validation}"
   OUTPUT="$VALIDATION_ROOT/products/$ARCH"
@@ -86,7 +108,7 @@ if [ "$VALIDATION_ARTIFACT" = true ]; then
   mkdir -p "$OUTPUT" "$STAGE"
   python3 "$ROOT/scripts/release-manifest.py" source --output "$STAGE/source.json"
 fi
-if [ "$COMPILE_ONLY" = false ]; then
+if [ "$COMPILE_ONLY" = false ] && [ "$LOCAL_APP" = false ]; then
   BASENAME="RepoReach-${VERSION}-macOS-${ARCH}"
   if [ -e "$OUTPUT/$BASENAME.zip" ] || [ -e "$OUTPUT/$BASENAME.dmg" ]; then
     echo "Release archives already exist for this version and architecture; refusing to overwrite them. Choose a new release version." >&2
@@ -227,6 +249,7 @@ fi
 MARKETING_VERSION="${VERSION%%-*}"
 MARKETING_VERSION="${MARKETING_VERSION%%+*}"
 BUILD_NUMBER="${REPOREACH_BUILD_NUMBER:-3}"
+if [ "$LOCAL_APP" = true ]; then BUILD_NUMBER="${REPOREACH_BUILD_NUMBER:-7}"; fi
 PLISTS=("$APP/Contents/Info.plist" "$APP/Contents/PlugIns/RepoReachFinder.appex/Contents/Info.plist")
 if [ "$BACKEND" = fskit ]; then PLISTS+=("$APP/Contents/Extensions/RepoReachFSKit.appex/Contents/Info.plist"); fi
 for PLIST in "${PLISTS[@]}"; do
@@ -280,6 +303,21 @@ codesign --verify --strict --verbose=2 "$APP"
 if [ "$BACKEND" = fskit ]; then
   python3 "$ROOT/scripts/validate-fskit-bundle.py" signed --app "$APP" --arch "$ARCH" \
     --entitlements "$ROOT/native/FSKitExtension/FSKit.entitlements"
+fi
+if [ "$LOCAL_APP" = true ]; then
+  python3 - "$STAGE/source.json" "$STAGE/local-build.json" "$APP" "$VERSION" "$ARCH" <<'PY_LOCAL_APP'
+import json, pathlib, sys
+
+metadata = {
+    "local": True, "distribution": False, "notarized": False,
+    "version": sys.argv[4], "architecture": sys.argv[5],
+    "app": sys.argv[3], "signature": "developer-id",
+    "source": json.loads(pathlib.Path(sys.argv[1]).read_text()),
+}
+pathlib.Path(sys.argv[2]).write_text(json.dumps(metadata, indent=2) + "\n")
+PY_LOCAL_APP
+  echo "Built signed local app: $APP (no archives or notarization; installation remains explicit)"
+  exit 0
 fi
 NOTARIZED=false
 submit_notary() {

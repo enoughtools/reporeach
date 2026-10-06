@@ -539,6 +539,26 @@ class LocalValidationArtifactTests(unittest.TestCase):
 
 
 class ValidationGenerationFlagsTests(unittest.TestCase):
+    def test_local_app_rejects_release_or_unsigned_modes_before_building(self):
+        script = pathlib.Path(__file__).with_name("build-macos.sh")
+        cases = (
+            (["--local-app", "--notarize"], "cannot be combined"),
+            (["--notarize", "--local-app"], "cannot be combined"),
+            (["--local-app", "--compile-only"], "cannot be combined"),
+            (["--local-app", "--validation-artifact"], "cannot be combined"),
+            (["--validation-artifact", "--local-app"], "cannot be combined"),
+            (["--local-app", "--validation-root", "/ignored"], "cannot be combined"),
+            (["--local-app", "--arch", "x86_64"], "requires the native FSKit"),
+            (["--local-app", "--backend", "macfuse"], "requires the native FSKit"),
+            (["--local-app", "--unsigned"], "requires the existing Developer ID"),
+        )
+        for arguments, expected in cases:
+            with self.subTest(arguments=arguments):
+                result = subprocess.run(["bash", str(script), *arguments], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                self.assertEqual(result.returncode, 2)
+                self.assertIn(expected, result.stderr)
+                self.assertEqual(result.stdout, "")
+
     def test_generation_override_requires_explicit_local_export_and_safe_absolute_path(self):
         script = pathlib.Path(__file__).with_name("build-macos.sh")
         root = script.resolve().parents[1]
