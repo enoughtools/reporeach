@@ -3,6 +3,7 @@ package desktop
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -108,6 +109,7 @@ func (s *Service) cataloguePreview(ctx context.Context, entry catalogfs.Entry, p
 	}
 	s.mu.Lock()
 	repo, ok := s.repositoryLocked(entry.ID)
+	root := s.state.MountRoot
 	enabled := ok && s.repositoryEnabledLocked(repo)
 	s.mu.Unlock()
 	if !enabled {
@@ -117,7 +119,7 @@ func (s *Service) cataloguePreview(ctx context.Context, entry catalogfs.Entry, p
 		return catalogfs.PreviewDirectory{}, catalogfs.ErrPreviewUnavailable
 	}
 	if repo.Source == "manual" {
-		if err := validateManualSourceLocation(repo, s.Status().MountRoot, s.opts.StateDir); err != nil {
+		if err := validateManualSourceLocation(repo, root, s.opts.StateDir); err != nil {
 			return catalogfs.PreviewDirectory{}, err
 		}
 	}
@@ -132,6 +134,38 @@ func (s *Service) cataloguePreview(ctx context.Context, entry catalogfs.Entry, p
 		directory.GitFileSize = uint64(len("gitdir: " + gitDir + "\n"))
 	}
 	return directory, err
+}
+
+func (s *Service) cataloguePreviewContent(ctx context.Context, entry catalogfs.Entry, path, revision string) (*os.File, error) {
+	if !s.hybridCatalogue || s.preview == nil {
+		return nil, catalogfs.ErrPreviewUnavailable
+	}
+	s.mu.Lock()
+	repo, ok := s.repositoryLocked(entry.ID)
+	root := s.state.MountRoot
+	s.mu.Unlock()
+	if !ok || repo.LocalPath != "" {
+		return nil, catalogfs.ErrPreviewUnavailable
+	}
+	if repo.Source == "manual" {
+		if err := validateManualSourceLocation(repo, root, s.opts.StateDir); err != nil {
+			return nil, err
+		}
+	}
+	// Existing file handles may outlive catalogue visibility. They retain the
+	// selected source revision, independently of the current display state.
+	preview, err := s.preview.Acquire(ctx, repo)
+	if err != nil {
+		return nil, err
+	}
+	if preview.Commit != revision {
+		return nil, syscall.ESTALE
+	}
+	file, err := preview.OpenContent(ctx, path)
+	if err == nil {
+		s.notePreviewCachedFile(repo.ID, file)
+	}
+	return file, err
 }
 
 func (s *Service) startPreviewSeeding() {

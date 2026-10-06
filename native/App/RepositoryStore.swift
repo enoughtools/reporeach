@@ -132,7 +132,7 @@ final class RepositoryStore: ObservableObject {
         if let ownerFilter, !owners.contains(where: { $0.caseInsensitiveCompare(ownerFilter) == .orderedSame }) { self.ownerFilter = nil }
         let snapshot = FinderStatusSnapshot(mountRoot: loaded.mountRoot, repositories: loaded.repositories.filter { $0.isEnabled(in: loaded.organizations) }.map {
             FinderRepositoryStatus(id: $0.id, state: $0.state, pinned: $0.pinned, error: $0.error,
-                                   localPath: $0.localPath, localKind: $0.localKind)
+                                   localPath: $0.localPath, localKind: $0.localKind, downloadedBytes: $0.downloadedBytes)
         }, virtualRoot: loaded.virtualRoot)
         if snapshot != finderSnapshot {
             do {

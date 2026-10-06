@@ -116,6 +116,38 @@ final class RepositoryAdditionModelTests: XCTestCase {
         XCTAssertNil(repository.folderURL(in: "relative"))
     }
 
+    func testFreeEligibilityMatchesAppAndFinderForCachedAndLocalRepositories() {
+        let cases: [(state: String, bytes: Int64, pinned: Bool, localKind: String?, expected: Bool)] = [
+            ("virtual", 0, false, nil, false),
+            ("virtual", 37, false, nil, true),
+            ("virtual", -1, false, nil, false),
+            ("available", 0, false, nil, true),
+            ("ready", 0, false, nil, true),
+            ("pinned", 0, false, nil, true),
+            ("virtual", 0, true, nil, true),
+            ("virtual", 0, false, "materialized", true),
+            ("available", 37, true, "adopted", false),
+            ("error", 37, false, nil, true),
+            ("preparing", 37, true, nil, false),
+            ("downloading", 37, true, nil, false),
+            ("hydrating", 37, true, nil, false),
+            ("pinning", 37, true, nil, false)
+        ]
+        for value in cases {
+            let path = value.localKind == nil ? nil : "/Users/example/Repositories/owner/repo"
+            let repository = RepositoryRecord(id: "owner/repo", owner: "owner", name: "repo", description: "", state: value.state,
+                                              pinned: value.pinned, downloadedBytes: value.bytes, localPath: path, localKind: value.localKind)
+            let finder = FinderRepositoryStatus(id: repository.id, state: value.state, pinned: value.pinned,
+                                                 localPath: path, localKind: value.localKind, downloadedBytes: value.bytes)
+            XCTAssertEqual(repository.canFreeStorage, value.expected, "App free eligibility for \(value)")
+            XCTAssertEqual(finder.canFreeStorage, value.expected, "Finder free eligibility for \(value)")
+        }
+        // An incomplete adoption record must still never offer removal.
+        let adopted = RepositoryRecord(id: "owner/repo", owner: "owner", name: "repo", description: "", state: "available",
+                                       pinned: true, downloadedBytes: 37, localKind: "adopted")
+        XCTAssertFalse(adopted.canFreeStorage)
+    }
+
     private func decodeStatus(_ json: String) throws -> EngineStatus {
         try JSONDecoder().decode(EngineStatus.self, from: Data(json.utf8))
     }

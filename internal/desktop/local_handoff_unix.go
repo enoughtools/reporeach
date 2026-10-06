@@ -111,7 +111,7 @@ func verifyHandoffDirectory(path string, expected localHandoffIdentity, private 
 func handoffPrivateDirectory(path string, create bool) error {
 	if create {
 		if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
-			if err := os.Mkdir(path, 0o700); err != nil {
+			if err := os.Mkdir(path, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
 				return err
 			}
 			if err := handoffSyncDirectory(filepath.Dir(path)); err != nil {

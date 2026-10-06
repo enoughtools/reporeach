@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 
 struct FinderRepositoryStatus: Codable, Equatable {
     let id: String
@@ -7,18 +8,39 @@ struct FinderRepositoryStatus: Codable, Equatable {
     let error: String?
     let localPath: String?
     let localKind: String?
+    let downloadedBytes: Int64
 
-    init(id: String, state: String, pinned: Bool, error: String? = nil, localPath: String? = nil, localKind: String? = nil) {
+    enum CodingKeys: String, CodingKey { case id, state, pinned, error, localPath, localKind, downloadedBytes }
+
+    init(id: String, state: String, pinned: Bool, error: String? = nil, localPath: String? = nil, localKind: String? = nil,
+         downloadedBytes: Int64 = 0) {
         self.id = id
         self.state = state
         self.pinned = pinned
         self.error = error
         self.localPath = localPath
         self.localKind = localKind
+        self.downloadedBytes = downloadedBytes
+    }
+
+    init(from decoder: Decoder) throws {
+        let value = try decoder.container(keyedBy: CodingKeys.self)
+        id = try value.decode(String.self, forKey: .id)
+        state = try value.decode(String.self, forKey: .state)
+        pinned = try value.decode(Bool.self, forKey: .pinned)
+        error = try value.decodeIfPresent(String.self, forKey: .error)
+        localPath = try value.decodeIfPresent(String.self, forKey: .localPath)
+        localKind = try value.decodeIfPresent(String.self, forKey: .localKind)
+        downloadedBytes = try value.decodeIfPresent(Int64.self, forKey: .downloadedBytes) ?? 0
     }
 
     var isAdopted: Bool { localKind == "adopted" && localURL != nil }
     var isVirtual: Bool { localPath == nil && localKind == nil }
+    var isWorking: Bool { ["preparing", "downloading", "hydrating", "pinning"].contains(state) }
+    var canFreeStorage: Bool {
+        localKind != "adopted" && !isWorking &&
+            (localURL != nil || pinned || downloadedBytes > 0 || ["available", "ready", "pinned"].contains(state))
+    }
     var localURL: URL? {
         guard ["adopted", "materialized"].contains(localKind ?? ""), let localPath else { return nil }
         return FinderStatusCache.directoryURL(for: localPath)
@@ -49,13 +71,38 @@ struct FinderStatusCache {
     }
 
     static var defaultFileURL: URL {
-        // The Finder extension is sandboxed. Asking for the named user's home
-        // avoids placing this shared, read-only metadata in its private container.
-        let home = FileManager.default.homeDirectory(forUser: NSUserName())
+        // Foundation remaps even the named user's home to the extension's
+        // container. The account database supplies the shared host location;
+        // the existing file-only entitlement controls read access to it.
+        let home = accountHomeDirectory()
             ?? FileManager.default.homeDirectoryForCurrentUser
         return home
             .appendingPathComponent("Library/Application Support/RepoReach", isDirectory: true)
             .appendingPathComponent("finder-status.json", isDirectory: false)
+    }
+
+    static func accountHomeDirectory(forUserID userID: uid_t = getuid()) -> URL? {
+        let maximumBufferSize = 1_024 * 1_024
+        let recommended = sysconf(_SC_GETPW_R_SIZE_MAX)
+        var bufferSize = recommended > 0 ? min(Int(recommended), maximumBufferSize) : 16_384
+        while true {
+            var buffer = [CChar](repeating: 0, count: bufferSize)
+            let result: (status: Int32, path: String?) = buffer.withUnsafeMutableBufferPointer { storage in
+                var entry = passwd()
+                var found: UnsafeMutablePointer<passwd>?
+                let status = getpwuid_r(userID, &entry, storage.baseAddress, storage.count, &found)
+                guard status == 0, found != nil, let directory = entry.pw_dir else { return (status, nil) }
+                // Copy while the reentrant lookup's backing buffer is alive.
+                return (status, String(validatingCString: directory))
+            }
+            if result.status == ERANGE {
+                guard bufferSize < maximumBufferSize else { return nil }
+                bufferSize = min(bufferSize * 2, maximumBufferSize)
+                continue
+            }
+            guard result.status == 0, let path = result.path else { return nil }
+            return directoryURL(for: path)
+        }
     }
 
     func read() -> FinderStatusSnapshot? {

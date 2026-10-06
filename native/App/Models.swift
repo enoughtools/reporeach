@@ -70,14 +70,18 @@ struct RepositoryRecord: Codable, Identifiable, Equatable {
         }
         switch state {
         case "preparing": return "Preparing"
-        case "downloading": return "Downloading"
+        case "downloading", "hydrating", "pinning": return "Downloading"
         case "pinned": return "Kept downloaded"
         case "available", "ready": return pinned ? "Kept downloaded" : "Available on demand"
         case "error": return "Needs attention"
         default: return "Online only"
         }
     }
-    var isWorking: Bool { state == "preparing" || state == "downloading" }
+    var isWorking: Bool { ["preparing", "downloading", "hydrating", "pinning"].contains(state) }
+    var canFreeStorage: Bool {
+        localKind != "adopted" && !isWorking &&
+            (isLocal || pinned || downloadedBytes > 0 || ["available", "ready", "pinned"].contains(state))
+    }
     var isManual: Bool { source == "manual" }
     var isLocal: Bool { localURL != nil }
     var isAdopted: Bool { localKind == "adopted" && isLocal }

@@ -55,14 +55,14 @@ func (c *PreviewCache) SeedGitHubRoots(ctx context.Context, repositories []Repos
 		return ErrPreviewUnavailable
 	}
 	for _, repo := range repositories {
-		if repo.Source == "manual" || repo.Disabled || validateRepository(repo) != nil {
+		if repo.Source == "manual" || repo.Disabled || c.contentPaused[repo.ID] || validateRepository(repo) != nil {
 			continue
 		}
 		key := previewKey(repo)
 		if c.items[key] != nil || c.runs[key] != nil {
 			continue
 		}
-		run := &previewRun{done: make(chan struct{})}
+		run := &previewRun{done: make(chan struct{}), repoID: repo.ID}
 		c.runs[key], runs[key] = run, run
 		pending = append(pending, repo)
 	}

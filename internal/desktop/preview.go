@@ -21,27 +21,37 @@ import (
 var ErrPreviewUnavailable = errors.New("repository browsing metadata is unavailable")
 var ErrPreviewInUse = errors.New("repository browsing metadata is in use")
 
-// PreviewCache owns metadata-only acquisitions. Its Git directories and
-// snapshots are separate from writable repositories, indexes and overlays.
+// PreviewCache owns immutable browsing metadata and lazily requested contents.
+// Its source Git directories and snapshots are separate from writable indexes
+// and overlays; downloaded blobs share the canonical repository blob cache.
 // A preview remains bound to one commit for its entire lifetime.
 type PreviewCache struct {
-	root    string
-	git     model.GitStore
-	github  *GitHub
-	life    context.Context
-	cancel  context.CancelFunc
-	mu      sync.Mutex
-	closed  bool
-	items   map[string]*RepositoryPreview
-	retired []*RepositoryPreview
-	runs    map[string]*previewRun
-	wg      sync.WaitGroup
+	root           string
+	stateDir       string
+	git            model.GitStore
+	github         *GitHub
+	life           context.Context
+	cancel         context.CancelFunc
+	mu             sync.Mutex
+	closed         bool
+	items          map[string]*RepositoryPreview
+	retired        []*RepositoryPreview
+	runs           map[string]*previewRun
+	contentRuns    map[string]*previewContentRun
+	contentSources map[string]*previewContentSource
+	contentSlots   chan struct{}
+	contentPaused  map[string]bool
+	contentCalls   map[string]int
+	contentIdle    map[string]chan struct{}
+	contentSetupMu sync.Mutex
+	wg             sync.WaitGroup
 }
 
 type previewRun struct {
 	done    chan struct{}
 	preview *RepositoryPreview
 	err     error
+	repoID  string
 }
 
 // RepositoryPreview can answer directory names, types and available sizes
@@ -72,7 +82,7 @@ func NewPreviewCache(ctx context.Context, stateDir string, git model.GitStore, g
 		return nil, err
 	}
 	life, cancel := context.WithCancel(ctx)
-	return &PreviewCache{root: root, git: git, github: github, life: life, cancel: cancel,
+	return &PreviewCache{root: root, stateDir: stateDir, git: git, github: github, life: life, cancel: cancel,
 		items: make(map[string]*RepositoryPreview), runs: make(map[string]*previewRun)}, nil
 }
 
@@ -101,9 +111,13 @@ func (c *PreviewCache) Acquire(ctx context.Context, repo Repository) (*Repositor
 		c.mu.Unlock()
 		return preview, nil
 	}
+	if c.contentPaused[repo.ID] {
+		c.mu.Unlock()
+		return nil, ErrPreviewInUse
+	}
 	run := c.runs[key]
 	if run == nil {
-		run = &previewRun{done: make(chan struct{})}
+		run = &previewRun{done: make(chan struct{}), repoID: repo.ID}
 		c.runs[key] = run
 		c.wg.Add(1)
 		go c.acquire(repo, key, run)
@@ -190,12 +204,16 @@ func (c *PreviewCache) Refresh(ctx context.Context, repo Repository) (*Repositor
 		c.mu.Unlock()
 		return nil, ErrPreviewUnavailable
 	}
+	if c.contentPaused[repo.ID] {
+		c.mu.Unlock()
+		return nil, ErrPreviewInUse
+	}
 	if c.runs[key] != nil || c.items[key] != previous || !previous.mu.TryLock() {
 		c.mu.Unlock()
 		return nil, ErrPreviewInUse
 	}
 	previous.mu.Unlock()
-	run := &previewRun{done: make(chan struct{})}
+	run := &previewRun{done: make(chan struct{}), repoID: repo.ID}
 	c.runs[key] = run
 	c.wg.Add(1)
 	workCtx, cancel := context.WithTimeout(c.life, 2*time.Minute)
@@ -384,8 +402,15 @@ func (c *PreviewCache) Close() error {
 	}
 	c.closed = true
 	c.cancel()
+	contentIdle := make([]<-chan struct{}, 0, len(c.contentIdle))
+	for _, idle := range c.contentIdle {
+		contentIdle = append(contentIdle, idle)
+	}
 	c.mu.Unlock()
 	c.wg.Wait()
+	for _, idle := range contentIdle {
+		<-idle
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	var result error

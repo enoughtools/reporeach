@@ -74,8 +74,13 @@ type Service struct {
 	// Native virtual repositories live behind ordinary catalogue directories.
 	// Local checkouts never need this filesystem to expose their files.
 	hybridCatalogue bool
-	preview         *PreviewCache
-	previewGit      *gitstore.Store
+	// Resolve the state ancestor once at startup. Finder reports the canonical
+	// mounted path; Status must not traverse a live filesystem to recover it.
+	cachedVirtualRoot string
+	preview           *PreviewCache
+	previewGit        *gitstore.Store
+	previewBlobSizes  map[string]map[string]int64
+	previewMetaCounts map[string]previewMetadataAccounting
 }
 
 func New(ctx context.Context, opts Options) (*Service, error) {
@@ -120,6 +125,14 @@ func New(ctx context.Context, opts Options) (*Service, error) {
 			return nil, errors.New("mount folder and File System Extension connection folder must be separate")
 		}
 	}
+	var cachedVirtualRoot string
+	if runtime.GOOS == "darwin" {
+		canonicalStateDir, err := filepath.EvalSymlinks(opts.StateDir)
+		if err != nil {
+			return nil, fmt.Errorf("resolve private virtual catalogue location: %w", err)
+		}
+		cachedVirtualRoot = filepath.Join(canonicalStateDir, "native-catalogue", "volume")
+	}
 	engine, err := daemon.New(ctx, filepath.Join(opts.StateDir, "engine"), opts.Logger)
 	if err != nil {
 		return nil, err
@@ -142,10 +155,15 @@ func New(ctx context.Context, opts Options) (*Service, error) {
 		ops: []Operation{}, cancels: map[string]context.CancelFunc{},
 		locks: map[string]chan struct{}{}, pins: map[string]string{},
 		dependencyReady: platformDependencyReady, quiescentCatalogue: runtime.GOOS == "darwin",
-		hybridCatalogue: runtime.GOOS == "darwin",
+		hybridCatalogue: runtime.GOOS == "darwin", cachedVirtualRoot: cachedVirtualRoot,
 	}
 	s.mountCatalogue = s.platformMountCatalogue
 	s.closeCatalogueMetadata = (*overlay.Store).Close
+	if err := s.recoverPreviewContentEviction(ctx); err != nil {
+		_ = engine.Close()
+		cancel()
+		return nil, fmt.Errorf("recover preview content cache: %w", err)
+	}
 	if err := s.recoverLocalHandoffs(ctx); err != nil {
 		_ = engine.Close()
 		cancel()
@@ -205,6 +223,11 @@ func New(ctx context.Context, opts Options) (*Service, error) {
 		}
 		// Pin intent survives a restart, but stays available until verified again.
 		repo.Error = ""
+	}
+	for _, repo := range s.state.Repositories {
+		if repo.LocalPath == "" {
+			s.notePreviewCachedBytes(repo.ID)
+		}
 	}
 	if err := s.persistLocked(); err != nil {
 		_ = engine.Close()
@@ -303,7 +326,7 @@ func (s *Service) Status() Status {
 	}
 	var virtualRoot string
 	if s.hybridCatalogue {
-		virtualRoot = filepath.Join(s.opts.StateDir, "native-catalogue", "volume")
+		virtualRoot = s.cachedVirtualRoot
 	}
 	return Status{Version: Version, MountRoot: s.state.MountRoot,
 		VirtualRoot: virtualRoot,
@@ -482,7 +505,7 @@ func (s *Service) mountLocked(ctx context.Context) error {
 	s.mu.Lock()
 	s.catalogMetadata = metadata
 	s.mu.Unlock()
-	fs, err := catalogfs.NewWithPreview(entries, func(ctx context.Context, entry catalogfs.Entry) (*fusefs.ArtifactFuse, error) {
+	fs, err := catalogfs.NewWithPreviewContent(entries, func(ctx context.Context, entry catalogfs.Entry) (*fusefs.ArtifactFuse, error) {
 		if backend, ok := s.engine.ExistingCatalogRepository(engineName(entry.ID)); ok {
 			return backend, nil
 		}
@@ -492,7 +515,7 @@ func (s *Service) mountLocked(ctx context.Context) error {
 		}
 		defer unlock()
 		return s.ensureRepository(ctx, entry.ID)
-	}, metadata, s.cataloguePreview)
+	}, metadata, s.cataloguePreview, s.cataloguePreviewContent)
 	if err != nil {
 		return errors.Join(err, s.closeCatalogueStoreLocked())
 	}
@@ -1046,13 +1069,26 @@ func (s *Service) freeRepository(ctx context.Context, id string) error {
 		s.mu.Unlock()
 		return err
 	}
-	configs, err := s.engine.ListRepos(ctx)
+	releasePreview, err := s.pausePreviewContent(ctx, id)
+	if releasePreview != nil {
+		defer releasePreview()
+	}
+	var configs []model.RepoConfig
+	if err == nil {
+		configs, err = s.engine.ListRepos(ctx)
+	}
 	registered := false
 	for _, cfg := range configs {
 		if cfg.Name == engineName(id) {
 			registered = true
 			break
 		}
+	}
+	if err == nil && registered {
+		err = s.engine.StopCatalogRepositoryStorage(ctx, engineName(id))
+	}
+	if err == nil {
+		err = s.evictPreviewContent(ctx, id, !registered)
 	}
 	if err == nil && registered {
 		err = s.engine.FreeRepositorySpace(ctx, engineName(id))
@@ -1063,6 +1099,8 @@ func (s *Service) freeRepository(ctx context.Context, id string) error {
 			repo := &s.state.Repositories[i]
 			repo.State, repo.Pinned, repo.DownloadedBytes, repo.Error = "virtual", false, 0, ""
 			delete(s.pins, id)
+			delete(s.previewBlobSizes, id)
+			delete(s.previewMetaCounts, id)
 		}
 		persistErr := s.persistLocked()
 		s.mu.Unlock()
@@ -1086,6 +1124,9 @@ func (s *Service) freeRepository(ctx context.Context, id string) error {
 			s.mu.Unlock()
 			return errors.Join(err, recoveryErr)
 		}
+	}
+	if releasePreview != nil {
+		releasePreview()
 	}
 	if wasMounted {
 		if mountErr := s.mountLocked(s.ctx); mountErr != nil {

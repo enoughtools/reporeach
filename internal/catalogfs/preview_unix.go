@@ -142,6 +142,11 @@ func (fs *FileSystem) previewAttributes(node model.BaseNode) (fuseops.InodeAttri
 	size := uint64(node.SizeBytes)
 	switch node.Type {
 	case "dir":
+		// Git tree and submodule modes carry no directory permission bits.
+		// Match the writable view, including previews restored from receipts.
+		if mode.Perm() == 0 {
+			mode = 0o755
+		}
 		mode |= os.ModeDir
 		known, size = true, 4096
 	case "symlink":
@@ -201,7 +206,14 @@ func (fs *FileSystem) previewLookup(ctx context.Context, n *inode, name string, 
 		}
 		attrs, known := fs.previewAttributes(node)
 		if !known && !allowUnknown {
-			return fuseops.ChildInodeEntry{}, true, false, nil
+			if fs.previewContent == nil {
+				return fuseops.ChildInodeEntry{}, true, false, nil
+			}
+			attrs, err = fs.exactPreviewAttributes(ctx, n.repo, node, directory.Revision)
+			if err != nil {
+				return fuseops.ChildInodeEntry{}, true, true, err
+			}
+			known = true
 		}
 		expiry := time.Now().Add(time.Second)
 		return fuseops.ChildInodeEntry{Child: fs.previewInode(n.repo, node, true), Attributes: attrs,

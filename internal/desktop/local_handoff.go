@@ -83,6 +83,9 @@ func (s *Service) commitMaterializedCheckout(ctx context.Context, id string, cfg
 	if err := stage.VerifyPrivateGit(ctx); err != nil {
 		return err
 	}
+	if err := s.verifyPreviewContentOwnership(ctx, id, false); err != nil {
+		return err
+	}
 	if err := verifyHandoffDirectory(filepath.Dir(stage.Destination), localHandoffIdentity{}, false); err != nil {
 		return err
 	}
@@ -101,6 +104,10 @@ func (s *Service) commitMaterializedCheckout(ctx context.Context, id string, cfg
 	objects, err := s.captureHandoffStorage(ctx, id, cfg, retiredRoot)
 	if err != nil {
 		_ = os.Remove(retiredRoot) // Only an empty, unpublished directory.
+		return err
+	}
+	if err := s.verifyPreviewContentOwnership(ctx, id, false); err != nil {
+		_ = os.Remove(retiredRoot) // No engine storage has moved yet.
 		return err
 	}
 	digest := handoffManifestDigest(stage.finalManifest)
@@ -149,6 +156,9 @@ func (s *Service) commitMaterializedCheckout(ctx context.Context, id string, cfg
 	err = s.persistLocked()
 	if err != nil {
 		s.state.Repositories[i] = repo
+	} else {
+		delete(s.previewBlobSizes, id)
+		delete(s.previewMetaCounts, id)
 	}
 	s.mu.Unlock()
 	if err != nil {
@@ -168,6 +178,9 @@ func (s *Service) commitMaterializedCheckout(ctx context.Context, id string, cfg
 // exclusive rename before it can be deleted. Open editor/Git handles, changed
 // data, or replaced paths refuse cleanup and retain the journalled data.
 func (s *Service) freeMaterializedCheckout(ctx context.Context, id string) error {
+	if err := s.verifyPreviewMetadataReclaimable(ctx, id); err != nil {
+		return err
+	}
 	s.mu.Lock()
 	repo, exists := s.repositoryLocked(id)
 	s.mu.Unlock()
@@ -247,6 +260,9 @@ func (s *Service) freeMaterializedCheckout(ctx context.Context, id string) error
 	err = s.persistLocked()
 	if err != nil {
 		s.state.Repositories[i] = repo
+	} else {
+		delete(s.previewBlobSizes, id)
+		delete(s.previewMetaCounts, id)
 	}
 	s.mu.Unlock()
 	if err != nil {
@@ -716,10 +732,7 @@ func handoffWriteJSON(path string, value any, exclusive bool) error {
 	if err := json.NewEncoder(file).Encode(value); err != nil {
 		return err
 	}
-	maximum := int64(1 << 20)
-	if filepath.Base(path) == localHandoffCleanupName {
-		maximum = maxLocalHandoffCleanupBytes
-	}
+	maximum := handoffRecordLimit(path)
 	if info, err := file.Stat(); err != nil || info.Size() > maximum {
 		return errors.New("the ownership record exceeds the supported limit; all checkout data was retained")
 	}
@@ -755,12 +768,13 @@ func handoffWriteJSON(path string, value any, exclusive bool) error {
 }
 
 func handoffReadJSON(path string, destination any) error {
-	file, err := handoffOpenPrivateRegular(path)
+	maximum := handoffRecordLimit(path)
+	file, err := handoffOpenPrivateRegularLimit(path, maximum)
 	if err != nil {
 		return err
 	}
 	defer file.Close()
-	decoder := json.NewDecoder(io.LimitReader(file, (1<<20)+1))
+	decoder := json.NewDecoder(io.LimitReader(file, maximum+1))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(destination); err != nil {
 		return err
@@ -769,6 +783,15 @@ func handoffReadJSON(path string, destination any) error {
 		return errors.New("local checkout ownership record has trailing data")
 	}
 	return nil
+}
+
+func handoffRecordLimit(path string) int64 {
+	switch filepath.Base(path) {
+	case localHandoffCleanupName, previewEvictionJournalName, previewGitGenerationName:
+		return maxLocalHandoffCleanupBytes
+	default:
+		return 1 << 20
+	}
 }
 
 func handoffSyncDirectory(path string) error {

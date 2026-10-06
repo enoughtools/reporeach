@@ -9,7 +9,8 @@ The host app writes the metadata-only snapshot atomically to `~/Library/Applicat
   "mountRoot": "/Users/example/Repos",
   "virtualRoot": "/Users/example/Library/Application Support/RepoReach/native-catalogue/volume",
   "repositories": [
-    { "id": "example/project", "state": "ready", "pinned": false, "error": null },
+    { "id": "example/project", "state": "virtual", "pinned": false,
+      "downloadedBytes": 4096, "error": null },
     { "id": "local/notes", "state": "available", "pinned": false,
       "localPath": "/Users/example/Source/notes", "localKind": "adopted" }
   ]
@@ -22,8 +23,18 @@ Finder does not read repository contents or run Git commands. It sends validated
 
 A local path must be an absolute, non-root directory path, paired with `adopted` or `materialized`. Selection matching compares path components without resolving symlinks or accessing files, including native `.git` paths. A deeper registered checkout takes precedence over its containing checkout; equal-depth ambiguous registrations offer no actions. The extension observes the catalogue, private virtual volume, and registered physical checkout roots using only this metadata.
 
-For the developer beta, the extension is sandboxed and `Finder.entitlements` grants read-only access to exactly the shared metadata file in the current user's Application Support directory. There are deliberately no app-group entitlements requiring a provisioning profile. The containing app is not sandboxed. The shared cache locates the named user's home rather than the extension's private sandbox container. New cache contents are written to a 0600 temporary file and then atomically replace the old file.
+`downloadedBytes` defaults to zero for older snapshots. A virtual repository can hold cached file content without preparing a Git checkout or changing its state. **Free Up Space** is available for those cached bytes, prepared repositories, materialized checkouts, and kept repositories. Adopted checkouts never offer removal, and preparing or downloading states disable storage actions. These UI rules supplement the service's independent busy and recoverability checks; Finder never scans the cache itself.
+
+For the developer beta, the extension is sandboxed and `Finder.entitlements` grants read-only access to exactly the shared metadata file in the current user's Application Support directory. There are deliberately no app-group entitlements requiring a provisioning profile. The containing app is not sandboxed. The shared cache uses the reentrant account lookup `getpwuid_r` to locate the user's host home; Foundation's named-user home API is also remapped to the private container in a sandboxed process. The lookup copies its result before releasing its bounded buffer. New cache contents are written to a 0600 temporary file and then atomically replace the old file.
 
 The release build must validate Finder extension registration and cache access on an installed, signed app. The narrow temporary exception is documented by [Apple](https://developer.apple.com/library/archive/documentation/Miscellaneous/Reference/EntitlementKeyReference/Chapters/AppSandboxTemporaryExceptionEntitlements.html); an App Store release would need to revisit this arrangement. Users enable the extension in System Settings → Privacy & Security → Extensions → Finder Extensions (location varies by macOS version).
 
 The extension identifier is `com.enoughtools.reporeach.finder` and its principal class is `RepoReachFinder.FinderSync`. Include both files from `native/Shared` in the Finder extension target as well as the app target. Requires macOS 13 or newer.
+
+## Reloading an installed development build
+
+Finder Sync runs separately from the containing app, and additional instances can serve Open and Save dialogs. Quitting RepoReach does not establish that those processes have exited. [Apple's Finder Sync guide](https://developer.apple.com/library/archive/documentation/General/Conceptual/ExtensibilityPG/Finder.html) describes this process model. The public SDK provides enablement inspection and the extension-management interface, but no programmatic restart method.
+
+After a signed bundle update, refresh only the installed Finder extension's registration with `pluginkit -a /absolute/path/to/RepoReach.app/Contents/PlugIns/RepoReachFinder.appex`. Inspect `pluginkit -m -A -D -v -i com.enoughtools.reporeach.finder` and verify the expected installed path and existing user election. The local `pluginkit(8)` manual documents these registration operations; registration alone does not prove that an already running process loaded new code.
+
+If an old process remains, a narrowly scoped development fallback is normal `SIGTERM` of only the captured old RepoReachFinder process IDs. Verify each process's user ID, exact executable path, and start time immediately before signalling so a reused PID or another extension cannot match. This is a process-lifecycle fallback, not a Finder Sync restart API or a guaranteed relaunch. Preserve user enablement; do not restart Finder, `pkd`, FSKit, or unrelated extensions. Let macOS load the elected extension when Finder next needs it, then verify a new process and the changed badges/actions in both the chosen folder and the resolved private virtual path. If it does not reload normally, stop and inspect the exact extension state rather than widening the restart scope.

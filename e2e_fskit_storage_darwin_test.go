@@ -38,9 +38,10 @@ import (
 
 // This is a separate disposable fixture, intended to run after the primary
 // mounted sequence passes. Browsing first acquires only a shallow preview;
-// writable preparation and Keep are separate actions. No file contents or
-// symlink targets are read before Keep. Missing-child metadata probes must not
-// prepare a writable checkout, and directory names must not hydrate blobs.
+// writable preparation and Keep are separate actions. Metadata-only browsing
+// must acquire no blobs; a readonly content preview may acquire only its one
+// selected blob and must not activate the writable engine. Symlink targets
+// remain unread before Keep.
 func TestFSKitMountedColdStorageAcceptance(t *testing.T) {
 	if os.Getenv("AFS_RUN_FSKIT_E2E_TESTS") != "1" {
 		t.Skip("set AFS_RUN_FSKIT_E2E_TESTS=1 for real mounted FSKit storage acceptance")
@@ -92,7 +93,10 @@ func TestFSKitMountedColdStorageAcceptance(t *testing.T) {
 	fsKitStorageGit(t, source, nil, "commit", "-m", "earlier fixture history")
 	fsKitStorageGit(t, source, nil, "rm", "history.txt")
 	text, binary := []byte("cold committed text\n"), []byte{0, 255, 128, '\n', 0, 254, 1, 2}
-	files := map[string][]byte{"tracked.txt": text, "binary.dat": binary, "duplicate.dat": binary,
+	if err := os.Mkdir(filepath.Join(source, "nested"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	files := map[string][]byte{"tracked.txt": text, "nested/duplicate.txt": text, "binary.dat": binary, "duplicate.dat": binary,
 		".DS_Store": []byte("legitimately committed Finder name\n"), "Icon\r": []byte("legitimately committed icon name\n")}
 	for name, value := range files {
 		fsKitWrite(t, filepath.Join(source, name), value, 0o644)
@@ -158,13 +162,24 @@ func TestFSKitMountedColdStorageAcceptance(t *testing.T) {
 			t.Fatalf("cold missing-child metadata lookup %q: %v", name, err)
 		}
 	}
-	previewNames := []string{".DS_Store", ".git", "Icon\r", "binary.dat", "duplicate.dat", "link", "tracked.txt"}
+	previewNames := []string{".DS_Store", ".git", "Icon\r", "binary.dat", "duplicate.dat", "link", "nested", "tracked.txt"}
 	beforePreviewListingRequests := transport.requests.Load()
 	previewStarted := time.Now()
 	waitDesktopCatalogueNames(t, repo, previewNames)
 	previewDuration := time.Since(previewStarted)
 	if transport.requests.Load() != beforePreviewListingRequests {
 		t.Fatal("cached cold preview enumeration contacted the source")
+	}
+	// Git directory modes carry no permission bits. Their native presentation
+	// must permit traversal before any writable backend exists, including a
+	// descendant lookup and directory enumeration as Finder performs them.
+	nested := filepath.Join(repo, "nested")
+	if info, err := os.Lstat(nested); err != nil || !info.IsDir() || info.Mode().Perm()&0o500 != 0o500 {
+		t.Fatalf("cold nested directory is not readable and traversable: info=%v error=%v", info, err)
+	}
+	waitDesktopCatalogueNames(t, nested, []string{"duplicate.txt"})
+	if transport.requests.Load() != beforePreviewListingRequests {
+		t.Fatal("cold native nested directory traversal contacted the source")
 	}
 	// Git's synthesized pointer is discoverable metadata before any writable
 	// preparation. Its known size must be exact without reading its contents.
@@ -192,8 +207,99 @@ func TestFSKitMountedColdStorageAcceptance(t *testing.T) {
 		t.Fatalf("cold preview hydrated committed blobs: %v", err)
 	}
 	t.Logf("cold preview proof: entries=%d initial_preview_ms=%d cached_listing_ms=%d writable_engine_absent=true shallow_commits=1 missing_blobs=%d committed_Finder_names_visible=true", len(previewNames), time.Since(coldPreviewStarted).Milliseconds(), previewDuration.Milliseconds(), len(oids))
+	// A readonly native open is still metadata-only. Reading the nested file
+	// may then acquire its immutable blob, but must leave the repository virtual
+	// and acquire neither the other committed blobs nor a writable checkout.
+	beforeContentRequests := transport.requests.Load()
+	transport.traceMu.Lock()
+	contentTraceStart := len(transport.trace)
+	transport.traceMu.Unlock()
+	previewFile, err := os.Open(filepath.Join(nested, "duplicate.txt"))
+	if err != nil {
+		t.Fatalf("cold readonly native open failed: %v", err)
+	}
+	t.Cleanup(func() { _ = previewFile.Close() })
+	if transport.requests.Load() != beforeContentRequests {
+		t.Fatal("readonly native open acquired content before a read")
+	}
+	h.request(t, http.MethodGet, "/v1/status", nil, &status)
+	if entry := desktopAdoptedRepository(t, status, id); entry.State != "virtual" || entry.LocalPath != "" {
+		t.Fatalf("readonly native open prepared the writable checkout: %+v", entry)
+	}
+	if _, err := fsKitStorageRegistry(h.state, repo); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("readonly native open created writable engine storage: %v", err)
+	}
+	contentStarted := time.Now()
+	read := make([]byte, len(text))
+	if count, err := previewFile.ReadAt(read, 0); err != nil || count != len(read) || !bytes.Equal(read, text) {
+		t.Fatalf("readonly native preview read: count=%d error=%v equal=%v", count, err, bytes.Equal(read, text))
+	}
+	contentDuration := time.Since(contentStarted)
+	if transport.requests.Load() <= beforeContentRequests {
+		t.Fatal("cold readonly content was not acquired from the source")
+	}
+	h.request(t, http.MethodGet, "/v1/status", nil, &status)
+	if entry := desktopAdoptedRepository(t, status, id); entry.State != "virtual" || entry.LocalPath != "" {
+		t.Fatalf("readonly native content prepared the writable checkout: %+v", entry)
+	}
+	if _, err := fsKitStorageRegistry(h.state, repo); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("readonly native content created writable engine storage: %v", err)
+	}
+	selectedOID := strings.TrimSpace(string(fsKitStorageGit(t, source, nil, "rev-parse", "HEAD:nested/duplicate.txt")))
+	transport.traceMu.Lock()
+	contentTrace := append([]fsKitStorageRequestTrace(nil), transport.trace[contentTraceStart:]...)
+	contentTraceCut := transport.traceCut
+	transport.traceMu.Unlock()
+	if contentTraceCut {
+		t.Fatal("readonly content source trace exceeded its evidence bound")
+	}
+	if err := fsKitStorageRequireContentWants(contentTrace, selectedOID, head); err != nil {
+		t.Fatalf("readonly content acquired objects beyond its selected blob: %v", err)
+	}
+	contentPaths, previewSourceRoot := fsKitStoragePreviewContentPaths(t, h.state, head)
+	fsKitStorageCachedBlob(t, contentPaths.cache, selectedOID, text)
+	if got := strings.TrimSpace(string(fsKitStorageGitNoFetch(t, root, nil, "--git-dir", contentPaths.git, "rev-parse", "HEAD"))); got != head {
+		t.Fatalf("readonly preview source HEAD=%s want pinned commit %s", got, head)
+	}
+	if commits := strings.TrimSpace(string(fsKitStorageGitNoFetch(t, root, nil, "--git-dir", contentPaths.git, "rev-list", "--count", "HEAD"))); commits != "1" {
+		t.Fatalf("readonly preview fetched full history: commits=%q", commits)
+	}
+	selectedOutput := fsKitStorageGitNoFetch(t, root, []byte(selectedOID+"\n"), "--git-dir", contentPaths.git, "cat-file", "--batch-check")
+	if !bytes.Equal(selectedOutput, []byte(fmt.Sprintf("%s blob %d\n", selectedOID, len(text)))) {
+		t.Fatalf("readonly preview Git does not contain its exact selected blob: %q", selectedOutput)
+	}
+	var unselected []string
+	for _, oid := range oids {
+		if oid != selectedOID {
+			unselected = append(unselected, oid)
+		}
+	}
+	if err := fsKitStorageRequireMissing(fsKitStorageGitNoFetch(t, root, []byte(strings.Join(unselected, "\n")+"\n"), "--git-dir", contentPaths.git, "cat-file", "--batch-check"), unselected); err != nil {
+		t.Fatalf("readonly preview acquired unselected committed blobs: %v", err)
+	}
+	// Rereading the retained native handle must work without any source request,
+	// even while the exact URL refuses transport. Close it before Git activation
+	// so the following engine-only cold proof remains independent of this handle.
+	beforeCachedContentRequests := transport.requests.Load()
+	transport.online.Store(false)
+	count, cachedErr := previewFile.ReadAt(read, 0)
+	transport.online.Store(true)
+	if cachedErr != nil || count != len(read) || !bytes.Equal(read, text) {
+		t.Fatalf("cached readonly native preview read: count=%d error=%v equal=%v", count, cachedErr, bytes.Equal(read, text))
+	}
+	if transport.requests.Load() != beforeCachedContentRequests {
+		t.Fatal("cached readonly native preview contacted the offline source")
+	}
+	if err := previewFile.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := fsKitStorageRequireMissing(fsKitStorageGitNoFetch(t, root, input, "--git-dir", previewGit, "cat-file", "--batch-check"), oids); err != nil {
+		t.Fatalf("readonly content hydrated the metadata-only preview Git: %v", err)
+	}
+	t.Logf("readonly native preview proof: duration_ms=%d writable_engine_absent=true repository_virtual=true selected_cached_blobs=1 selected_cached_bytes=%d unselected_missing_blobs=%d cached_read_source_requests=0 nested_directory_traversable=true", contentDuration.Milliseconds(), len(text), len(unselected))
 	// Actual Git pointer bytes require the authoritative writable engine. The
-	// same retained preview item must promote safely without hydrating blobs.
+	// same retained preview item must promote safely without acquiring any
+	// additional blob or duplicating the selected canonical cache file.
 	gitPointer := fsKitStorageRead(t, filepath.Join(repo, ".git"))
 	paths, err := fsKitStorageRegistry(h.state, repo)
 	if err != nil {
@@ -210,10 +316,10 @@ func TestFSKitMountedColdStorageAcceptance(t *testing.T) {
 	if got := strings.TrimSpace(string(fsKitStorageGit(t, root, nil, "--git-dir", paths.git, "rev-parse", "HEAD"))); got != head {
 		t.Fatalf("prepared HEAD=%s want %s", got, head)
 	}
-	entries, err := os.ReadDir(paths.cache)
-	if err != nil && !errors.Is(err, os.ErrNotExist) || len(entries) != 0 {
-		t.Fatalf("pre-Keep blob cache is not empty: count=%d error=%v", len(entries), err)
+	if paths.cache != contentPaths.cache {
+		t.Fatal("Git activation did not reuse the canonical preview blob cache")
 	}
+	fsKitStorageCachedBlob(t, paths.cache, selectedOID, text)
 	output := fsKitStorageGitNoFetch(t, root, input, "--git-dir", paths.git, "cat-file", "--batch-check")
 	if err := fsKitStorageRequireMissing(output, oids); err != nil {
 		t.Logf("prepared private Git object metadata (GIT_NO_LAZY_FETCH=1): %q", output)
@@ -233,22 +339,19 @@ func TestFSKitMountedColdStorageAcceptance(t *testing.T) {
 	for _, entry := range mountedEntries {
 		names = append(names, entry.Name())
 	}
-	wantNames := []string{".DS_Store", ".git", "Icon\r", "binary.dat", "duplicate.dat", "link", "tracked.txt"}
+	wantNames := []string{".DS_Store", ".git", "Icon\r", "binary.dat", "duplicate.dat", "link", "nested", "tracked.txt"}
 	if !reflect.DeepEqual(names, wantNames) {
 		t.Fatalf("cold directory names=%v want %v", names, wantNames)
 	}
 	if after := transport.requests.Load(); after != beforeListingRequests {
 		t.Fatalf("cold directory enumeration contacted source: before=%d after=%d duration=%s", beforeListingRequests, after, listingDuration)
 	}
-	entries, err = os.ReadDir(paths.cache)
-	if err != nil && !errors.Is(err, os.ErrNotExist) || len(entries) != 0 {
-		t.Fatalf("cold directory enumeration populated blob cache: count=%d error=%v", len(entries), err)
-	}
+	fsKitStorageCachedBlob(t, paths.cache, selectedOID, text)
 	output = fsKitStorageGitNoFetch(t, root, input, "--git-dir", paths.git, "cat-file", "--batch-check")
 	if err := fsKitStorageRequireMissing(output, oids); err != nil {
 		t.Fatalf("cold directory enumeration acquired Git blobs: %v", err)
 	}
-	t.Logf("cold listing proof: entries=%d duration_ms=%d source_requests=0 missing_blobs=%d cache_empty=true; directory enumeration only, no file content reads before Keep", len(names), listingDuration.Milliseconds(), len(oids))
+	t.Logf("cold listing proof: entries=%d duration_ms=%d source_requests=0 missing_blobs=%d cached_blobs=1; writable engine remains blobless and shared cache contains only the selected readonly preview", len(names), listingDuration.Milliseconds(), len(oids))
 
 	operation := fsKitStorageAction(t, h, id, "keep")
 	// Keep normally reconnects the private volume after publishing the ordinary
@@ -271,6 +374,14 @@ func TestFSKitMountedColdStorageAcceptance(t *testing.T) {
 	if _, err := fsKitStorageRegistry(h.state, repo); !errors.Is(err, sql.ErrNoRows) {
 		t.Fatalf("Keep left a second active engine checkout: %v", err)
 	}
+	if _, err := os.Lstat(previewSourceRoot); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("Keep left an active preview Git source: %v", err)
+	}
+	retiredEntries, err := os.ReadDir(filepath.Join(h.state, "retired-engine"))
+	if err != nil || len(retiredEntries) != 1 || !retiredEntries[0].IsDir() {
+		t.Fatalf("Keep did not retain exactly its owned recovery storage: count=%d error=%v", len(retiredEntries), err)
+	}
+	retiredStorage := filepath.Join(h.state, "retired-engine", retiredEntries[0].Name())
 
 	// Keep the exact listener/URL allocated, but refuse all transport requests.
 	// Restart and cache reads must generate no requests at all, even failed ones.
@@ -345,9 +456,9 @@ func TestFSKitMountedColdStorageAcceptance(t *testing.T) {
 	if _, err := fsKitStorageRegistry(h.state, repo); !errors.Is(err, sql.ErrNoRows) {
 		t.Fatalf("clean Free left engine registration: %v", err)
 	}
-	for _, path := range []string{paths.git, paths.cache, paths.snapshot, paths.overlay} {
+	for _, path := range []string{paths.git, paths.cache, paths.snapshot, paths.overlay, previewSourceRoot, retiredStorage} {
 		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
-			t.Fatalf("retired active storage remains after clean Free: %s error=%v", path, err)
+			t.Fatalf("owned engine or recovery storage remains after clean Free: %s error=%v", path, err)
 		}
 	}
 	beforeReacquire := transport.requests.Load()
@@ -468,6 +579,28 @@ func fsKitStorageProtocolTrace(body []byte) (wants, depth []string) {
 		}
 	}
 	return wants, depth
+}
+
+func fsKitStorageRequireContentWants(trace []fsKitStorageRequestTrace, selected, commit string) error {
+	if selected == "" || commit == "" || selected == commit {
+		return errors.New("selected blob and pinned commit must be distinct known objects")
+	}
+	selectedRequested := false
+	for _, request := range trace {
+		for _, oid := range request.Wants {
+			switch oid {
+			case selected:
+				selectedRequested = true
+			case commit: // A separate shallow content source may acquire its pinned commit.
+			default:
+				return fmt.Errorf("content source requested unexpected object %s", oid)
+			}
+		}
+	}
+	if !selectedRequested {
+		return errors.New("content source did not request the selected blob")
+	}
+	return nil
 }
 
 func fsKitStorageLogTransport(t *testing.T, transport *fsKitStorageTransport, blobNames map[string][]string) {
@@ -689,6 +822,40 @@ func fsKitStoragePreviewGit(t *testing.T, state string) string {
 	return matches[0]
 }
 
+func fsKitStoragePreviewContentPaths(t *testing.T, state, commit string) (fsKitStoragePaths, string) {
+	t.Helper()
+	// This isolated fixture has one repository. Discover its canonical storage
+	// name rather than duplicating the desktop's private identifier algorithm.
+	repos := filepath.Join(state, "engine", "repos")
+	entries, err := os.ReadDir(repos)
+	if err != nil || len(entries) != 1 || !entries[0].IsDir() {
+		t.Fatalf("readonly preview needs exactly one canonical repository directory: count=%d error=%v", len(entries), err)
+	}
+	previewRoot := filepath.Join(repos, entries[0].Name(), "preview-git")
+	sources, err := os.ReadDir(previewRoot)
+	if err != nil || len(sources) != 1 || !sources[0].IsDir() {
+		t.Fatalf("readonly preview needs exactly one canonical source directory: count=%d error=%v", len(sources), err)
+	}
+	git := filepath.Join(previewRoot, sources[0].Name(), commit, "git")
+	if info, err := os.Lstat(git); err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		t.Fatalf("readonly preview has no canonical pinned Git directory: %v", err)
+	}
+	return fsKitStoragePaths{git: git, cache: filepath.Join(state, "engine", "cache", "blobs", entries[0].Name())}, previewRoot
+}
+
+func fsKitStorageCachedBlob(t *testing.T, cache, oid string, expected []byte) {
+	t.Helper()
+	entries, err := os.ReadDir(cache)
+	if err != nil || len(entries) != 1 || entries[0].Name() != oid {
+		t.Fatalf("canonical cache must contain only the selected preview blob: count=%d error=%v", len(entries), err)
+	}
+	path := filepath.Join(cache, oid)
+	if info, err := os.Lstat(path); err != nil || !info.Mode().IsRegular() || info.Size() != int64(len(expected)) {
+		t.Fatalf("canonical selected preview blob has invalid type or size: %v", err)
+	}
+	fsKitReadEqual(t, path, expected)
+}
+
 type fsKitStoragePaths struct {
 	git, cache, snapshot, overlay, overlayDB string
 }
@@ -888,6 +1055,30 @@ func TestFSKitColdProtocolTrace(t *testing.T) {
 		if wants, depth := fsKitStorageProtocolTrace(malformed); len(wants) != 0 || len(depth) != 0 {
 			t.Fatal("malformed/opaque body bytes escaped into protocol metadata trace")
 		}
+	}
+}
+
+func TestFSKitColdContentWants(t *testing.T) {
+	for _, test := range []struct {
+		name, selected, commit string
+		wants                  []string
+		valid                  bool
+	}{
+		{"selected blob only", "selected", "commit", []string{"selected"}, true},
+		{"shallow commit and selected blob", "selected", "commit", []string{"commit", "selected"}, true},
+		{"unselected blob", "selected", "commit", []string{"commit", "selected", "other"}, false},
+		{"metadata only", "selected", "commit", []string{"commit"}, false},
+		{"empty trace", "selected", "commit", nil, false},
+		{"unknown selected object", "", "commit", []string{"commit"}, false},
+		{"unknown pinned commit", "selected", "", []string{"selected"}, false},
+		{"blob confused with commit", "selected", "selected", []string{"selected"}, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			trace := []fsKitStorageRequestTrace{{Wants: test.wants}}
+			if err := fsKitStorageRequireContentWants(trace, test.selected, test.commit); (err == nil) != test.valid {
+				t.Fatalf("content source evidence accepted=%v want %v error=%v", err == nil, test.valid, err)
+			}
+		})
 	}
 }
 

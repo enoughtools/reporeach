@@ -53,15 +53,15 @@ final class FinderSync: FIFinderSync {
         else { return nil }
 
         let menu = NSMenu(title: "RepoReach")
-        addItem("Keep Downloaded", action: .keep, repo: repo, to: menu, enabled: !status.pinned)
-        addItem("Free Up Space", action: .free, repo: repo, to: menu, enabled: !status.isAdopted)
+        addItem("Keep Downloaded", action: .keep, repo: repo, to: menu, enabled: !status.pinned && !status.isWorking)
+        addItem("Free Up Space", action: .free, repo: repo, to: menu, enabled: status.canFreeStorage)
         if status.isAdopted {
             let retained = NSMenuItem(title: "Original checkout retained", action: nil, keyEquivalent: "")
             retained.isEnabled = false
             menu.addItem(retained)
         }
         menu.addItem(.separator())
-        addItem("Refresh Repository", action: .refresh, repo: repo, to: menu)
+        addItem("Refresh Repository", action: .refresh, repo: repo, to: menu, enabled: !status.isWorking)
         return menu
     }
 

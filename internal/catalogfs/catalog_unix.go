@@ -72,6 +72,8 @@ type inodeKey struct {
 }
 
 type handle struct {
+	mu           sync.Mutex // serializes file descriptor use, promotion and release
+	closed       bool
 	repo         *repository
 	backend      *fusefs.ArtifactFuse
 	local        fuseops.HandleID
@@ -81,6 +83,7 @@ type handle struct {
 	directory    bool
 	direntInodes map[fuseops.InodeID]struct{}
 	repoPath     string
+	previewFile  *previewFile
 }
 
 type catalogEntry struct {
@@ -94,20 +97,21 @@ type catalogEntry struct {
 // inode and handle so repositories cannot alias one another's kernel objects.
 type FileSystem struct {
 	fuseutil.NotImplementedFileSystem
-	activate      Activate
-	preview       Preview
-	metadata      model.OverlayStore
-	mu            sync.Mutex
-	repositories  map[string]*repository
-	paths         map[string]fuseops.InodeID
-	inodes        map[fuseops.InodeID]*inode
-	childInodes   map[inodeKey]fuseops.InodeID
-	previewInodes map[previewInodeKey]fuseops.InodeID
-	handles       map[fuseops.HandleID]*handle
-	nextInode     fuseops.InodeID
-	nextHandle    fuseops.HandleID
-	created       time.Time
-	destroyed     bool
+	activate       Activate
+	preview        Preview
+	previewContent PreviewContent
+	metadata       model.OverlayStore
+	mu             sync.Mutex
+	repositories   map[string]*repository
+	paths          map[string]fuseops.InodeID
+	inodes         map[fuseops.InodeID]*inode
+	childInodes    map[inodeKey]fuseops.InodeID
+	previewInodes  map[previewInodeKey]fuseops.InodeID
+	handles        map[fuseops.HandleID]*handle
+	nextInode      fuseops.InodeID
+	nextHandle     fuseops.HandleID
+	created        time.Time
+	destroyed      bool
 }
 
 var _ fuseutil.FileSystem = (*FileSystem)(nil)
@@ -128,11 +132,17 @@ func NewWithMetadata(entries []Entry, activate Activate, metadata model.OverlayS
 // NewWithPreview separates immutable browsing metadata from the writable
 // working-tree lifecycle. A nil provider preserves ordinary activation.
 func NewWithPreview(entries []Entry, activate Activate, metadata model.OverlayStore, preview Preview) (*FileSystem, error) {
+	return NewWithPreviewContent(entries, activate, metadata, preview, nil)
+}
+
+// NewWithPreviewContent also serves ordinary read-only files from the immutable
+// preview. A nil content provider preserves activation on file open.
+func NewWithPreviewContent(entries []Entry, activate Activate, metadata model.OverlayStore, preview Preview, content PreviewContent) (*FileSystem, error) {
 	if activate == nil {
 		return nil, fmt.Errorf("catalogue activation callback is required")
 	}
 	fs := &FileSystem{
-		activate: activate, preview: preview, metadata: metadata, repositories: make(map[string]*repository),
+		activate: activate, preview: preview, previewContent: content, metadata: metadata, repositories: make(map[string]*repository),
 		paths:       map[string]fuseops.InodeID{".": fuseops.RootInodeID},
 		inodes:      map[fuseops.InodeID]*inode{fuseops.RootInodeID: {path: ".", metadataPath: "."}},
 		childInodes: make(map[inodeKey]fuseops.InodeID), handles: make(map[fuseops.HandleID]*handle),
@@ -255,7 +265,7 @@ func (fs *FileSystem) node(id fuseops.InodeID) (*inode, error) {
 
 func (fs *FileSystem) activateRepo(ctx context.Context, repo *repository) (*fusefs.ArtifactFuse, error) {
 	repo.mu.Lock()
-	if repo.backend != nil {
+	if repo.backend != nil && repo.err == nil {
 		backend := repo.backend
 		repo.mu.Unlock()
 		return backend, nil
@@ -275,16 +285,30 @@ func (fs *FileSystem) activateRepo(ctx context.Context, repo *repository) (*fuse
 	pending := make(chan struct{})
 	repo.preparing = pending
 	entry := repo.entry
+	backend := repo.backend
 	repo.mu.Unlock()
-	backend, err := fs.activate(ctx, entry)
+	var err error
+	if backend == nil {
+		backend, err = fs.activate(ctx, entry)
+		if err != nil {
+			backend = nil
+		}
+	}
 	if err == nil && backend == nil {
 		err = fmt.Errorf("activation returned no filesystem for %s", entry.ID)
+	}
+	if err == nil {
+		// Existing readers must join the writable backend before a mutation can
+		// change their inode. New preview opens are excluded by preparing.
+		err = fs.promotePreviewFiles(ctx, repo, backend)
 	}
 	activationErr := activationError(err)
 	repo.mu.Lock()
 	repo.backend = backend
 	if err != nil {
-		repo.backend = nil
+		// A partial descriptor promotion has already bound identities to this
+		// adapter. Retain it and retry remaining promotions before admitting
+		// mutations; a newly created adapter cannot reuse those local IDs.
 		repo.err = activationErr
 	} else {
 		repo.err = nil
@@ -502,9 +526,17 @@ func (fs *FileSystem) GetInodeAttributes(ctx context.Context, op *fuseops.GetIno
 	}
 	if n.preview != nil {
 		n.repo.mu.Lock()
-		dormant := n.repo.backend == nil
+		dormant := n.repo.backend == nil && n.repo.preparing == nil
+		revision := n.repo.previewRevision
 		n.repo.mu.Unlock()
 		attrs, known := fs.previewAttributes(*n.preview)
+		if dormant && !known && fs.previewContent != nil {
+			attrs, err = fs.exactPreviewAttributes(ctx, n.repo, *n.preview, revision)
+			if err != nil {
+				return err
+			}
+			known = true
+		}
 		if dormant && known {
 			op.Attributes = attrs
 			op.AttributesExpiration = time.Now().Add(time.Second)
@@ -720,6 +752,18 @@ func (fs *FileSystem) ReleaseDirHandle(ctx context.Context, op *fuseops.ReleaseD
 	}
 	fs.mu.Lock()
 	delete(fs.handles, op.Handle)
+	fs.mu.Unlock()
+	fs.releaseHandleInodes(h)
+	if h.backend != nil {
+		child := *op
+		child.Handle = h.local
+		return h.backend.ReleaseDirHandle(ctx, &child)
+	}
+	return nil
+}
+
+func (fs *FileSystem) releaseHandleInodes(h *handle) {
+	fs.mu.Lock()
 	var releases []fuseops.ForgetInodeOp
 	for id := range h.direntInodes {
 		n := fs.inodes[id]
@@ -738,23 +782,21 @@ func (fs *FileSystem) ReleaseDirHandle(ctx context.Context, op *fuseops.ReleaseD
 			}
 		}
 	}
+	h.direntInodes = nil
 	fs.mu.Unlock()
 	if len(releases) != 0 {
-		h.repo.mu.Lock()
-		backend := h.repo.backend
-		h.repo.mu.Unlock()
+		backend := h.backend
+		if backend == nil {
+			h.repo.mu.Lock()
+			backend = h.repo.backend
+			h.repo.mu.Unlock()
+		}
 		for i := range releases {
 			if backend != nil {
 				_ = backend.ForgetInode(context.Background(), &releases[i])
 			}
 		}
 	}
-	if h.backend != nil {
-		child := *op
-		child.Handle = h.local
-		return h.backend.ReleaseDirHandle(ctx, &child)
-	}
-	return nil
 }
 
 // Mount mounts the complete catalogue at a chosen existing, empty directory.

@@ -129,6 +129,9 @@ func (fs *FileSystem) OpenFile(ctx context.Context, op *fuseops.OpenFileOp) erro
 	if n.path != "" {
 		return syscall.EISDIR
 	}
+	if handled, err := fs.openPreviewFile(n, op); handled {
+		return err
+	}
 	if op.OpenFlags&syscall.O_TRUNC != 0 || op.OpenFlags&syscall.O_ACCMODE != syscall.O_RDONLY {
 		release, err := fs.beginMutation(n.repo)
 		if err != nil {
@@ -198,6 +201,13 @@ func (fs *FileSystem) SetInodeAttributes(ctx context.Context, op *fuseops.SetIno
 }
 
 func (fs *FileSystem) ReadSymlink(ctx context.Context, op *fuseops.ReadSymlinkOp) error {
+	n, err := fs.node(op.Inode)
+	if err != nil {
+		return err
+	}
+	if handled, err := fs.readPreviewSymlink(ctx, n, op); handled {
+		return err
+	}
 	n, backend, err := fs.backend(ctx, op.Inode)
 	if err != nil {
 		return err
@@ -263,6 +273,14 @@ func (fs *FileSystem) ReadFile(ctx context.Context, op *fuseops.ReadFileOp) erro
 	if err != nil {
 		return err
 	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.closed {
+		return syscall.EBADF
+	}
+	if h.backend == nil && h.previewFile != nil {
+		return fs.readPreviewFile(ctx, h, op)
+	}
 	child := *op
 	child.Inode, child.Handle = h.inode, h.local
 	if err := h.backend.ReadFile(ctx, &child); err != nil {
@@ -277,6 +295,11 @@ func (fs *FileSystem) WriteFile(ctx context.Context, op *fuseops.WriteFileOp) er
 	h, err := fs.getHandle(op.Handle, false)
 	if err != nil {
 		return err
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.closed || h.previewFile != nil {
+		return syscall.EBADF
 	}
 	release, err := fs.beginMutation(h.repo)
 	if err != nil {
@@ -298,6 +321,14 @@ func (fs *FileSystem) SyncFile(ctx context.Context, op *fuseops.SyncFileOp) erro
 	if err != nil {
 		return err
 	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.closed {
+		return syscall.EBADF
+	}
+	if h.backend == nil && h.previewFile != nil {
+		return nil // immutable content has no pending writes
+	}
 	child := *op
 	child.Inode, child.Handle = h.inode, h.local
 	if err := h.backend.SyncFile(ctx, &child); err != nil {
@@ -312,6 +343,14 @@ func (fs *FileSystem) FlushFile(ctx context.Context, op *fuseops.FlushFileOp) er
 	h, err := fs.getHandle(op.Handle, false)
 	if err != nil {
 		return err
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.closed {
+		return syscall.EBADF
+	}
+	if h.backend == nil && h.previewFile != nil {
+		return nil
 	}
 	child := *op
 	child.Inode, child.Handle = h.inode, h.local
@@ -328,9 +367,25 @@ func (fs *FileSystem) ReleaseFileHandle(ctx context.Context, op *fuseops.Release
 	if err != nil {
 		return err
 	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.closed {
+		return syscall.EBADF
+	}
+	h.closed = true
 	fs.mu.Lock()
 	delete(fs.handles, op.Handle)
 	fs.mu.Unlock()
+	fs.releaseHandleInodes(h)
+	if h.previewFile != nil && h.previewFile.file != nil {
+		if err := h.previewFile.file.Close(); err != nil {
+			return err
+		}
+		h.previewFile.file = nil
+	}
+	if h.backend == nil {
+		return nil
+	}
 	child := *op
 	child.Handle = h.local
 	return h.backend.ReleaseFileHandle(ctx, &child)
@@ -357,9 +412,17 @@ func (fs *FileSystem) Destroy() {
 	}
 	fs.mu.Unlock()
 	for _, h := range handles {
+		h.mu.Lock()
+		h.closed = true
+		if h.previewFile != nil && h.previewFile.file != nil {
+			_ = h.previewFile.file.Close()
+			h.previewFile.file = nil
+		}
 		if h.backend == nil {
+			h.mu.Unlock()
 			continue
 		}
+		h.mu.Unlock()
 		if h.directory {
 			_ = h.backend.ReleaseDirHandle(context.Background(), &fuseops.ReleaseDirHandleOp{Handle: h.local})
 		} else {

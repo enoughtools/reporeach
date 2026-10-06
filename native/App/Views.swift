@@ -410,7 +410,7 @@ struct ContentView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
             .buttonStyle(ReachButtonStyle())
-            .disabled(repo.isAdopted || store.isRepositoryWorking(repo) || store.isBusy || store.demoMode || (!repo.isLocal && !repo.pinned && repo.downloadedBytes == 0))
+            .disabled(!repo.canFreeStorage || store.isRepositoryWorking(repo) || store.isBusy || store.demoMode)
             .accessibilityIdentifier("free-repository")
             .help(repo.isAdopted ? "Your original checkout is retained. RepoReach never removes an adopted folder." : "Return a safely recoverable checkout to an on-demand repository")
 

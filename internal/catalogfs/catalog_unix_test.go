@@ -58,6 +58,10 @@ func (h *testHydrator) ReadBlob(context.Context, model.RepoConfig, model.BaseNod
 }
 
 func repositoryFixture(t *testing.T, id string) fixture {
+	return repositoryFixtureWithNodes(t, id, nil)
+}
+
+func repositoryFixtureWithNodes(t *testing.T, id string, children []model.BaseNode) fixture {
 	t.Helper()
 	root := t.TempDir()
 	ctx := context.Background()
@@ -73,7 +77,9 @@ func repositoryFixture(t *testing.T, id string) fixture {
 	}
 	t.Cleanup(func() { _ = ov.Close() })
 	content := append([]byte(id), 0, 0xff, 0x01)
-	gen, err := snap.PublishGeneration(ctx, "commit", "main", []model.BaseNode{{RepoID: cfg.ID, Path: ".", Type: "dir", Mode: 0o755, SizeState: "known", SizeBytes: 4096}, {RepoID: cfg.ID, Path: "README.md", Type: "file", Mode: 0o644, ObjectOID: "blob", SizeState: "known", SizeBytes: int64(len(content))}})
+	nodes := []model.BaseNode{{RepoID: cfg.ID, Path: ".", Type: "dir", Mode: 0o755, SizeState: "known", SizeBytes: 4096}, {RepoID: cfg.ID, Path: "README.md", Type: "file", Mode: 0o644, ObjectOID: "blob", SizeState: "known", SizeBytes: int64(len(content))}}
+	nodes = append(nodes, children...)
+	gen, err := snap.PublishGeneration(ctx, "commit", "main", nodes)
 	if err != nil {
 		t.Fatal(err)
 	}

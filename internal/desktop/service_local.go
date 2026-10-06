@@ -51,7 +51,13 @@ func (s *Service) runLocalAction(ctx context.Context, op Operation, repo Reposit
 		if err := s.detachLocked(); err != nil {
 			return err
 		}
-		err := s.freeMaterializedCheckout(ctx, repo.ID)
+		releasePreview, err := s.pausePreviewContent(ctx, repo.ID)
+		if err != nil {
+			return errors.Join(err, s.restoreCatalogueAfterChange(ctx, wasMounted))
+		}
+		defer releasePreview()
+		err = s.freeMaterializedCheckout(ctx, repo.ID)
+		releasePreview()
 		return errors.Join(err, s.restoreCatalogueAfterChange(ctx, wasMounted))
 	default:
 		return errors.New("unsupported local checkout action")
@@ -133,6 +139,11 @@ func (s *Service) materializeRepository(ctx context.Context, op Operation, downl
 	if err := s.detachLocked(); err != nil {
 		return err
 	}
+	releasePreview, err := s.pausePreviewContent(ctx, repo.ID)
+	if err != nil {
+		return err
+	}
+	defer releasePreview()
 	if err := s.engine.StopCatalogRepositoryStorage(ctx, config.Name); err != nil {
 		return err
 	}

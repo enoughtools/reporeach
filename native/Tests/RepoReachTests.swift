@@ -78,6 +78,7 @@ final class FinderCacheTests: XCTestCase {
         let legacy = try JSONDecoder().decode(FinderStatusSnapshot.self, from: Data(#"{"mountRoot":"/Users/example/Repositories","repositories":[{"id":"owner/repo","state":"virtual","pinned":false}]}"#.utf8))
         XCTAssertNil(legacy.repositories.first?.localPath)
         XCTAssertNil(legacy.repositories.first?.localKind)
+        XCTAssertEqual(legacy.repositories.first?.downloadedBytes, 0)
         XCTAssertNil(legacy.virtualRoot)
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -164,6 +165,22 @@ final class FinderCacheTests: XCTestCase {
         let legacy = try JSONDecoder().decode(FinderStatusSnapshot.self, from: Data(#"{"mountRoot":"/Users/example/Repositories","repositories":[],"virtualRoot":null}"#.utf8))
         XCTAssertNil(legacy.virtualRoot)
         XCTAssertEqual(FinderStatusCache.observedDirectoryURLs(in: legacy), [URL(fileURLWithPath: legacy.mountRoot, isDirectory: true)])
+    }
+
+    func testFinderDownloadedBytesDefaultsAndRoundTripsWhileRepositoryRemainsVirtual() throws {
+        let legacy = try JSONDecoder().decode(FinderRepositoryStatus.self, from: Data(#"{"id":"owner/repo","state":"virtual","pinned":false,"downloadedBytes":null}"#.utf8))
+        XCTAssertEqual(legacy.downloadedBytes, 0)
+        XCTAssertFalse(legacy.canFreeStorage)
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let cache = FinderStatusCache(fileURL: directory.appendingPathComponent("status.json"))
+        let repository = FinderRepositoryStatus(id: legacy.id, state: "virtual", pinned: false, downloadedBytes: 37)
+        let status = FinderStatusSnapshot(mountRoot: "/Users/example/Repositories", repositories: [repository])
+        try cache.write(status)
+        let loaded = try XCTUnwrap(cache.read()?.repositories.first)
+        XCTAssertEqual(loaded, repository)
+        XCTAssertTrue(loaded.canFreeStorage)
+        XCTAssertEqual(loaded.state, "virtual")
     }
 
     func testUnsafeOrOverlappingVirtualRootsCannotBeObservedOrMapped() throws {
