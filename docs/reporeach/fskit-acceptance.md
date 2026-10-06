@@ -2,7 +2,7 @@
 
 `TestFSKitMountedAcceptance` exercises the native macOS 26 filesystem through real mounted paths and the desktop control service. It uses private temporary state, a private mount folder, and local Git fixtures. It does not install an app, activate an extension, update the OS, or change security settings.
 
-This is a narrow acceptance harness, not complete native release qualification. A skipped test, a successful Go compilation, and bridge tests are not mounted FSKit evidence. The development host now runs macOS 27.0.1; its result will establish that runtime, not a macOS 26 mounted pass. See [the native backend's remaining release gates](native-fskit.md).
+This is a narrow acceptance harness, not complete native release qualification. A skipped test, a successful Go compilation, and bridge tests are not mounted FSKit evidence. The complete primary sequence passes at `8807963` with the signed validation module on macOS 27.0.1 ARM64, including native binary/empty extended attributes and persistence across visibility changes, remount and restart. Fresh cached kernel inspection confirms final detachment and both helper exits. This establishes that runtime, not a macOS 26 mounted pass. See [the native backend's remaining release gates](native-fskit.md).
 
 ## Prerequisites
 
@@ -119,15 +119,33 @@ The core sequence checks:
 - Adoption of a local repository without GitHub sign-in or a `gh` invocation, with the original checkout preserved.
 - Lazy reads of text and binary files, symlink targets, and executable files.
 - Native Git status, staging, commits, and branch checkout with warmed file lookups.
+- Native binary/empty extended attributes, create/replace/default policies, missing/remove errors, lists and short buffers; lazy catalogue metadata and symlink/gitfile isolation.
 - Retained open-file reads and writes across rename and unlink.
 - A busy visibility change refusing to publish, preserving the catalogue and mounted view; successful repository and organization hide/show changes using normal reconnects.
-- Normal unmount/remount and desktop helper restart using the same FSKit resource directory, with fresh lookups of retained working-tree content.
+- Normal unmount/remount and desktop helper restart using the same FSKit resource directory, with fresh lookups of retained working-tree content and metadata.
 
 Additional release gates include signing/notarization, both architecture slices, complete pin/free behavior, remote refresh, unsupported-file behavior, failure injection, and interrupted-session recovery. Passing this sequence does not establish those gates.
 
+## Cold downloads and clean eviction
+
+After recording the primary result and normal cleanup, run
+`TestFSKitMountedColdStorageAcceptance` with the same explicit prerequisites and
+environment, changing only the `-run` test selection. This is a separate disposable
+fixture with a filtered loopback HTTP Git source. Before Keep, it verifies missing
+Git blobs with `GIT_NO_LAZY_FETCH=1` and an empty cache without mounted repo lookups.
+It then checks exact unique-blob accounting and offline restart/reads with zero
+source requests.
+
+Metadata-only native attributes must allow clean Free. The test inspects eviction
+through the API and private state before any mounted lookup can reacquire the repo,
+then verifies reacquired bytes, attributes, pin policy and original-source
+preservation. The fixture's bounded Git HTTP children are reaped; filesystem
+shutdown still follows the ordinary owned-detachment checks below. This case does
+not cover dirty/staged Free refusal, Refresh or abrupt failure recovery.
+
 ## Cleanup and retained fixtures
 
-The harness closes its own fixture handles, requests normal `/v1/prepare-quit`, and sends `SIGTERM` to its private helper only after a successful detach. It never forces an unmount. The helper uses its own process group to survive test-runner cleanup. If detach or ownership verification is uncertain, the harness fails clearly and preserves its `/tmp/rr-fskit-*` directory and helper process. The failure output identifies the private paths and PID. The overall Go test timeout can bypass deferred cleanup, so inspect the retained session after a timeout as well. Do not delete that directory or terminate the helper while its volume might still be attached.
+The harness closes its own fixture handles, requests normal `/v1/prepare-quit`, and sends `SIGTERM` to its private helper only after a successful detach. It never forces an unmount. The helper uses its own process group to survive test-runner cleanup. If detach or ownership verification is uncertain, the harness fails clearly and preserves its `/tmp/rr-fskit-*` or `/tmp/rr-cold-*` directory and helper process. The failure output identifies the private paths and PID. The overall Go test timeout can bypass deferred cleanup, so inspect the retained session after a timeout as well. Do not delete that directory or terminate the helper while its volume might still be attached.
 
 After closing processes or handles that hold that specific fixture busy, use the private socket path printed by the test to retry the normal operation:
 

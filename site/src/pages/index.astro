@@ -19,9 +19,77 @@ try {
   }
 }
 const artifacts = release?.artifacts ?? [];
-const firstDownload = artifacts.find(
-  (a: any) => a.architecture === "arm64" && a.format === "dmg",
+if (
+  release &&
+  (release.product !== "RepoReach" ||
+    typeof release.version !== "string" ||
+    !/^[A-Za-z0-9.+-]+$/.test(release.version) ||
+    !Array.isArray(artifacts) ||
+    artifacts.some(
+      (a: any) =>
+        !a ||
+        !["arm64", "x86_64"].includes(a.architecture) ||
+        !["dmg", "zip"].includes(a.format) ||
+        typeof a.url !== "string" ||
+        !a.url.startsWith("https://") ||
+        !["developer-id", "ad-hoc"].includes(a.signature) ||
+        typeof a.notarized !== "boolean",
+    ))
+) {
+  throw new Error("Invalid release download metadata");
+}
+const availableArchitectures = ["arm64", "x86_64"].filter((architecture) =>
+  artifacts.some(
+    (a: any) => a.architecture === architecture && a.format === "dmg",
+  ),
 );
+const firstDownload = artifacts.find(
+  (a: any) =>
+    a.architecture === availableArchitectures[0] && a.format === "dmg",
+);
+const backend = release?.filesystemBackend ?? "macfuse";
+if (release && !["macfuse", "fskit"].includes(backend)) {
+  throw new Error("Unknown release filesystem backend");
+}
+if (
+  backend === "fskit" &&
+  artifacts.some((a: any) => a.signature !== "developer-id")
+) {
+  throw new Error("Native release downloads require Developer ID signing");
+}
+const nativeDownload = Boolean(firstDownload && backend === "fskit");
+function macOSVersion(value: string) {
+  if (!/^\d+(?:\.\d+){0,2}$/.test(value)) {
+    throw new Error("Invalid release macOS requirement");
+  }
+  return value.split(".").map(Number);
+}
+const minimums = [
+  release?.minimumMacOS ?? "13.0",
+  release?.minimumMountMacOS ?? (backend === "fskit" ? "26.0" : "13.0"),
+  backend === "fskit" ? "26.0" : "13.0",
+].map(macOSVersion);
+minimums.sort((a, b) => {
+  for (let index = 0; index < 3; index++) {
+    const difference = (b[index] ?? 0) - (a[index] ?? 0);
+    if (difference) return difference;
+  }
+  return 0;
+});
+const minimumMacOS = minimums[0].join(".").replace(/(?:\.0)+$/, "");
+const requirements = firstDownload
+  ? nativeDownload
+    ? `macOS ${minimumMacOS} or later and Git. Enable RepoReach's bundled File System Extension in System Settings. No separate driver installation is needed.`
+    : `macOS ${minimumMacOS} or later, Git, and macFUSE's kernel backend. Apple Silicon setup can require Recovery approval and Reduced Security. Review the setup guide and release notes before installing this beta.`
+  : "Requirements will accompany the verified download. Check the release notes before installing a build.";
+const architectureNote =
+  availableArchitectures.length === 2
+    ? "Apple Silicon and Intel"
+    : availableArchitectures[0] === "arm64"
+      ? "Apple Silicon"
+      : availableArchitectures[0] === "x86_64"
+        ? "Intel"
+        : "Build in development";
 const faqs = [
   [
     "Do I need a GitHub account?",
@@ -49,16 +117,13 @@ const faqs = [
   ],
   [
     "Can I choose which repositories appear?",
-    "Yes. Switch off a repository or an owner to hide its folders and pause background downloads while retaining its data. Individual choices survive GitHub rediscovery, and turning an owner back on leaves individually disabled repos hidden. Already open files can continue to work.",
+    `Yes. Switch off a repository or an owner to hide its folders and pause background downloads while retaining its data. Individual choices survive GitHub rediscovery, and turning an owner back on leaves individually disabled repos hidden. ${nativeDownload ? "Visibility changes briefly reconnect the catalogue; if open files or terminals prevent this, your current view stays in place." : "Close files and terminals in the catalogue before changing visibility."}`,
   ],
   [
     "How does Free Up Space protect my work?",
     "RepoReach checks for local-only work before reclaiming a repository. If it finds edits, unpushed commits, stashes, or files that could be lost, it leaves the repository in place and explains what needs attention.",
   ],
-  [
-    "What does the beta need?",
-    "macOS 13 or later, Git, and macFUSE's kernel backend. Apple Silicon setup can require Recovery approval and Reduced Security. Review the setup guide and release notes before installing the beta.",
-  ],
+  ["What does the beta need?", requirements],
 ];
 ---
 
@@ -136,7 +201,7 @@ const faqs = [
             >
           </div>
           <p class="hero-note">
-            Early beta · Apple Silicon and Intel · GitHub sign-in optional
+            Early beta · {architectureNote} · GitHub sign-in optional
           </p>
         </div>
         <div
@@ -304,11 +369,23 @@ const faqs = [
               >{release?.version ?? "Beta in development"}</Badge
             >
           </div>
-          <label for="architecture">Your Mac</label><select id="architecture"
-            ><option value="arm64">Apple Silicon (M1 and later)</option><option
-              value="x86_64">Intel</option
-            ></select
+          <label for="architecture">Your Mac</label><select
+            id="architecture"
+            disabled={!firstDownload}
           >
+            {
+              (availableArchitectures.length
+                ? availableArchitectures
+                : ["arm64", "x86_64"]
+              ).map((architecture) => (
+                <option value={architecture}>
+                  {architecture === "arm64"
+                    ? "Apple Silicon (M1 and later)"
+                    : "Intel"}
+                </option>
+              ))
+            }
+          </select>
           <Button
             id="download-button"
             href={firstDownload?.url ?? "#download"}
@@ -327,16 +404,28 @@ const faqs = [
             }
           </p>
           <p class="requirements">
-            macOS 13+ · <a
-              href="https://github.com/enoughtools/reporeach/blob/main/docs/reporeach/platform-setup.md"
-              >macFUSE kernel backend required</a
-            >
+            {
+              firstDownload ? (
+                <>
+                  macOS {minimumMacOS}+ · Git ·{" "}
+                  <a href="https://github.com/enoughtools/reporeach/blob/main/docs/reporeach/platform-setup.md">
+                    {nativeDownload
+                      ? "Bundled extension · No driver install"
+                      : "macFUSE kernel backend required"}
+                  </a>
+                </>
+              ) : (
+                "Requirements will accompany the verified download."
+              )
+            }
           </p>
           <div class="download-links">
             <a
               id="zip-download"
               href={artifacts.find(
-                (a: any) => a.architecture === "arm64" && a.format === "zip",
+                (a: any) =>
+                  a.architecture === firstDownload?.architecture &&
+                  a.format === "zip",
               )?.url ?? "https://github.com/enoughtools/reporeach/releases"}
               >ZIP alternative</a
             ><a href="https://github.com/enoughtools/reporeach/releases"
@@ -432,7 +521,8 @@ const faqs = [
           document.getElementById("download-detail").textContent = dmg
             ? `${dmg.signature === "developer-id" ? "Developer ID signed" : "Unsigned beta"} · ${dmg.notarized ? "Notarized by Apple" : "Not yet notarized"}`
             : "A build for this architecture is being prepared.";
-          if (zip) document.getElementById("zip-download").href = zip.url;
+          document.getElementById("zip-download").href =
+            zip?.url ?? "https://github.com/enoughtools/reporeach/releases";
         });
     </script>
   </body>

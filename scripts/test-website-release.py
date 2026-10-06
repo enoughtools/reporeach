@@ -71,7 +71,7 @@ def normalized(text):
     return " ".join(text.split())
 
 
-def release_fixture():
+def release_fixture(backend="macfuse"):
     artifacts = []
     for architecture in ("arm64", "x86_64"):
         for extension in ("dmg", "zip"):
@@ -80,10 +80,12 @@ def release_fixture():
                 "architecture": architecture, "format": extension,
                 "filename": filename,
                 "url": f"https://reporeach.reb.run/releases/{VERSION}/{filename}",
-                "signature": "developer-id" if architecture == "arm64" else "ad-hoc",
+                "signature": "developer-id" if backend == "fskit" or architecture == "arm64" else "ad-hoc",
                 "notarized": False, "sha256": "0" * 64, "bytes": 1234,
             })
-    return {"product": "RepoReach", "version": VERSION, "artifacts": artifacts}
+    return {"product": "RepoReach", "version": VERSION, "artifacts": artifacts,
+            "filesystemBackend": backend, "minimumMacOS": "13.0",
+            "minimumMountMacOS": "26.0" if backend == "fskit" else "13.0"}
 
 
 def build(output, succeeds=True):
@@ -159,6 +161,19 @@ def assert_release_page(page, fixture):
     assert VERSION in normalized(page.by_class("download-title").text())
     assert page.ids["checksums"].attrs["href"] == f"/releases/{VERSION}/SHA256SUMS"
     assert ">" not in page.by_class("requirements").text(), "Stray visible markup in requirements"
+    requirements = normalized(page.by_class("requirements").text())
+    faq = next(normalized(node.text()) for node in page.elements
+               if node.tag == "details" and "What does the beta need?" in node.text())
+    if fixture["filesystemBackend"] == "fskit":
+        assert requirements == "macOS 26+ · Git · Bundled extension · No driver install"
+        assert "macOS 26 or later and Git" in faq
+        assert "File System Extension in System Settings" in faq
+        assert "No separate driver installation is needed" in faq
+        assert "macFUSE" not in requirements + faq and "Recovery" not in faq
+    else:
+        assert requirements == "macOS 13+ · Git · macFUSE kernel backend required"
+        assert "macOS 13 or later, Git, and macFUSE's kernel backend" in faq
+        assert "Recovery approval and Reduced Security" in faq
     scripts = [node.text() for node in page.elements if node.tag == "script" and "architecture" in node.text() and "download-button" in node.text()]
     assert len(scripts) == 1, "Expected the actual emitted architecture-selection script"
     payload = {"script": scripts[0], "elements": {
@@ -174,15 +189,23 @@ def assert_release_page(page, fixture):
         assert state["zipURL"] == expected[(architecture, "zip")]
         assert state["button"].get("aria-disabled") != "true"
         assert state["buttonText"] == "Download disk image"
-        expected_signing = "Developer ID signed" if architecture == "arm64" else "Unsigned beta"
+        artifact = next(item for item in fixture["artifacts"]
+                        if item["architecture"] == architecture and item["format"] == "dmg")
+        expected_signing = "Developer ID signed" if artifact["signature"] == "developer-id" else "Unsigned beta"
         assert state["signing"] == f"{expected_signing} · Not yet notarized"
 
 
-def assert_preview_page(page):
+def assert_preview_page(page, expected_version="Beta in development"):
     assert page.ids["download-button"].attrs.get("aria-disabled") == "true"
     assert normalized(page.ids["download-button"].text()) == "Build being prepared"
-    assert "Beta in development" in normalized(page.by_class("download-title").text())
+    assert expected_version in normalized(page.by_class("download-title").text())
     assert "after verification" in normalized(page.ids["download-detail"].text())
+    assert "Requirements will accompany the verified download" in page.by_class("requirements").text()
+    faq = next(normalized(node.text()) for node in page.elements
+               if node.tag == "details" and "What does the beta need?" in node.text())
+    assert "Requirements will accompany the verified download" in faq
+    assert "macFUSE" not in faq and "File System Extension" not in faq
+    assert "disabled" in page.ids["architecture"].attrs
 
 
 def interrupted(signum, frame):
@@ -207,7 +230,15 @@ def main():
                 fixture = release_fixture()
                 manifest.write_text(json.dumps(fixture) + "\n")
                 assert_release_page(build(outputs / "release"), fixture)
-                print("PASS: production release version, enabled download, exact Apple Silicon/Intel DMG+ZIP URLs and signing states")
+                print("PASS: legacy release requirements, enabled architecture downloads and exact signing states")
+                fixture = release_fixture("fskit")
+                manifest.write_text(json.dumps(fixture) + "\n")
+                assert_release_page(build(outputs / "native"), fixture)
+                print("PASS: native macOS 26 requirements, bundled extension approval and no driver installation")
+                fixture["artifacts"] = []
+                manifest.write_text(json.dumps(fixture) + "\n")
+                assert_preview_page(build(outputs / "empty-native"), VERSION)
+                print("PASS: native metadata without a download makes no native-release requirements claim")
                 manifest.unlink()
                 assert_preview_page(build(outputs / "preview"))
                 print("PASS: missing release metadata retains the development preview")

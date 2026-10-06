@@ -1,83 +1,110 @@
 # Building and releasing RepoReach
 
-The beta packages the native RepoReach app, Finder extension, ArtifactFS engine, official GitHub CLI, and license notices. The macFUSE kernel backend and system Git executable remain separately installed dependencies. Read [platform setup](platform-setup.md) for driver, security approval, and Finder extension requirements. The build targets macOS 13 or later and produces separate Apple Silicon (`arm64`) and Intel (`x86_64`) archives.
+The current native backend bundles RepoReach's FSKit module and requires **macOS 26 or later for virtual repositories**. The management app retains a macOS 13 deployment target; that does not lower the filesystem requirement. A complete package contains the app, Finder extension, FSKit module, ArtifactFS engine, official GitHub CLI, and license notices. Git remains a system dependency. Native releases require normal approval of the bundled File System Extension, with no separate macFUSE installation.
 
-Use Go 1.26.8, full Xcode 16 or later and its command-line tools, Python 3, and the standard macOS packaging tools. The packaging scripts select Go 1.26.8 and download checksum-verified XcodeGen 2.46.0. Native development also supports an existing XcodeGen installation. The website requires Node.js 22.14 or later. First run the checks in [CONTRIBUTING.md](../../CONTRIBUTING.md).
+The published `0.1.0-beta.3` is a historical macOS 13+ release requiring separately installed macFUSE's kernel backend. Preserve its original assets, manifest, source tag, and requirements. Current source supports legacy compilation only; it cannot recreate that release through the native packaging path. See [platform setup](platform-setup.md) and the download's actual manifest.
 
-## Repeat a source build
+Use Go 1.26.8, **full Xcode 26 or later with the macOS 26 SDK or later**, Python 3, and standard macOS packaging tools. The scripts select Go 1.26.8 and download checksum-verified XcodeGen 2.46.0. Native development also supports an existing XcodeGen installation. The website requires Node.js 22.14 or later. Start with [CONTRIBUTING.md](../../CONTRIBUTING.md).
 
-Check out a specific source revision and record your Xcode, macOS, Go, and XcodeGen versions. Keep the checkout clean when creating a release. For development packages:
+## Local validation products
+
+Unsigned native products are for local validation, not public distribution. Compilation does not prove that macOS will authorize, enable, or mount the module:
 
 ```sh
-release_version=0.1.0-beta.3
-scripts/build-macos.sh --arch arm64 --version "$release_version" --unsigned
-scripts/build-macos.sh --arch x86_64 --version "$release_version" --unsigned
+scripts/build-macos.sh --backend fskit --arch arm64 --compile-only --unsigned
+scripts/build-macos.sh --backend fskit --arch x86_64 --compile-only --unsigned
+```
+
+Compiled apps are in `build/native/fskit/<arch>/Build/Products/Release/RepoReach.app`; these commands create no release archives. To export a complete unsigned ARM64 validation app with helpers and notices, use a fresh generation:
+
+```sh
+validation_root="$PWD/build/fskit-validation/generations/local-arm64-$(date -u +%Y%m%dT%H%M%SZ)"
+scripts/build-macos.sh --backend fskit --arch arm64 --validation-artifact \
+  --validation-root "$validation_root" --unsigned
+```
+
+This exports `stage/arm64/RepoReach.app` and `products/arm64/RepoReach-local-validation-arm64.zip` beneath that directory, with local source evidence. It cannot sign, notarize, or publish. Activation needs appropriate authorized local signing and a matching profile; a device-bound development profile is never a distribution profile. Preserve validation generations until their evidence and runtime state have been reviewed.
+
+## Complete Developer ID packages
+
+Check out the agreed source revision, require a clean checkout, and record source, Xcode, SDK, macOS, Go, and XcodeGen versions. Choose a new immutable version and build number. The example proposes a new version; it is not evidence that this version has been released.
+
+Use an existing Developer ID Application identity from the Keychain and the actual matching **Developer ID provisioning profile that authorizes FSKit**. Supply a certificate name or hash and a profile path, never a private key or password. The profile must authorize production module `com.enoughtools.reporeach.fskit`, match the signing team and certificate, and permit distribution to all devices. The validator authenticates these claims and embeds the profile in the module. Do not substitute the profile-acquisition Xcode archive: it lacks the engine, GitHub CLI, and complete notices.
+
+```sh
+release_version=0.1.0-beta.4
+export REPOREACH_BUILD_NUMBER=4
+export REPOREACH_SIGN_IDENTITY='Developer ID Application: Your Organization (TEAMID)'
+export REPOREACH_FSKIT_PROFILE=/absolute/path/developer-id-fskit.provisionprofile
+test -z "$(git status --porcelain)"
+scripts/build-macos.sh --backend fskit --arch arm64 --version "$release_version"
+scripts/build-macos.sh --backend fskit --arch x86_64 --version "$release_version"
 python3 scripts/release-manifest.py manifest \
   --directory "dist/releases/$release_version" --version "$release_version"
 ```
 
-Outputs are `dist/releases/<version>/RepoReach-<version>-macOS-<arch>.dmg` and `.zip`, alongside `release.json` and `SHA256SUMS`. The generated app stages in `build/package/<arch>/RepoReach.app`; native intermediates are in `build/native/<arch>`.
+Run architecture builds sequentially. Complete apps stage in `build/package/fskit/<arch>/RepoReach.app`; intermediates are in `build/native/fskit/<arch>`. Outputs are `dist/releases/<version>/RepoReach-<version>-macOS-<arch>.dmg` and `.zip`, per-build `.metadata-<arch>.json`, `release.json`, and `SHA256SUMS`.
 
-`--unsigned` produces **ad-hoc signed** executables so they can run on Apple Silicon. It does not mean Developer ID signing or Apple notarization. The manifest records `signature: "ad-hoc"` and `notarized: false`. Do not advertise such an artifact as notarized or advise users to disable Gatekeeper globally.
+The script signs the engine, GitHub CLI, Finder extension, FSKit module, and app with hardened runtime and timestamps, resolves authorized app-group claims, and verifies nested signatures and module authorization. Existing release filenames cannot be overwritten. Any source change after packaging requires new builds from the final clean revision. Confirm both architectures and formats, matching source revision/content hashes, profile hashes, and `source.dirty: false`; manifest generation does not independently require every architecture or a clean source tree.
 
-The scripts make source builds repeatable by using committed Go dependency checksums and the website lockfile, fixed GitHub CLI archives with hard-coded SHA-256 verification, and Go `-trimpath` with an empty build ID. Native build metadata, packaging dates, signing timestamps, and notarization can change output bytes. **Bit-for-bit reproducibility is not established.** Compare the source/toolchain provenance and recorded artifact hashes rather than promising identical archives.
+The scripts use committed Go checksums, the website lockfile, pinned tool archives, and Go `-trimpath` with an empty build ID. Native build metadata, packaging dates, signing timestamps, and notarization can change output bytes. **Bit-for-bit reproducibility is not established.** Compare provenance and recorded hashes.
+
+## Notarization
+
+For notarized packages, add `--notarize` to both original architecture packaging commands above and set `REPOREACH_NOTARY_PROFILE` to a **known, existing** `notarytool` Keychain profile name. Do not guess the name. Alternatively, the script accepts `APPLE_API_KEY_PATH`, `APPLE_API_KEY_ID`, and `APPLE_API_ISSUER`; keep the private key outside source control and logs.
+
+```sh
+: "${REPOREACH_NOTARY_PROFILE:?Existing configured notary profile required}"
+scripts/build-macos.sh --backend fskit --arch arm64 --version "$release_version" --notarize
+scripts/build-macos.sh --backend fskit --arch x86_64 --version "$release_version" --notarize
+```
+
+These are alternatives to packaging without `--notarize`, not a way to overwrite completed archives. The script submits the signed app, staples and validates its ticket, and assesses it with Gatekeeper. It then creates and signs the DMG, submits it separately, and staples, validates, and assesses that image. Both submissions must succeed before the completed release records `notarized: true`. Preserve accepted submission results with the release evidence.
+
+A Developer ID signed package without `--notarize` records `notarized: false`. Keep that state accurate in the manifest, website, and release notes. Later notarization requires a new immutable release generation; do not rewrite completed archive metadata. Signatures and profile authorization alone do not establish normal extension activation or downloaded-app Gatekeeper acceptance.
 
 ## Bundled tools and notices
 
-`scripts/vendor-gh.sh` downloads the official GitHub CLI `v2.102.0` archive for the requested architecture and verifies its pinned SHA-256. It also verifies the pinned MIT license file. Changing the version requires updating both architectures' hashes, license hash, package path, manifest metadata, and distribution notices.
+`scripts/vendor-gh.sh` downloads official GitHub CLI `v2.102.0` archives and verifies pinned SHA-256 values and the MIT license. Updating it requires both architecture hashes, the license hash, package path, manifest metadata, and notices to change together.
 
-`scripts/bundle-go-licenses.py` copies notices for Go modules included in the engine and the Go standard library. `scripts/bundle-gh-licenses.py` reads the official GitHub CLI binary's module metadata, verifies dependency sources against the Go checksum database and embedded hashes, and collects module, standard-library, and vendor notices. Both collectors refuse missing notices. The app also includes ArtifactFS/RepoReach's Apache 2.0 license, GitHub CLI's MIT license, and attribution to upstream Cloudflare ArtifactFS. Review generated resources before distribution, especially when changing dependencies.
+`scripts/bundle-go-licenses.py` includes notices for the engine's Go modules and standard library. `scripts/bundle-gh-licenses.py` verifies dependency sources against the checksum database and binary metadata, then collects GitHub CLI module, standard-library, and vendor notices. Both collectors refuse missing notices. Packages also include the Apache 2.0 license and attribution to upstream Cloudflare ArtifactFS. Review generated resources when dependencies change.
 
-## Developer ID signing and notarization
+## Manifest, website, and publication
 
-Use a Developer ID Application identity already available in your Keychain. Pass its name or hash, not a private key or password:
+The manifest records source/toolchain provenance, architecture, size/hash, signing and notarization state, filesystem backend, app and mount minimum OS versions, and bundled-module profile hash. Generating it rechecks archive bytes and consistent backend/profile/source content. Checksums detect changed downloads; they do not independently authenticate the publisher. The website displays the published backend's requirements: historical beta.3 needs macOS 13+ and external macFUSE; native virtual repositories need macOS 26+, Git, and bundled extension approval.
 
-```sh
-release_version=0.1.0-beta.3
-export REPOREACH_SIGN_IDENTITY='Developer ID Application: Your Organization (TEAMID)'
-export REPOREACH_NOTARY_PROFILE='reporeach-notary'
-export REPOREACH_BUILD_NUMBER=3
-scripts/build-macos.sh --arch arm64 --version "$release_version" --notarize
-scripts/build-macos.sh --arch x86_64 --version "$release_version" --notarize
-python3 scripts/release-manifest.py manifest \
-  --directory "dist/releases/$release_version" --version "$release_version"
-```
+Before staging or deploying, preserve the whole historical download path set. Restore exact retained assets or download the existing GitHub release into an empty versioned directory without overwriting files, then verify their previously recorded hashes and manifests. In particular, retain beta.3's four DMG/ZIP downloads, `release.json`, and `SHA256SUMS` beneath `site/public/releases/0.1.0-beta.3`. Never regenerate its manifest from current source. A new `latest.json` may point to the new release while old versioned URLs remain available.
 
-The profile must already be configured for `xcrun notarytool`. Alternatively, the script accepts `APPLE_API_KEY_PATH`, `APPLE_API_KEY_ID`, and `APPLE_API_ISSUER`; keep the API private key outside source control. The packaging script signs helpers, the Finder extension, and the app in order, verifies their signatures, submits an archive, staples and validates the app's ticket, and assesses the app with Gatekeeper. It then creates and signs the DMG, submits it separately, and staples, validates, and assesses that image. Both notarization submissions must succeed when `--notarize` is selected.
-
-Only a successful notarization path records `notarized: true`. A signing identity without `--notarize` produces a Developer ID signed but unnotarized artifact. Verify the actual release manifest and logs.
-
-## Manifest, website, and CI
-
-The manifest records source repository/revision, dirty-checkout status, artifact architecture, byte size, hash, actual signing/notarization flags, minimum macOS, and macFUSE requirement. Generating it rechecks that the archives still match their packaging metadata. Checksums detect changed downloads; they do not independently authenticate the publisher.
-
-To stage verified downloads for the website:
+After runtime and package qualification, stage verified downloads:
 
 ```sh
-release_version=0.1.0-beta.3
 python3 scripts/release-manifest.py stage \
   --directory "dist/releases/$release_version" --version "$release_version"
 npm ci --prefix site
+npm run format:check --prefix site
 npm run build --prefix site
+python3 scripts/test-website-release.py
 ```
 
-Staging writes versioned downloads and `site/public/releases/latest.json`. It rejects individual files over the current Cloudflare static-asset limit of 25 MiB; use an appropriate object-storage distribution path if artifacts exceed it. Staging and building do not deploy the website. Product downloads point to [reporeach.reb.run](https://reporeach.reb.run); the source/release repository is [enoughtools/reporeach](https://github.com/enoughtools/reporeach).
+Staging writes versioned downloads and `site/public/releases/latest.json`; it does not deploy. Individual files larger than 25 MiB are refused by the static-asset guard. If an archive exceeds that limit, use suitable object storage and update the actual download/staging path rather than bypassing the guard.
 
-`.github/workflows/reporeach.yml` checks the engine, race-sensitive packages, a disposable Linux FUSE environment, and the website, then packages both architectures on macOS. A `reporeach-v<version>` tag or an explicitly selected publish dispatch can create a GitHub release after those jobs pass. Signing is conditional on configured secrets; never assume that CI artifacts are notarized just because a release job ran. The workflow's generated notes do not replace a clear statement of beta limits and any unperformed macOS runtime checks.
+`wrangler.jsonc` deploys the complete `site/dist` asset set to [reporeach.reb.run](https://reporeach.reb.run). Deploy only after confirming it contains new downloads and preserved historical paths. After deployment, verify the rendered version, requirements, signing states, architecture/format URLs and hashes, and historical URLs. Source and releases are at [enoughtools/reporeach](https://github.com/enoughtools/reporeach).
+
+`.github/workflows/reporeach.yml` validates Go, race-sensitive packages, disposable Linux FUSE behavior, the website, and native SDK builds/tests for both architectures. **Its release job is disabled.** Tags and `publish` dispatches do not currently publish a release, and unsigned CI validation exports are not distribution packages. Manual GitHub publication requires qualified complete local packages, an explicit final source revision, a fresh immutable tag, and reviewed notes listing tested environments and remaining limitations. Re-enabling automation also requires signed package producers and release gates, not only changing the disabled condition.
 
 ## Release validation checklist
 
-- [ ] Record the source revision and toolchain versions; build from a clean checkout. Review dependency changes and included notices.
-- [ ] Pass engine build, vet, unit tests, and relevant race tests. Pass native unit tests and the locked website build.
-- [ ] Pass mounted FUSE tests with local disposable repos. Separate Linux results from actual macOS runtime results.
-- [ ] Validate both architecture archives, app/helper/extension signatures, hashes, manifest flags, and the notarization path when advertised.
-- [ ] Install a downloaded, quarantined app on a clean supported Mac. Check launch, Git availability, macFUSE setup, real GitHub authorization, and meaningful dependency errors.
-- [ ] Enable the installed Finder extension and verify badges, private cache access, single-repo action routing, and no action for a mixed-repo selection.
-- [ ] Browse owner/repo names without acquisition; enter one repo and verify on-demand reads, binary content, edits, staging, commit, branch switch, and restart persistence.
-- [ ] Without GitHub sign-in, add disposable HTTPS/SSH/local-bare/checkout sources using native Git authentication. Verify delayed preparation, committed-ref selection, unpushed committed history where applicable, and unchanged source index/dirty/untracked files.
-- [ ] Toggle repository and owner visibility, rediscover GitHub repos, and restart. Verify data retention, pin-loop pause, persistent individual exclusions, busy-toggle refusal, and the documented behavior of already open files.
-- [ ] Complete Keep Downloaded, disconnect the network, and read the current committed tree. Check cancellation and interrupted download recovery; do not claim full history, LFS, or submodule availability.
-- [ ] Exercise Free Up Space refusal for dirty/staged/unpushed/recovered state, unsupported metadata, and a busy mount. Verify retained data after failure and the surviving virtual entry after successful release.
-- [ ] Check explicit refresh and discovery semantics, folder relocation, quit/relaunch, and optional launch at login without silently changing or publishing local work.
-- [ ] Confirm private vulnerability reporting, accurate privacy/auth copy, and working product/download/source links. Publish release notes with tested environments and all remaining runtime limitations.
-- [ ] For beta.1 upgrades, test catalogue v1-to-v2 migration with existing local state. Explain the unsupported downgrade and preserve the old release/validation record; do not imply migration deleted or moved source checkouts.
+Follow [native acceptance](fskit-acceptance.md) and retain its evidence. An authenticated production profile is a signing prerequisite; a mounted pass on macOS 27 does not establish macOS 26 runtime support. SDK 26 compilation for ARM64 and Intel is separate from installed-app testing.
+
+- [ ] Record final clean source/toolchain and review notices. Pass relevant Go build/vet/unit/race tests, native tests, and website checks.
+- [ ] Validate complete packages for each offered architecture, helper/extension/app signatures, authorized production profile and app-group claims, hashes, and notarization when advertised.
+- [ ] Install a downloaded, quarantined production app on supported Macs, including macOS 26. Check Gatekeeper, normal bundled FSKit enablement, exact production module selection, Git, optional GitHub authorization, and dependency errors.
+- [ ] Validate installed Finder registration, badges, private cache access, single-repo actions, and absence of mixed-repo actions.
+- [ ] Browse virtual names without acquisition; exercise lazy text/binary/symlink/mode reads, edits, staging, commit, branch switch, kernel attributes, and restart persistence.
+- [ ] Without GitHub sign-in, adopt disposable supported remote/bare/checkout sources using native Git credentials. Verify committed-ref selection and unchanged original index, dirty files, and untracked files.
+- [ ] Toggle repository/owner visibility and restart; verify exclusions, data retention, normal catalogue reconnect, busy refusal, and cancellation without force detach.
+- [ ] Perform cold Keep Downloaded, disconnect the source, restart normally, and read the committed tree. Exercise cancellation/recovery; do not promise full history, LFS, or submodules.
+- [ ] Complete clean Free Up Space and lazy reacquisition, retaining local filesystem attributes. Verify refusal for dirty/staged/unpushed/recovered state, HEAD/baseline divergence, unsupported metadata, and busy mounts, with retained data after each refusal.
+- [ ] Verify fetch-only Refresh preserves working files, branch, index, and local attributes; test failed-source retry and explicit read-only operation.
+- [ ] Exercise normal quit/relaunch, supported folder relocation, optional launch at login, and reviewed interruption/recovery paths without global registry resets or forced detach.
+- [ ] Confirm accurate privacy/auth/download copy, private vulnerability reporting, beta upgrade/migration behavior, and preserved historical assets. Publish actual tested environments and every unperformed qualification step.
