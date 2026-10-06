@@ -197,14 +197,27 @@ func TestNativeFSKitSourceIdentity(t *testing.T) {
 		{"exact path", path, true},
 		{"encoded file URL", fileURL, true},
 		{"localhost URL", "file://localhost" + strings.TrimPrefix(fileURL, "file://"), true},
+		{"directory URL", fileURL + "/", true},
+		{"localhost directory URL", "file://localhost" + strings.TrimPrefix(fileURL, "file://") + "/", true},
 		{"different path", path + "-other", false},
 		{"different URL path", fileURL + "-other", false},
-		{"trailing slash", fileURL + "/", false},
+		{"different directory URL", fileURL + "-other/", false},
+		{"bare trailing slash", path + "/", false},
+		{"double trailing slash", fileURL + "//", false},
+		{"encoded terminal slash", fileURL + "%2F", false},
+		{"dot suffix", fileURL + "/.", false},
+		{"dot segment directory", fileURL + "/../FSKit/", false},
 		{"query", fileURL + "?token=x", false},
 		{"empty query", fileURL + "?", false},
 		{"fragment", fileURL + "#fragment", false},
 		{"empty fragment", fileURL + "#", false},
 		{"empty query and fragment", fileURL + "?#", false},
+		{"directory query", fileURL + "/?token=x", false},
+		{"directory query ending slash", fileURL + "/?token=/", false},
+		{"empty directory query", fileURL + "/?", false},
+		{"directory fragment", fileURL + "/#fragment", false},
+		{"directory fragment ending slash", fileURL + "/#fragment/", false},
+		{"empty directory fragment", fileURL + "/#", false},
 		{"userinfo", "file://user@localhost" + strings.TrimPrefix(fileURL, "file://"), false},
 		{"remote host", "file://other" + strings.TrimPrefix(fileURL, "file://"), false},
 		{"localhost port", "file://localhost:123" + strings.TrimPrefix(fileURL, "file://"), false},
@@ -213,6 +226,7 @@ func TestNativeFSKitSourceIdentity(t *testing.T) {
 		{"malformed escape", fileURL + "%zz", false},
 		{"prefix substring", "unrelated " + fileURL, false},
 		{"unverified FSKit source decoration", "RepoReach -- " + fileURL, false},
+		{"decorated directory URL", "RepoReach -- " + fileURL + "/", false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			if got := mountSourceMatches(test.source, path); got != test.want {
@@ -223,35 +237,57 @@ func TestNativeFSKitSourceIdentity(t *testing.T) {
 }
 
 func TestNativeFSKitURLSourceOwnsNormalLifecycle(t *testing.T) {
+	for _, suffix := range []string{"", "/"} {
+		t.Run("URL suffix "+suffix, func(t *testing.T) {
+			f := newFakeFSKitMount(t)
+			f.service.opts.StateDir = filepath.Join(f.service.opts.StateDir, "RepoReach #1?check")
+			f.command = func(_ context.Context, program string, _ ...string) error {
+				if program == "/sbin/mount" {
+					identity := f.ownIdentity()
+					identity.source = (&url.URL{Scheme: "file", Path: identity.source}).String() + suffix
+					f.setMounts(identity)
+				} else {
+					f.setMounts()
+				}
+				return nil
+			}
+			m := f.mount(t)
+			if !m.verified || f.bridge.closeCount() != 0 {
+				t.Fatal("encoded file URL was not retained as the live mount")
+			}
+			if err := m.Unmount(); err != nil {
+				t.Fatal(err)
+			}
+			if err := m.Join(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			if f.commandCount() != 2 || f.bridge.closeCount() != 1 {
+				t.Fatalf("commands=%d drains=%d", f.commandCount(), f.bridge.closeCount())
+			}
+		})
+	}
+}
+
+func TestNativeFSKitExistingDirectoryURLResourcePreventsBridgeReplacement(t *testing.T) {
 	f := newFakeFSKitMount(t)
-	f.service.opts.StateDir = filepath.Join(f.service.opts.StateDir, "RepoReach #1?check")
-	f.command = func(_ context.Context, program string, _ ...string) error {
-		if program == "/sbin/mount" {
-			identity := f.ownIdentity()
-			identity.source = (&url.URL{Scheme: "file", Path: identity.source}).String()
-			f.setMounts(identity)
-		} else {
-			f.setMounts()
-		}
-		return nil
-	}
-	m := f.mount(t)
-	if !m.verified || f.bridge.closeCount() != 0 {
-		t.Fatal("encoded file URL was not retained as the live mount")
-	}
-	if err := m.Unmount(); err != nil {
+	source := filepath.Join(f.service.opts.StateDir, "FSKit")
+	if err := privateDirectory(source, true); err != nil {
 		t.Fatal(err)
 	}
-	if err := m.Join(context.Background()); err != nil {
+	source, err := filepath.EvalSymlinks(source)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if f.commandCount() != 2 || f.bridge.closeCount() != 1 {
-		t.Fatalf("commands=%d drains=%d", f.commandCount(), f.bridge.closeCount())
+	f.setMounts(fsKitMountIdentity{root: "/another/mount", fsid: [2]int32{101, 202}, owner: 501,
+		typeName: "reporeach", source: (&url.URL{Scheme: "file", Path: source}).String() + "/"})
+	mounted, err := f.service.mountNativeFSKit(context.Background(), f.root, nil, f.ops)
+	if mounted != nil || err == nil || !strings.Contains(err.Error(), "resource is already mounted") || f.starts != 0 || f.commandCount() != 0 {
+		t.Fatalf("existing directory resource was replaced: mounted=%v err=%v starts=%d commands=%d", mounted, err, f.starts, f.commandCount())
 	}
 }
 
 func TestNativeFSKitExtraURLSyntaxDoesNotAuthorizeUnmount(t *testing.T) {
-	for _, suffix := range []string{"?", "?token=x", "#", "#fragment", "?#"} {
+	for _, suffix := range []string{"?", "?token=x", "#", "#fragment", "?#", "//", "%2F", "/.", "/../FSKit/", "-other/", "/?", "/?token=x", "/?token=/", "/#", "/#fragment", "/#fragment/", "/?#"} {
 		t.Run(suffix, func(t *testing.T) {
 			f := newFakeFSKitMount(t)
 			f.command = func(context.Context, string, ...string) error {

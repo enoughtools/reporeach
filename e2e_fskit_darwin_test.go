@@ -992,7 +992,7 @@ func (h *fsKitAcceptanceHarness) start(t *testing.T) {
 		t.Fatal(err)
 	}
 	// No child test timeout: a failed normal detach must leave its owner alive.
-	s.cmd = exec.Command(h.image, "-test.run=^TestDesktopAdoptionServer$", "-test.v", "-test.timeout=0")
+	s.cmd = fsKitAcceptanceDaemonCommand(h.image, "-test.run=^TestDesktopAdoptionServer$", "-test.v", "-test.timeout=0")
 	s.cmd.Stdout, s.cmd.Stderr = log, log
 	s.cmd.Dir = h.root
 	s.cmd.Env = append(os.Environ(), "AFS_E2E_DESKTOP_SERVER=1", "AFS_E2E_DESKTOP_STATE="+h.state, "AFS_E2E_DESKTOP_MOUNT="+h.mount, "AFS_E2E_DESKTOP_SOCKET="+s.socket, "AFS_E2E_DESKTOP_GH="+h.gh, "AFS_E2E_DESKTOP_FSKIT_SOCKET_DIR="+h.prerequisites.socketDir)
@@ -1014,6 +1014,32 @@ func (h *fsKitAcceptanceHarness) start(t *testing.T) {
 		_, code, err := desktop.Request(ctx, s.socket, http.MethodGet, "/v1/status", nil)
 		return err == nil && code == http.StatusOK, fmt.Sprintf("status=%d err=%v; log=%s", code, err, s.logPath)
 	})
+}
+
+func fsKitAcceptanceDaemonCommand(image string, args ...string) *exec.Cmd {
+	command := exec.Command(image, args...)
+	// Preserve the native volume's owner when a failed acceptance runner exits
+	// and cleans up its inherited process group. Normal shutdown still targets
+	// only this exact child after prepare-quit confirms the resource detached.
+	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	return command
+}
+
+func TestFSKitAcceptanceDaemonProcessGroup(t *testing.T) {
+	// A real finite child verifies Darwin applied the isolation; it exits
+	// naturally and never runs a daemon, mounts a resource, or receives a signal.
+	command := fsKitAcceptanceDaemonCommand("/bin/sleep", "1")
+	if err := command.Start(); err != nil {
+		t.Fatal(err)
+	}
+	childGroup, childErr := unix.Getpgid(command.Process.Pid)
+	parentGroup, parentErr := unix.Getpgid(0)
+	if err := command.Wait(); err != nil {
+		t.Fatalf("finite process-group fixture exit: %v", err)
+	}
+	if childErr != nil || parentErr != nil || childGroup != command.Process.Pid || childGroup == parentGroup {
+		t.Fatalf("native acceptance daemon process group was not isolated: child PID=%d PGID=%d error=%v parent PGID=%d error=%v", command.Process.Pid, childGroup, childErr, parentGroup, parentErr)
+	}
 }
 
 func (h *fsKitAcceptanceHarness) rawRequest(t *testing.T, method, path string, body any) ([]byte, int) {
@@ -1176,7 +1202,57 @@ func (h *fsKitAcceptanceHarness) sourceMatches(source string) bool {
 		return true
 	}
 	u, err := url.Parse(source)
-	return err == nil && u.Scheme == "file" && (u.Host == "" || u.Host == "localhost") && u.User == nil && u.Path == expected && u.RawQuery == "" && u.Fragment == "" && u.Opaque == ""
+	// Actual macOS 27 kernel evidence reports this directory file URL with one
+	// terminal slash. Match that spelling; never clean a different resource path.
+	return err == nil && u.Scheme == "file" && (u.Host == "" || u.Host == "localhost") && u.User == nil &&
+		!u.ForceQuery && u.RawQuery == "" && !strings.Contains(source, "#") && u.Opaque == "" &&
+		(u.Path == expected || (u.Path == expected+"/" && strings.HasSuffix(source, "/")))
+}
+
+func TestFSKitAcceptanceSourceIdentity(t *testing.T) {
+	h := &fsKitAcceptanceHarness{state: "/private/tmp/rr-fskit-fixture/state #1?check"}
+	expected := filepath.Join(h.state, "FSKit")
+	fileURL := (&url.URL{Scheme: "file", Path: expected}).String()
+	for _, test := range []struct {
+		name, source string
+		want         bool
+	}{
+		{"exact path", expected, true},
+		{"file URL", fileURL, true},
+		{"directory URL", fileURL + "/", true},
+		{"localhost directory URL", "file://localhost" + strings.TrimPrefix(fileURL, "file://") + "/", true},
+		{"different path", expected + "-other", false},
+		{"different directory URL", fileURL + "-other/", false},
+		{"bare trailing slash", expected + "/", false},
+		{"double trailing slash", fileURL + "//", false},
+		{"encoded terminal slash", fileURL + "%2F", false},
+		{"dot suffix", fileURL + "/.", false},
+		{"dot segment directory", fileURL + "/../FSKit/", false},
+		{"query", fileURL + "?token=x", false},
+		{"empty query", fileURL + "?", false},
+		{"fragment", fileURL + "#fragment", false},
+		{"empty fragment", fileURL + "#", false},
+		{"directory query", fileURL + "/?token=x", false},
+		{"directory query ending slash", fileURL + "/?token=/", false},
+		{"empty directory query", fileURL + "/?", false},
+		{"directory fragment", fileURL + "/#fragment", false},
+		{"directory fragment ending slash", fileURL + "/#fragment/", false},
+		{"empty directory fragment", fileURL + "/#", false},
+		{"userinfo", "file://user@localhost" + strings.TrimPrefix(fileURL, "file://") + "/", false},
+		{"remote host", "file://other" + strings.TrimPrefix(fileURL, "file://") + "/", false},
+		{"localhost port", "file://localhost:123" + strings.TrimPrefix(fileURL, "file://") + "/", false},
+		{"different scheme", "https://example" + strings.TrimPrefix(fileURL, "file://") + "/", false},
+		{"opaque file URL", "file:opaque", false},
+		{"malformed escape", fileURL + "%zz/", false},
+		{"prefix substring", "unrelated " + fileURL + "/", false},
+		{"decorated directory URL", "RepoReach -- " + fileURL + "/", false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := h.sourceMatches(test.source); got != test.want {
+				t.Fatalf("source %q matched=%v, want %v", test.source, got, test.want)
+			}
+		})
+	}
 }
 
 func (h *fsKitAcceptanceHarness) attached() (bool, error) {

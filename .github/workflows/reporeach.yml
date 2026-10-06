@@ -94,7 +94,7 @@ jobs:
       - name: FSKit acceptance module selection regressions
         if: matrix.architecture == 'arm64'
         # Pure selection validation; no installed module, confirmation or mount.
-        run: go test -run '^(TestSelectedFSKitModuleIdentifier|TestFSKitInstalledInspectionEvidence|TestFSKitAcceptanceSigningIdentity|TestFSKitAcceptanceGroupClaims|TestFSKitContainerResolution|TestFSKitAcceptanceModuleClaims|TestFSKitContainerDirectory)$' -count=1 .
+        run: go test -run '^(TestSelectedFSKitModuleIdentifier|TestFSKitInstalledInspectionEvidence|TestFSKitAcceptanceSigningIdentity|TestFSKitAcceptanceGroupClaims|TestFSKitContainerResolution|TestFSKitAcceptanceModuleClaims|TestFSKitContainerDirectory|TestFSKitAcceptanceDaemonProcessGroup|TestFSKitAcceptanceSourceIdentity)$' -count=1 .
       - name: Native unit tests
         run: |
           xcodebuild -project native/RepoReach.xcodeproj -scheme RepoReach \
@@ -208,7 +208,7 @@ jobs:
       - name: FSKit acceptance module selection regressions
         if: matrix.architecture == 'arm64'
         # Keep the root Darwin tests covered on both supported CI OS versions.
-        run: go test -run '^(TestSelectedFSKitModuleIdentifier|TestFSKitInstalledInspectionEvidence|TestFSKitAcceptanceSigningIdentity|TestFSKitAcceptanceGroupClaims|TestFSKitContainerResolution|TestFSKitAcceptanceModuleClaims|TestFSKitContainerDirectory)$' -count=1 .
+        run: go test -run '^(TestSelectedFSKitModuleIdentifier|TestFSKitInstalledInspectionEvidence|TestFSKitAcceptanceSigningIdentity|TestFSKitAcceptanceGroupClaims|TestFSKitContainerResolution|TestFSKitAcceptanceModuleClaims|TestFSKitContainerDirectory|TestFSKitAcceptanceDaemonProcessGroup|TestFSKitAcceptanceSourceIdentity)$' -count=1 .
       - name: Compile bundled FSKit app and check ExtensionKit layout
         env:
           ARCHITECTURE: ${{ matrix.architecture }}
