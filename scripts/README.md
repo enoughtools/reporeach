@@ -28,10 +28,12 @@ scripts/build-macos.sh --backend fskit --compile-only --arch arm64 --unsigned
 scripts/build-macos.sh --backend fskit --compile-only --arch x86_64 --unsigned
 ```
 
-The build script sets `REGISTER_APP_WITH_LAUNCH_SERVICES=NO` so Xcode does not
-automatically register its compiled app with LaunchServices. Build products stay
-in their separate output directory; installing and registering a validation app
-remain explicit steps.
+Xcode can register a compiled app even when signing is disabled. After a
+successful build, the script checks public app discovery and the exact FSKit
+module registration. It retires only that build product when registered and
+requires fresh proof of absence before exporting it. An already absent product
+needs no registration change. Build products stay in their separate output
+directory; installing and registering a validation app remain explicit steps.
 
 For legacy management/source checks with Xcode 16, use the explicit
 `--backend macfuse --compile-only` option. This generates the legacy project
@@ -140,6 +142,9 @@ Both Mac ARM jobs also exercise the real Go filesystem bridge with the Swift
 extension client, including authenticated sessions, paged large responses,
 binary reads/writes and handle cleanup. The standalone invocation is documented
 in [the bridge smoke guide](../native/Tools/README.fsbridge-smoke.md).
+The SDK 26 architecture jobs also run `scripts/test-fskit-volume-reads.sh`, a
+hostless suite for production read callbacks, descriptor ownership and
+cancellation. It creates no app, registration or mount.
 Pull requests compile without signing keys, profiles or release archives. The
 FSKit job uploads compilation logs; a manually requested run can also export
 the unprovisioned local-validation artifacts described above. GitHub release publication is disabled

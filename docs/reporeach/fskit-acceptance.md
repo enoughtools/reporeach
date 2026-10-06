@@ -74,8 +74,9 @@ For the requested local app build, first confirm that `xcodebuild -version` and
 than Xcode 16.4/SDK 15.5. Xcode 27 and its SDK meet the required minimum of 26.
 Then run `scripts/build-macos.sh --backend fskit --compile-only --arch arm64 --unsigned`
 to validate the app and module locally. Xcode may register its unsigned app product during compilation. After a successful
-build, the script retires only that exact product registration and verifies its
-FSKit module is absent before returning or packaging. It does not enable the
+build, the script checks the exact parent app and FSKit module registrations,
+retires only that product when registered, and verifies both are absent before
+returning or packaging. It does not enable the
 extension, sign for distribution, or mount a filesystem. Record the actual local
 toolchain and source revision; signing authorization and installed execution
 remain separate requirements.
@@ -126,7 +127,7 @@ Additional release gates include signing/notarization, both architecture slices,
 
 ## Cleanup and retained fixtures
 
-The harness closes its own fixture handles, requests normal `/v1/prepare-quit`, and sends `SIGTERM` to its private helper only after a successful detach. It never forces an unmount. If detach or ownership verification is uncertain, it fails clearly and preserves its `/tmp/rr-fskit-*` directory and helper process. The failure output identifies the private paths and PID. Do not delete that directory or terminate the helper while its volume might still be attached.
+The harness closes its own fixture handles, requests normal `/v1/prepare-quit`, and sends `SIGTERM` to its private helper only after a successful detach. It never forces an unmount. The helper uses its own process group to survive test-runner cleanup. If detach or ownership verification is uncertain, the harness fails clearly and preserves its `/tmp/rr-fskit-*` directory and helper process. The failure output identifies the private paths and PID. The overall Go test timeout can bypass deferred cleanup, so inspect the retained session after a timeout as well. Do not delete that directory or terminate the helper while its volume might still be attached.
 
 After closing processes or handles that hold that specific fixture busy, use the private socket path printed by the test to retry the normal operation:
 

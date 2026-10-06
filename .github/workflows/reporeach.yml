@@ -157,6 +157,9 @@ jobs:
           xcodebuild -version
           xcrun --sdk macosx --show-sdk-version
           test "$(xcodebuild -version | awk '/^Xcode / {print $2}')" = 26.6
+      - name: Hostless FSVolume read ownership and cancellation tests
+        # Runs in both architecture jobs; no app, extension activation or mount.
+        run: scripts/test-fskit-volume-reads.sh
       - name: Compile and test standalone FSKit module inspector
         if: matrix.architecture == 'arm64'
         # A read-only diagnostic, kept outside every app and release package.

@@ -113,6 +113,28 @@ private actor VolumeOperationGate {
     }
 }
 
+/// One FSKit read callback owns this buffer until its reply. Only that callback's
+/// admitted operation writes to it, serially, before invoking the reply handler.
+@available(macOS 15.4, *)
+private final class VolumeReadBuffer: @unchecked Sendable {
+    let capacity: Int
+    private let buffer: FSMutableFileDataBuffer
+
+    init(_ buffer: FSMutableFileDataBuffer) {
+        self.buffer = buffer
+        capacity = buffer.withUnsafeMutableBytes { $0.count }
+    }
+
+    func copy(_ data: Data, at position: Int) {
+        buffer.withUnsafeMutableBytes { destination in
+            guard !data.isEmpty, let address = destination.baseAddress else { return }
+            data.withUnsafeBytes { source in
+                address.advanced(by: position).copyMemory(from: source.baseAddress!, byteCount: data.count)
+            }
+        }
+    }
+}
+
 @available(macOS 15.4, *)
 final class RepoReachVolume: FSVolume, FSVolume.Operations,
     FSVolume.ReadWriteOperations, FSVolume.OpenCloseOperations {
@@ -153,6 +175,7 @@ final class RepoReachVolume: FSVolume, FSVolume.Operations,
     private var directories: [UInt64: DirectorySession] = [:]
     private var transientReferences: [UInt64: UInt64] = [:]
     private var pendingHandles: [UInt64: UInt64] = [:]
+    private var pendingOpenCount = 0
     private var verifierCounter: UInt64 = 1
     private var running: [UUID: RunningOperation] = [:]
     private var isClosing = false
@@ -368,6 +391,7 @@ final class RepoReachVolume: FSVolume, FSVolume.Operations,
             items.removeAll()
             if let root { items[1] = root }
             directories.removeAll(); transientReferences.removeAll(); pendingHandles.removeAll()
+            pendingOpenCount = 0
         }
     }
 
@@ -746,16 +770,40 @@ final class RepoReachVolume: FSVolume, FSVolume.Operations,
 
     func read(from item: FSItem, at offset: off_t, length: Int, into buffer: FSMutableFileDataBuffer,
               replyHandler: @escaping (Int, Error?) -> Void) {
+        let destination = VolumeReadBuffer(buffer)
+        read(from: item, at: offset, length: length, capacity: destination.capacity, consume: { data, position in
+            destination.copy(data, at: position)
+        }, replyHandler: replyHandler)
+    }
+
+    /// FSKit owns its mutable buffer constructors. Sharing the actual read path
+    /// with a chunk consumer also permits host-side validation with real items.
+    func read(from item: FSItem, at offset: off_t, length: Int, capacity: Int,
+              consume: @escaping @Sendable (Data, Int) -> Void, replyHandler: @escaping (Int, Error?) -> Void) {
         perform(exclusive: false, reply: { (result: IOResult?, error: Error?) in
             replyHandler(result?.count ?? 0, error ?? result?.error)
         }) {
             let state = try self.state(for: item)
-            guard state.attributes.type == .file, let handle = state.readHandle,
-                  state.openModes.contains(.read) else { throw POSIXError(.EBADF) }
+            guard state.attributes.type == .file else { throw POSIXError(.EBADF) }
             guard offset >= 0, length >= 0, length <= Int.max - Int(offset) else { throw POSIXError(.EINVAL) }
-            let capacity = buffer.withUnsafeMutableBytes { $0.count }
             guard length <= capacity else { throw POSIXError(.EINVAL) }
+            if length == 0 { return IOResult(count: 0, error: nil) }
+            let handle: UInt64
+            let temporary: Bool
+            if let reader = state.readHandle {
+                handle = reader
+                temporary = false
+            } else {
+                // Executable-header inspection can issue a vnode read before
+                // any open callback. As in Apple's passthrough sample, acquire
+                // a read descriptor for this operation without changing the
+                // item's retained descriptors or the kernel's open modes.
+                guard !state.removed else { throw POSIXError(.EBADF) }
+                handle = try await self.openTemporaryReadHandle(inode: state.item.inode)
+                temporary = true
+            }
             var count = 0
+            var failure: Error?
             while count < length {
                 do {
                     try Task.checkCancellation()
@@ -763,17 +811,15 @@ final class RepoReachVolume: FSVolume, FSVolume.Operations,
                     let data = try await self.client.read(inode: state.item.inode, handle: handle,
                         offset: UInt64(offset) + UInt64(count), size: size)
                     guard data.count <= size else { throw POSIXError(.EIO) }
-                    buffer.withUnsafeMutableBytes { destination in
-                        guard !data.isEmpty, let address = destination.baseAddress else { return }
-                        data.withUnsafeBytes { source in
-                            address.advanced(by: count).copyMemory(from: source.baseAddress!, byteCount: data.count)
-                        }
-                    }
+                    consume(data, count)
                     count += data.count
                     if data.count < size { break }
-                } catch { return IOResult(count: count, error: self.posix(error)) }
+                } catch { failure = self.posix(error); break }
             }
-            return IOResult(count: count, error: nil)
+            if temporary, let cleanupError = await self.releaseTemporaryReadHandle(inode: state.item.inode, handle: handle), failure == nil {
+                failure = cleanupError
+            }
+            return IOResult(count: count, error: failure)
         }
     }
 
@@ -848,11 +894,51 @@ final class RepoReachVolume: FSVolume, FSVolume.Operations,
     }
 
     private func openHandle(inode: UInt64, access: UInt32) async throws -> UInt64 {
-        guard locked({ pendingHandles.count < 256 }) else { throw POSIXError(.EAGAIN) }
-        let response = try await client.request(FSBridgeRequest(op: "open", inode: inode, access: access))
-        guard let handle = response.handle, handle > 0 else { throw POSIXError(.EIO) }
-        locked { pendingHandles[handle] = inode }
-        return handle
+        try reservePendingOpen()
+        do {
+            let response = try await client.request(FSBridgeRequest(op: "open", inode: inode, access: access))
+            guard let handle = response.handle, handle > 0 else { throw POSIXError(.EIO) }
+            recordPendingOpen(handle: handle, inode: inode)
+            return handle
+        } catch {
+            locked { pendingOpenCount -= 1 }
+            throw error
+        }
+    }
+
+    private func openTemporaryReadHandle(inode: UInt64) async throws -> UInt64 {
+        try Task.checkCancellation()
+        try reservePendingOpen()
+        let connection = client
+        let opened = Task.detached {
+            // An OPEN response conveys ownership of a newly allocated handle.
+            // Caller cancellation must not discard that identity. The admitted
+            // read keeps its permit while this bounded operation completes.
+            try await connection.request(FSBridgeRequest(op: "open", inode: inode, access: 1), timeout: 120)
+        }
+        do {
+            let response = try await opened.value
+            guard let handle = response.handle, handle > 0 else { throw POSIXError(.EIO) }
+            recordPendingOpen(handle: handle, inode: inode)
+            return handle
+        } catch {
+            locked { pendingOpenCount -= 1 }
+            throw error
+        }
+    }
+
+    private func reservePendingOpen() throws {
+        try locked {
+            guard pendingHandles.count + pendingOpenCount < 256 else { throw POSIXError(.EAGAIN) }
+            pendingOpenCount += 1
+        }
+    }
+
+    private func recordPendingOpen(handle: UInt64, inode: UInt64) {
+        locked {
+            pendingOpenCount -= 1
+            pendingHandles[handle] = inode
+        }
     }
 
     private func cleanupPendingHandle(inode: UInt64, handle: UInt64) async {
@@ -860,6 +946,24 @@ final class RepoReachVolume: FSVolume, FSVolume.Operations,
             _ = try await client.request(FSBridgeRequest(op: "release", inode: inode, handle: handle), timeout: 10)
             locked { _ = pendingHandles.removeValue(forKey: handle) }
         } catch { logger.error("Pending handle cleanup failed with error \(self.posix(error).code, privacy: .public)") }
+    }
+
+    private func releaseTemporaryReadHandle(inode: UInt64, handle: UInt64) async -> Error? {
+        // A cancelled read still owns its descriptor. Run its bounded release
+        // independently, and await it before giving up the operation permit.
+        let connection = client
+        let release = Task.detached {
+            try await connection.request(FSBridgeRequest(op: "release", inode: inode, handle: handle), timeout: 10)
+        }
+        do {
+            _ = try await release.value
+            locked { _ = pendingHandles.removeValue(forKey: handle) }
+            return nil
+        } catch {
+            // Preserve the pending entry so session drain retries failed cleanup.
+            logger.error("Temporary read handle cleanup failed with error \(self.posix(error).code, privacy: .public)")
+            return posix(error)
+        }
     }
 
     /// Keep a reclaimed parent inode alive while a child still needs its `..`

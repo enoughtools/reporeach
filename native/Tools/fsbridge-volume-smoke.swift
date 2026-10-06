@@ -1,8 +1,9 @@
 // Compile with the production bridge and volume files, then run through
 // TestNativeFSKitBridgeClient. This uses real SDK FSItem/attribute objects and
 // the real Go catalogue/overlay service without requesting a system mount.
-// FSKit-created FSTaskOptions, buffers and directory packers have no public
-// constructors, so mounted read/enumeration validation remains a separate check.
+// FSKit-created options, buffers and directory packers have no public constructors.
+// The shared chunk-consumer path validates reads without fabricating a framework
+// buffer; mounted buffer handoff and enumeration remain separate acceptance checks.
 import Foundation
 import FSKit
 import Darwin
@@ -61,6 +62,35 @@ private func lookup(_ volume: RepoReachVolume, _ parent: FSItem, _ name: String)
     try await pair { volume.lookupItem(named: FSFileName(string: name), inDirectory: parent, replyHandler: $0) }
 }
 
+private final class ReadReceipt: @unchecked Sendable {
+    private let lock = NSLock()
+    private var bytes = Data()
+    private var contiguous = true
+
+    func consume(_ data: Data, at position: Int) {
+        lock.lock(); defer { lock.unlock() }
+        contiguous = contiguous && position == bytes.count
+        bytes.append(data)
+    }
+
+    var result: (Data, Bool) {
+        lock.lock(); defer { lock.unlock() }
+        return (bytes, contiguous)
+    }
+}
+
+@available(macOS 15.4, *)
+private func read(_ volume: RepoReachVolume, _ item: FSItem, offset: off_t = 0, length: Int) async throws -> Data {
+    let receipt = ReadReceipt()
+    let count: Int = try await one { reply in
+        volume.read(from: item, at: offset, length: length, capacity: length,
+                    consume: { receipt.consume($0, at: $1) }) { count, error in reply(count, error) }
+    }
+    let (bytes, contiguous) = receipt.result
+    try checked(contiguous && bytes.count == count, "Read chunks preserve their offsets and returned byte count")
+    return bytes
+}
+
 @main
 struct VolumeSmoke {
     static func main() async {
@@ -86,6 +116,23 @@ struct VolumeSmoke {
         try checked((root as? RepoReachItem)?.inode == 1 && rootAttrs.fileID == .rootDirectory && rootAttrs.type == .directory, "Root inode translation")
         let owner = try await lookup(volume, root, "alice")
         let repo = try await lookup(volume, owner, "project")
+        let beforeOpen = try await lookup(volume, repo, "README.md")
+        let header = try await read(volume, beforeOpen, length: 4096)
+        try checked(!header.isEmpty, "Vnode header read succeeds before any open callback")
+        try await errorCode(EBADF) { try await done { volume.closeItem(beforeOpen, modes: [.read], replyHandler: $0) } }
+        for _ in 0..<257 {
+            let byte = try await read(volume, beforeOpen, length: 1)
+            try checked(byte == header.prefix(1), "Temporary readers are released beyond the pending-handle limit")
+        }
+        try await done { volume.openItem(beforeOpen, modes: [.read], replyHandler: $0) }
+        let retainedHeader = try await read(volume, beforeOpen, length: 4096)
+        try checked(retainedHeader == header, "A retained reader produces identical header bytes")
+        try await done { volume.closeItem(beforeOpen, modes: [], replyHandler: $0) }
+        let afterClose = try await read(volume, beforeOpen, length: 4096)
+        try checked(afterClose == header, "Vnode read succeeds after final close without retaining read modes")
+        let beyondEOF = try await read(volume, beforeOpen, offset: off_t(header.count + 4096), length: 17)
+        try checked(beyondEOF.isEmpty, "Temporary vnode reader beyond EOF returns zero bytes")
+        try await errorCode(EBADF) { try await done { volume.closeItem(beforeOpen, modes: [.read], replyHandler: $0) } }
         let initial = FSItem.SetAttributesRequest()
         initial.mode = 0o640
         initial.size = 4
@@ -109,6 +156,11 @@ struct VolumeSmoke {
         try checked(bytes == binary.prefix(1_048_576), "Binary bytes were preserved")
         let tail = try await raw.read(inode: fileInode, handle: extraHandle, offset: 2_097_152, size: 17)
         try checked(tail == binary.suffix(17), "Final binary chunk was preserved")
+        try await done { volume.closeItem(file, modes: [], replyHandler: $0) }
+        let binaryAfterClose = try await read(volume, file, length: binary.count)
+        try checked(binaryAfterClose == binary, "Temporary vnode reader preserves every byte across multiple chunks")
+        try await errorCode(EBADF) { try await done { volume.closeItem(file, modes: [.read], replyHandler: $0) } }
+        try await done { volume.openItem(file, modes: [.read, .write], replyHandler: $0) }
         let shorter = FSItem.SetAttributesRequest(); shorter.size = 1024
         let shortAttrs: FSItem.Attributes = try await one { volume.setAttributes(shorter, on: file, replyHandler: $0) }
         try checked(shortAttrs.size == 1024 && shorter.wasAttributeConsumed(.size), "Truncate attributes")
@@ -204,6 +256,6 @@ struct VolumeSmoke {
         try await errorCode(ENXIO) { _ = try await attrs(volume, root) }
         await raw.close()
         try checked(cowWrite == 3 && cowRead == Data([77, 0, 255]), "Previously opened committed reader observes linked copy-on-write data; fixture bytes returned: \(Array(cowRead))")
-        print("PASS actual SDK FSVolume lifecycle/remount, root IDs, lookup/create/setattrs masks, binary writes, rename/unlink retained handles, restrictive create/chmod capabilities, committed copy-on-write reads, symlinks, parent retention, unsupported operations, read-only errors, concurrent shutdown")
+        print("PASS actual SDK FSVolume lifecycle/remount, vnode reads before open/after close, bounded temporary readers, binary reads/writes, root IDs, lookup/create/setattrs masks, rename/unlink retained handles, restrictive create/chmod capabilities, committed copy-on-write reads, symlinks, parent retention, unsupported operations, read-only errors, concurrent shutdown")
     }
 }

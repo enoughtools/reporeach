@@ -30,6 +30,14 @@ REPOREACH_FSBRIDGE_NATIVE_CLIENT="$PWD/build/fsbridge-smoke/volume-check" \
   GOTOOLCHAIN=go1.26.8 go test -count=1 -run '^TestNativeFSKitBridgeClient$' -v ./internal/fsbridge
 ```
 
-For an Intel host, use `x86_64-apple-macos15.4` as the target. This exercises activation, root identities, creation and consumed attributes, binary writes, permission changes and retained access, rename/unlink with open handles, committed copy-on-write reader visibility, symlinks, stale items after remount, unsupported operations, read-only errors, and concurrent shutdown. Unsupported access-time changes remain unconsumed and the returned metadata must reflect the actual backend state.
+For an Intel host, use `x86_64-apple-macos15.4` as the target. This exercises activation, root identities, creation and consumed attributes, binary writes and chunked reads, permission changes and retained access, rename/unlink with open handles, committed copy-on-write reader visibility, symlinks, stale items after remount, unsupported operations, read-only errors, and concurrent shutdown. Reads before opening and after closing a file use temporary read descriptors; repeated and large binary reads verify their cleanup. Unsupported access-time changes remain unconsumed and the returned metadata must reflect the actual backend state.
 
-FSKit-created read buffers, directory packers, and task options have no public constructors. The harness uses the volume's option-independent activation/mount entry points, and checks binary reads through the production bridge. It does not exercise FSKit's mounted read callback or directory packing, URL-resource scope, framework session ordering, or a restarted Go service. Those require the real macOS 26 installed mount tests.
+FSKit-created read buffers, directory packers, and task options have no public constructors. The harness uses the volume's option-independent activation/mount entry points and the same read implementation used by the mounted callback, with a binary chunk consumer. It does not exercise the framework's mutable-buffer handoff, directory packing, URL-resource scope, framework session ordering, or a restarted Go service. Those require the real macOS 26 installed mount tests.
+
+The hostless failure-case suite compiles the production volume and bridge sources in a disposable Swift package:
+
+```sh
+scripts/test-fskit-volume-reads.sh
+```
+
+This checks temporary and retained read ownership, write-only handles, partial reads, cancellation and failed-release retry against a local protocol fixture. It requires Xcode 26 or later and creates no app, registration or mount. CI runs it on both SDK 26 architectures.
