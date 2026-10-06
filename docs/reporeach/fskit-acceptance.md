@@ -128,6 +128,10 @@ Additional release gates include signing/notarization, both architecture slices,
 
 ## Cold downloads and clean eviction
 
+This sequence passes on macOS 27.0.1 ARM64 with the clean `a708aba` Go test helper and preserved `8807963` signed native validation app. Independent comparison confirms all native source inputs and compiled module bytes before the signature are identical between those revisions. It downloads three initially missing unique blobs (39 bytes), restarts and serves them with zero remote requests, and verifies clean Free/reacquisition with native metadata retained. Cached kernel inspection confirms all three captured mount identities and both helper exits after normal cleanup.
+
+Two attempts with the newly registered `a708aba` validation app failed during helper dispatch before mounting, despite public discovery reporting the exact enabled module. Narrow logs show registration/IPC error codes; the cause is unproven. Restoring the preserved app through normal exact-path registration allowed the sequence to pass. This result establishes storage behavior with that installed app, not activation of the newer app or the production distribution.
+
 After recording the primary result and normal cleanup, run
 `TestFSKitMountedColdStorageAcceptance` with the same explicit prerequisites and
 environment, changing only the `-run` test selection. This is a separate disposable
