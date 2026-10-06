@@ -1,14 +1,17 @@
 # RepoReach architecture
 
-The [product contract](product-contract.md) defines the target behavior and the
-current native development gaps. The architecture below describes the existing
-implementation; its separate managed adoption and cache-based Keep Downloaded
-operations do not yet satisfy in-place adoption or ordinary local checkout
-requirements. Cold Finder browsing is the first acceptance priority.
+RepoReach combines a macOS management app with a Git-backed filesystem. Enough
+Tools owns the desktop product; its engine comes from Cloudflare ArtifactFS and
+retains `github.com/cloudflare/artifact-fs` as its Go module path. The
+[product contract](product-contract.md) makes cold browsing and ordinary local
+storage the acceptance priorities.
 
-RepoReach combines a macOS management app with a Git-backed filesystem. Enough Tools owns the desktop product in this repository; the underlying engine comes from Cloudflare ArtifactFS and retains its Go module path, `github.com/cloudflare/artifact-fs`.
-
-The transport described below is the published beta.3 FUSE architecture. A bundled native FSKit backend for macOS 26 is under development; its design and unresolved acceptance requirements are recorded in [Native FSKit](native-fskit.md). Historical beta.3 validation does not establish a mounted FSKit backend.
+This document describes the native development implementation for macOS 26 or
+later. Its bundled FSKit extension replaces the FUSE transport. Historical beta.3
+builds mount the whole catalogue through separately installed macFUSE; their
+installation requirements and validation do not establish acceptance of the new
+implementation. See [Native FSKit](native-fskit.md) and the
+[mounted acceptance record](fskit-acceptance.md) for proof status.
 
 ```mermaid
 flowchart LR
@@ -16,11 +19,14 @@ flowchart LR
     Finder[Finder Sync extension] -->|Validated action URL| App
     App -->|Metadata-only status file| Finder
     Desktop --> GH[Official GitHub CLI]
-    GH --> GitHub[Optional GitHub API and auth]
-    Sources[Manual Git remote or local checkout] --> Desktop
-    Desktop --> Catalog[Owner / repository catalogue mount]
-    Catalog -->|Activate on repo access| AFS[Writable ArtifactFS backend]
-    Desktop --> AFS
+    GH --> GitHub[Optional discovery and tree metadata]
+    Desktop --> Root[Ordinary chosen root and owner directories]
+    Root -->|Owned virtual links| Native[Hidden private FSKit volume]
+    Root -->|Direct links| Adopted[Original adopted checkouts]
+    Root --> Kept[Ordinary kept checkouts]
+    Native --> Catalog[Catalogue filesystem]
+    Catalog --> Preview[Immutable metadata previews]
+    Catalog -->|Content access| AFS[Writable ArtifactFS backend]
     AFS --> Overlay[Local writable overlay]
     AFS --> Snapshot[Committed tree snapshot]
     AFS --> Cache[Verified blob cache]
@@ -32,55 +38,143 @@ flowchart LR
 
 | Location | Responsibility |
 | --- | --- |
-| `native/App` | SwiftUI windows, background service lifecycle, GitHub sign-in progress, repository actions, and optional launch at login. |
-| `native/Shared` | Validated action URLs and the metadata-only Finder status file. |
-| `native/FinderExtension` | Finder badges and repository context-menu actions. It does not run Git or read repo contents to determine status. |
-| `cmd/artifact-fs`, `internal/cli` | The engine executable and its CLI entrypoints. |
-| `internal/desktop` | Optional GitHub discovery/auth, manual source registration, persistent catalogue/visibility state, local control API, and serialized repository operations. |
-| `internal/catalogfs` | One FUSE mount containing owner/repo directories, lazy repository activation, and translation of repo-local inode and handle IDs. |
-| `internal/daemon` | Repository registration, preparation, snapshots, watcher/hydrator lifecycle, current-tree downloads, and safe storage release. |
-| `internal/fusefs` | Committed-tree plus local-overlay view, file hydration, writable filesystem operations, and the synthesized `.git` file. |
-| `internal/gitstore` | Git subprocesses, blobless clones, content streaming, cache verification, and remote recovery checks. |
-| `internal/snapshot`, `internal/overlay`, `internal/registry`, `internal/meta` | Persistent tree, overlay, repo registration, and SQLite support. |
+| `native/App` | SwiftUI windows, background service lifecycle, sign-in, repository actions, and optional launch at login. |
+| `native/FSKitExtension` | Bundled native transport and asynchronous bridge to the Go service. |
+| `native/Shared` | Validated action URLs, bridge models, and metadata-only Finder status. |
+| `native/FinderExtension` | Finder badges and actions; no Git execution or content reads for status. |
+| `cmd/artifact-fs`, `internal/cli` | The sole engine executable and CLI entrypoints. |
+| `internal/desktop` | Discovery/auth, source registration, visibility state, metadata previews, owned catalogue links, and journaled local handoffs. |
+| `internal/catalogfs`, `internal/fsbridge` | Catalogue namespace, previews, activation, inode/handle translation, and private bridge protocol. |
+| `internal/daemon` | Writable preparation, snapshots, hydration, and managed storage lifecycle. |
+| `internal/fusefs` | Committed tree plus overlay, hydration, writable operations, and synthesized `.git`, shared by the transports. |
+| `internal/gitstore` | Native Git subprocesses, filtered clones, binary content streaming, verification, and remote recovery checks. |
+| `internal/snapshot`, `internal/overlay`, `internal/registry`, `internal/meta` | Persistent tree, overlay, registration, and SQLite support. |
 
-The normal application data root is `~/Library/Application Support/RepoReach`. Its `engine/` child holds managed Git directories, SQLite metadata, overlays, and hydrated blobs. The selected mount root holds the visible filesystem view. It is not the data root. The standalone ArtifactFS CLI's `ARTIFACT_FS_ROOT` has the same distinction from `daemon --root`.
+## Host layout and ownership
 
-The saved desktop catalogue is schema version 2. Reading a version 1 catalogue migrates its metadata in memory, with version 2 persisted on the next save. This does not delete source or managed repository data. Previous beta readers cannot open version 2 state; there is no automatic downgrade serializer. Upgrade guidance must preserve app state and local work rather than suggest deleting a catalogue to get an older build running.
+The state root is normally `~/Library/Application Support/RepoReach`. `engine/`
+holds managed Git directories, tree metadata, overlays, and blobs. `previews/`
+holds independent browsing metadata. The hidden native catalogue mounts at
+`native-catalogue/volume` under the state root with `nobrowse`. The selected folder
+is separate and is never covered by this mount. The standalone CLI similarly
+distinguishes `ARTIFACT_FS_ROOT` from `daemon --root`.
 
-## Catalogue activation
+The selected root and owner folders are ordinary directories. Exact-owned links
+expose virtual entries or external adopted checkouts; materialized checkouts are
+ordinary directories at their catalogue paths. Root and link receipts record
+physical identities and expected targets. Publication refuses collisions or
+replaced entries. Removal affects verified owned links, never foreign directories
+or adopted contents. Hiding an entry can therefore leave its ordinary local
+directory visible at its physical path.
 
-GitHub discovery records identity, owner, description, default branch, clone URL, and privacy metadata. Manual adoption records a source URL/path and catalogue labels with `source: "manual"`; it requires no GitHub account. The source can be HTTP(S), `git://`, SSH, an SSH-style address, an absolute local path, or a local `file://` URL. Both bare repositories and nonbare checkouts are accepted. Native Git resolves source metadata, and preparation uses its selected branch: advertised default branch for remote sources or the branch of committed `HEAD` for a local checkout unless overridden. Registration stores a branch, not a frozen commit; deferred preparation acquires that branch's then-current committed state. It does not import the source checkout's index or dirty working tree.
+Desktop schema 3 records `localPath` and `localKind` (`adopted` or `materialized`).
+Readers accept schemas 1, 2, and 3, upgrade metadata in memory, and persist schema 3
+on save. Legacy manual virtual entries remain separate managed checkouts; migration
+does not reinterpret them as adopted originals or discard work. Older readers may
+not open upgraded state. There is no downgrade serializer: preserve consistent
+pre-upgrade state backups and subsequent local work.
 
-Catalogue root/owner enumeration remains local. Registration is metadata-only; a repo opens when a caller enters it or asks for preparation/download. Acquisition requests a blobless clone and creates an initial committed-tree snapshot; individual file reads later hydrate blobs. Git servers or local transports that do not honor partial-clone filters can transfer more objects during preparation. Local source folders remain separate from the private managed clone.
+## Cold browsing and activation
 
-Repos with the same name under different owners have separate namespaces. Desktop storage names are hashes of normalized `owner/name` identities. Catalogue metadata replacement is atomic; existing open handles retain their associated backend. Catalogue-level writes cannot create or rename GitHub repositories, and cross-repository moves return an error.
+Discovery records identity, owner, branch, source URL, and privacy metadata. Root
+and owner enumeration is local. Dormant repo listings and lookups use an immutable
+preview without opening a writable runtime.
 
-Prepared repository opening preserves the existing `HEAD` and staged index. The engine watcher reacts to local commits and branch switches, publishing a new snapshot and reconciling overlay entries. The base tree plus overlay makes the working directory writable without eagerly downloading all file bodies.
+GitHub previews batch root trees through the official CLI's GraphQL API with
+bounded concurrency. Roots bind to commits and subdirectories to tree objects.
+Names, modes, object identities, and sizes are validated before publication.
+Deeper trees load lazily; complete cached trees supply authoritative negative
+lookups and survive restart. Failed or incomplete responses never publish empty
+folders.
 
-## Visibility and source authentication
+Manual remote or bare sources use a separate depth-one filtered Git acquisition
+and canonical snapshot store. Local transports use shallow acquisition instead of
+hardlink cloning. Source files and index are untouched. Servers that ignore
+filters can transfer blobs. Unknown sizes are omitted from cheap native metadata;
+a caller requiring an exact size can activate content acquisition.
 
-Per-repo disabled flags and owner/organization disabled settings jointly determine catalogue visibility. Rediscovery retains individual choices and manual sources. Re-enabling an owner does not clear repo-level disabled flags. Owner grouping applies to matching manually labelled repos too.
+The preview includes a known-size synthetic `.git` entry. Metadata lookup does not
+prepare a clone; opening it prepares the real Git-directory pointer. Content
+promotion acquires the preview's selected commit and preserves inode identity and
+existing handles. Prepared repos retain their writable view instead of switching
+to a newer remote preview.
 
-Hidden entries retain their managed data and pin intent, are excluded from new catalogue activation, and do not run pin-loop downloads. Changes are rejected while affected explicit operations or lazy activation are busy. Catalogue metadata removal preserves existing activated backends and open handles, so those handles can still read or hydrate files. This is visibility policy, not credential revocation or a network firewall.
+Unprepared Refresh quiesces the catalogue, retires the preview receipt, and
+acquires a new immutable baseline. Retired handles keep their snapshots and cannot
+overwrite the new receipt. Prepared native repos retain a persistent working-tree
+baseline: Refresh fetches data without resetting the index or publishing a new
+visible tree. Background HEAD watching and remote refresh remain disabled under
+this policy. See [cache coherence](native-fskit.md#cache-coherence-is-a-release-gate).
 
-GitHub-discovered sources use the scoped official CLI credential helper; manual sources retain native Git/SSH authentication. The optional discovery account does not replace credentials for arbitrary manually added remotes. Refresh fetches from the selected source without auto-committing, resetting the index, or pushing. Ordinary Git operations remain the explicit publishing path.
+## Adoption, visibility, and authentication
 
-## Download and release invariants
+Remote and local bare sources register virtual repos. Nonbare adoption records
+and directly links to the original checkout, preserving dirty files, staged work,
+index, branch or detached HEAD, and configuration. Native Git inspects it without
+creating a managed clone. Both operations work without GitHub sign-in.
+GitHub-discovered sources use the scoped official CLI credential helper; manual
+sources use native Git/SSH authentication.
 
-Keep Downloaded enumerates the current `HEAD` tree, deduplicates by blob identity, verifies cached content, fetches missing blobs, and rechecks `HEAD` before reporting completion. It refuses submodules and `.gitattributes` checkout filters such as Git LFS. Progress represents unique blobs rather than every path: two paths with identical content can share one download. Unknown sizes make byte totals a lower bound until resolved. Cancellation does not erase completed cache entries. The pin loop only processes enabled, visible pinned repositories.
+Repo and owner disabled flags jointly determine virtual/link visibility.
+Rediscovery retains individual choices and manual sources. Re-enabling an owner
+does not clear repo exclusions. Hidden entries keep local data and pin intent but
+do not start new virtual activation or pin downloads. Ordinary directories remain.
+Visibility changes drain the native catalogue and fail if detachment is unsafe.
+They do not revoke credentials or provide a network firewall.
 
-Free Up Space first detaches the catalogue, stops readers, and serializes preparation/removal. It accepts only the expected engine-owned paths, refuses symlinked storage and specified local state, and verifies remote reachability using isolated temporary refs. A durable removal manifest is saved before disabling registration, and storage is moved aside with synchronized metadata before registry removal. Pre-commit failures attempt rollback; startup recovery runs before mounting. If final cleanup fails after registry removal, the error identifies the retained cleanup directory. Discovery state is stored independently, so a released repo can remain visible as online only.
+Local checkout Refresh fetches its own remotes without resetting files or index.
+Publishing remains an explicit Git operation; RepoReach does not auto-commit or
+push.
 
-Finder status is a separate cache, written atomically with private file permissions. The extension sends a strictly validated `reporeach://action` URL; the host app and service revalidate the repository and action. The containing app is not sandboxed. The Finder extension is sandboxed and uses a narrow read-only temporary exception for the status file; it has no App Store distribution claim. See [Finder extension details](../../native/FinderExtension/README.md).
+## Keep and Free handoffs
 
-## Scope of the beta
+Keep hydrates and verifies the current committed tree, refusing submodules and
+checkout filters such as Git LFS. It stages current merged files and the complete
+existing private Git directory as a standalone checkout. Binary data, symlinks,
+modes, timestamps, and supported extended attributes are copied and verified;
+unsupported metadata causes refusal. Git refs and index are copied without
+checkout or reset, with the worktree path changed to the ordinary destination.
 
-This is a FUSE filesystem, not an Apple File Provider extension. RepoReach controls the catalogue mount location and manages its own lazy content layer. It depends on separately installed macFUSE and requires a running local service.
+Writes are frozen, fingerprints rechecked, and the catalogue normally detached
+before publication. A durable journal precedes exclusive publication. Catalogue
+state records the local checkout, registration is retired, and former engine
+paths move to verified rollback storage. That retained copy uses additional space
+until successful Free cleanup. Kept files remain accessible after app quit; the
+operation does not promise every historical blob, LFS object, or submodule offline.
 
-Keep Downloaded is a current-tree availability operation. It is not a complete offline history, LFS/submodule client, general file backup, or automatic commit/push service. The management app's status polling is local; repository discovery and user-requested refresh are separate operations. See [the user guide](user-guide.md) for user-visible behavior and [Contributing](../../CONTRIBUTING.md) for development invariants and tests.
+Free never removes adopted originals. For materialized checkouts it checks
+ownership, dirty/staged/untracked/ignored files, local metadata, shared Git storage,
+refs/reflogs/unreachable objects, custom configuration/hooks, and active access.
+Fresh remote verification uses temporary Git state and must prove recoverability.
+The owned checkout is moved aside and fingerprinted again before state commits to
+virtual. Its owned link is published before verified checkout and rollback copies
+are removed. Uncertain state is retained; incomplete cleanup is reported.
 
-## Native macOS transport under development
+Startup recovery precedes publication or mounting. Durable catalogue state and
+journals determine whether to finish or roll back a transition. Changed bytes,
+unexpected identities, or cleanup failures preserve data and block unsafe progress.
+An interrupted Keep's retained copy is a standalone checkout, with its recovery
+path reported persistently in status. Per-entry cleanup progress lets Free resume
+after a partial verified deletion without demanding already removed files.
 
-The selected future path bundles RepoReach's own FSKit app extension for macOS 26, backed by a private Unix socket bridge to the existing Go catalogue and Git/storage engine. Its target installation experience is normal app installation and one File System Extension enablement, without an external macFUSE installer or Recovery/security-policy changes. This is not yet a production backend claim.
+## Lifecycle and acceptance
 
-The native source uses a persistent working-tree baseline and quiescent catalogue updates to avoid the earlier live policy's out-of-band view changes. The macOS 26 SDK/build, FSKit-enabled Developer ID provisioning profile, and actual mounted Git/cache-coherence behavior remain acceptance gates. See [the native backend decision and proof status](native-fskit.md); immutable earlier releases retain their existing requirements and results.
+Closing the window leaves the app and service running without a menu-bar item.
+Quitting stops the owned service. Virtual links require reopening RepoReach;
+adopted and kept folders stay independent. Finder status is an atomic
+metadata-only cache, and action URLs are validated by the extension, app, and
+service. See [Finder extension details](../../native/FinderExtension/README.md).
+
+The disposable primary mounted sequence passed on macOS 27.0.1 ARM64 with the
+signed local8 module and a development engine based on `aedad10`, including dirty
+Keep, preserved Git index and local metadata, and local reads after app shutdown.
+The complete cold storage fixture also passed: metadata-only listing retained all
+five missing blobs with no source requests or cached content; Keep verified
+107 bytes, app-off reads required no requests, Free refused local extended
+metadata, and clean Free reclaimed both copies before successful reacquisition.
+Primary and cold sequences took 6.94 and 6.83 seconds respectively. These checks
+do not establish cold Finder navigation or qualify the signed combined local9
+build. Validate that build's actual Finder/Git behavior before release. See
+[the mounted record](fskit-acceptance.md),
+[the user guide](user-guide.md), and
+[Contributing](../../CONTRIBUTING.md) for visible behavior and engine invariants.

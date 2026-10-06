@@ -1,6 +1,6 @@
 # RepoReach for macOS
 
-RepoReach is a native SwiftUI management app over the ArtifactFS desktop service. Closing its window keeps the app and service running in the background; reopening RepoReach restores its window. There is no menu-bar item. Explicit Quit first unmounts the filesystem, then stops the service. If the folder is still in use, the app stays running and explains what needs closing.
+RepoReach is a native SwiftUI management app over the ArtifactFS desktop service. Closing its window keeps the app and service running in the background; reopening RepoReach restores its window. There is no menu-bar item. Explicit Quit first unmounts virtual filesystems, then stops the service. Adopted and kept ordinary local checkouts remain available. If a virtual folder is still in use, the app stays running and explains what needs closing.
 
 ## Requirements
 
@@ -28,15 +28,17 @@ A preview fixture is available only when explicitly launching with `--demo`. `--
 The native control smoke exercises the actual compiled Go service with synthetic GitHub CLI output and private temporary state, without signing in or accessing GitHub:
 
 ```sh
-swiftc -parse-as-library App/Models.swift App/EngineClient.swift Tools/control-smoke.swift -o ../build/control-smoke
+swiftc -parse-as-library App/Models.swift App/EngineClient.swift Shared/ActionRoute.swift Tools/control-smoke.swift -o ../build/control-smoke
 ../build/control-smoke /absolute/path/to/artifact-fs
 ```
 
 ## Adding and choosing repositories
 
-**Add Repository** accepts any supported Git remote URL or an existing local checkout, without signing into GitHub. The folder picker accepts ordinary or bare Git repositories. Adopting local committed data creates a separate virtual checkout; RepoReach does not move or edit the original folder or its staged and uncommitted work. GitHub sign-in remains an optional discovery convenience. Remote access uses Git's existing credentials and SSH agent; inline tokens, passwords, and credential-bearing URLs are rejected before the control command runs.
+**Add Repository** accepts any supported Git remote URL or an existing local checkout, without signing into GitHub. The folder picker accepts ordinary or bare Git repositories. An ordinary checkout is adopted in place: its location, current branch or detached HEAD, index, staged and uncommitted work, untracked files, and Git settings are retained. It is never removed by **Free Up Space**. A remote URL or bare repository creates an on-demand virtual repository instead. GitHub sign-in remains an optional discovery convenience. Remote access uses Git's existing credentials and SSH agent; inline tokens, passwords, and credential-bearing URLs are rejected before the control command runs.
 
-Use **Show repository in Finder** in repository details or **Owners & organizations** in Settings to choose what appears in the filesystem. Group settings also apply to manually adopted repositories with the same group. Hidden repositories remain in the app's catalogue, retain cached data and local work, and pause background downloading. Enabling a group does not override an individual repository's hidden setting. The **Hidden from Finder** filter makes these entries easy to find again.
+Use **Show in catalogue** in repository details or **Owners & organizations** in Settings to choose which virtual entries appear. Group settings also apply to manually adopted repositories with the same group. Hidden repositories remain registered in the app, retain cached data and local checkouts, and pause background downloading. Hiding an entry does not remove its ordinary local checkout from the host filesystem. Enabling a group does not override an individual repository's hidden setting. The **Hidden from catalogue** filter makes these entries easy to find again.
+
+**Keep Downloaded** converts a virtual repository into an ordinary local checkout at its catalogue path, accessible after RepoReach quits. An adopted checkout is already local; keeping it only records that preference. The app opens registered `localPath` locations directly, including adopted checkouts outside the catalogue, and distinguishes **Adopted checkout** from **Local checkout**. This does not imply complete offline Git history, LFS, or submodule availability.
 
 ## Architecture and safety
 
@@ -50,7 +52,7 @@ Use **Show repository in Finder** in repository details or **Owners & organizati
 
 GitHub sign-in delegates to the bundled official `gh` device/web flow. Credentials stay with `gh`; RepoReach never reads or stores tokens. Catalogue metadata and mount settings persist in `~/Library/Application Support/RepoReach`.
 
-The engine checks repository recoverability before freeing data and refuses unsafe operations. UI confirmation is additional context, not the safety boundary. Finder actions are independently validated against the current registered catalogue. Changing mount roots requires an empty destination; mounting never shadows an existing workspace.
+The engine checks repository recoverability before freeing data and refuses unsafe operations. UI confirmation is additional context, not the safety boundary. Finder actions are independently validated against the current registered catalogue. The chosen catalogue and organization directories are ordinary host folders; virtual filesystems are scoped to individual managed repository entries and never shadow an adopted checkout.
 
 Launch at login is an explicit user setting through Apple's `SMAppService`. Signing/notarization and installed Finder-extension behavior must be verified on a real macOS release installation. Compiling an extension is not proof that Finder has enabled it.
 

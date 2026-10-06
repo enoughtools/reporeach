@@ -33,6 +33,11 @@ func (fs *FileSystem) SetFileHandleAttributes(ctx context.Context, op *fuseops.S
 	if op.Inode != h.globalInode {
 		return syscall.EBADF
 	}
+	release, err := fs.beginMutation(h.repo)
+	if err != nil {
+		return err
+	}
+	defer release()
 	child := *op
 	child.Inode = h.inode
 	localHandle := h.local

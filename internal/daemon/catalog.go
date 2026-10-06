@@ -21,6 +21,39 @@ import (
 // that cannot invalidate out-of-band kernel caches, such as macOS 26 FSKit.
 type CatalogViewPolicy uint8
 
+// ExistingCatalogRepository returns only an already-open runtime. It performs
+// no preparation or waits, allowing catalogue reads to drain while an explicit
+// storage operation owns the desktop repository lock. The caller must keep the
+// catalogue attached until its requests drain before stopping this runtime.
+func (s *Service) ExistingCatalogRepository(name string) (*fusefs.ArtifactFuse, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closing {
+		return nil, false
+	}
+	for _, rt := range s.running {
+		if rt.cfg.Name == name && !rt.stopping && rt.engine != nil {
+			return fusefs.NewArtifactFuse(rt.cfg, rt.resolver, rt.engine), true
+		}
+	}
+	return nil, false
+}
+
+// StopCatalogRepositoryStorage requires the catalogue mount to be detached.
+// It drains the runtime and pooled Git readers before storage ownership moves
+// to an ordinary local checkout. Registration remains available for rollback.
+func (s *Service) StopCatalogRepositoryStorage(ctx context.Context, name string) error {
+	cfg, err := s.registry.GetRepo(ctx, name)
+	if err != nil {
+		return err
+	}
+	if err := s.Unmount(ctx, name); err != nil {
+		return err
+	}
+	s.git.CloseRepository(cfg.GitDir)
+	return ctx.Err()
+}
+
 const (
 	CatalogViewLive CatalogViewPolicy = iota
 	// CatalogViewPersistentWorkingTree preserves the initial snapshot plus

@@ -54,7 +54,12 @@ final class FinderSync: FIFinderSync {
 
         let menu = NSMenu(title: "RepoReach")
         addItem("Keep Downloaded", action: .keep, repo: repo, to: menu, enabled: !status.pinned)
-        addItem("Free Up Space", action: .free, repo: repo, to: menu)
+        addItem("Free Up Space", action: .free, repo: repo, to: menu, enabled: !status.isAdopted)
+        if status.isAdopted {
+            let retained = NSMenuItem(title: "Original checkout retained", action: nil, keyEquivalent: "")
+            retained.isEnabled = false
+            menu.addItem(retained)
+        }
         menu.addItem(.separator())
         addItem("Refresh Repository", action: .refresh, repo: repo, to: menu)
         return menu
@@ -78,16 +83,17 @@ final class FinderSync: FIFinderSync {
         lock.unlock()
 
         let controller = FIFinderSyncController.default()
-        if let next, let root = FinderStatusCache.mountRootURL(in: next) {
-            controller.directoryURLs = [root]
+        if let next, FinderStatusCache.mountRootURL(in: next) != nil {
+            controller.directoryURLs = FinderStatusCache.observedDirectoryURLs(in: next)
             // Rebadge repository roots already visible in Finder after an action.
             // requestBadgeIdentifier supplies child badges as Finder asks for them.
             for repository in next.repositories {
-                let url = root.appendingPathComponent(repository.id, isDirectory: true)
-                if directories.contains(where: { directory in
-                    url.pathComponents.starts(with: directory.standardizedFileURL.pathComponents)
-                }) {
-                    controller.setBadgeIdentifier(badgeIdentifier(for: repository), for: url)
+                for url in FinderStatusCache.repositoryURLs(for: repository, in: next) {
+                    if directories.contains(where: { directory in
+                        url.pathComponents.starts(with: directory.standardizedFileURL.pathComponents)
+                    }) {
+                        controller.setBadgeIdentifier(badgeIdentifier(for: repository), for: url)
+                    }
                 }
             }
         } else {
@@ -143,14 +149,16 @@ final class FinderSync: FIFinderSync {
             return "downloading"
         }
         if repository.pinned { return "pinned" }
+        if repository.localURL != nil { return "local" }
         if ["available", "ready", "mounted", "cached", "downloaded"].contains(repository.state) { return "ready" }
         return "virtual"
     }
 
     private func installBadgeImages() {
         let badges: [(String, String, String, NSColor)] = [
-            ("virtual", "Available on GitHub", "cloud", .systemGray),
+            ("virtual", "Available on demand", "cloud", .systemGray),
             ("ready", "Available on demand", "checkmark.circle.fill", .systemBlue),
+            ("local", "Local checkout", "checkmark.circle.fill", .systemGreen),
             ("pinned", "Kept downloaded", "checkmark.circle.fill", .systemGreen),
             ("downloading", "Downloading repository", "arrow.down.circle.fill", .systemBlue),
             ("error", "RepoReach needs attention", "exclamationmark.circle.fill", .systemOrange)

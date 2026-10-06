@@ -60,6 +60,7 @@ type fsKitMountOperations struct {
 	verifyDelay        time.Duration
 	unmountRetryWindow time.Duration
 	verifyRoot         func(string, *nativeMountRootReceipt) error
+	hidden             bool
 }
 
 func nativeFSKitOperations(logger *slog.Logger) fsKitMountOperations {
@@ -205,7 +206,16 @@ func cachedDarwinMounts() ([]fsKitMountIdentity, error) {
 }
 
 func (s *Service) platformMountCatalogue(ctx context.Context, root string, fs *catalogfs.FileSystem) (fusefs.MountedFS, error) {
-	return s.mountNativeFSKit(ctx, root, fs, nativeFSKitOperations(s.logger))
+	privateRoot, err := s.hybridCatalogueMountRoot()
+	if err != nil {
+		return nil, err
+	}
+	if pathsOverlap(root, privateRoot) {
+		return nil, errors.New("repository catalogue and private virtual volume must be separate")
+	}
+	ops := nativeFSKitOperations(s.logger)
+	ops.hidden = true
+	return s.mountNativeFSKit(ctx, privateRoot, fs, ops)
 }
 
 func (s *Service) mountNativeFSKit(ctx context.Context, root string, fs *catalogfs.FileSystem, ops fsKitMountOperations) (fusefs.MountedFS, error) {
@@ -280,7 +290,12 @@ func (s *Service) mountNativeFSKit(ctx context.Context, root string, fs *catalog
 		return nil, err
 	}
 	commandCtx, cancel := context.WithTimeout(ctx, ops.timeout)
-	commandErr := ops.command(commandCtx, "/sbin/mount", "-F", "-t", "reporeach", mounted.source, canonicalRoot)
+	arguments := []string{"-F", "-t", "reporeach"}
+	if ops.hidden {
+		arguments = append(arguments, "-o", "nobrowse")
+	}
+	arguments = append(arguments, mounted.source, canonicalRoot)
+	commandErr := ops.command(commandCtx, "/sbin/mount", arguments...)
 	mounted.pendingAttachment = commandCtx.Err() != nil || errors.Is(commandErr, context.Canceled) || errors.Is(commandErr, context.DeadlineExceeded)
 	cancel()
 	// An error or cancellation can arrive after the kernel has attached. Check

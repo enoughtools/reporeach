@@ -24,20 +24,24 @@ struct RepositoryRecord: Codable, Identifiable, Equatable {
     let error: String?
     let source: String
     let disabled: Bool
+    let localPath: String?
+    let localKind: String?
 
     enum CodingKeys: String, CodingKey {
-        case id, owner, name, description, defaultBranch, htmlURL, cloneURL, state, pinned, downloadedBytes, error, source, disabled
+        case id, owner, name, description, defaultBranch, htmlURL, cloneURL, state, pinned, downloadedBytes, error, source, disabled, localPath, localKind
         case privateRepository = "private"
     }
 
     init(id: String, owner: String, name: String, description: String, defaultBranch: String = "main",
          privateRepository: Bool = false, htmlURL: String = "", cloneURL: String = "", state: String = "virtual",
-         pinned: Bool = false, downloadedBytes: Int64 = 0, error: String? = nil, source: String = "github", disabled: Bool = false) {
+         pinned: Bool = false, downloadedBytes: Int64 = 0, error: String? = nil, source: String = "github", disabled: Bool = false,
+         localPath: String? = nil, localKind: String? = nil) {
         self.id = id; self.owner = owner; self.name = name; self.description = description
         self.defaultBranch = defaultBranch; self.privateRepository = privateRepository
         self.htmlURL = htmlURL; self.cloneURL = cloneURL; self.state = state; self.pinned = pinned
         self.downloadedBytes = downloadedBytes; self.error = error
         self.source = source; self.disabled = disabled
+        self.localPath = localPath; self.localKind = localKind
     }
 
     init(from decoder: Decoder) throws {
@@ -56,9 +60,14 @@ struct RepositoryRecord: Codable, Identifiable, Equatable {
         error = try value.decodeIfPresent(String.self, forKey: .error)
         source = try value.decodeIfPresent(String.self, forKey: .source) ?? "github"
         disabled = try value.decodeIfPresent(Bool.self, forKey: .disabled) ?? false
+        localPath = try value.decodeIfPresent(String.self, forKey: .localPath)
+        localKind = try value.decodeIfPresent(String.self, forKey: .localKind)
     }
 
     var displayState: String {
+        if !isWorking && state != "error", isLocal {
+            return isAdopted ? "Adopted checkout" : "Local checkout"
+        }
         switch state {
         case "preparing": return "Preparing"
         case "downloading": return "Downloading"
@@ -70,6 +79,23 @@ struct RepositoryRecord: Codable, Identifiable, Equatable {
     }
     var isWorking: Bool { state == "preparing" || state == "downloading" }
     var isManual: Bool { source == "manual" }
+    var isLocal: Bool { localURL != nil }
+    var isAdopted: Bool { localKind == "adopted" && isLocal }
+    var localURL: URL? {
+        guard ["adopted", "materialized"].contains(localKind ?? ""), let localPath,
+              localPath.hasPrefix("/"),
+              !localPath.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) else { return nil }
+        let url = URL(fileURLWithPath: localPath, isDirectory: true).standardizedFileURL
+        return url.path == "/" ? nil : url
+    }
+    func folderURL(in catalogueRoot: String) -> URL? {
+        if let localURL { return localURL }
+        guard ActionRoute.isValidRepositoryID(id), catalogueRoot.hasPrefix("/"),
+              !catalogueRoot.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) else { return nil }
+        let root = URL(fileURLWithPath: catalogueRoot, isDirectory: true).standardizedFileURL
+        guard root.path != "/" else { return nil }
+        return root.appendingPathComponent(id, isDirectory: true)
+    }
     func isEnabled(in groups: [OrganizationRecord]) -> Bool {
         !disabled && (groups.first(where: { $0.name.caseInsensitiveCompare(owner) == .orderedSame })?.enabled ?? true)
     }

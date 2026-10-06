@@ -79,7 +79,7 @@ func TestDirectoryEnumerationUnknownSizesStayLazy(t *testing.T) {
 			}
 			// The directory handle retains the returned identity after all
 			// transient lookup refs are forgotten. Real stat still resolves size.
-			stat := c.call(t, map[string]any{"op": "getattr", "inode": file.Inode}, 0)
+			stat := c.call(t, map[string]any{"op": "getattr", "inode": file.Inode, "require_size": true}, 0)
 			if stat.Node.Attributes.Size != uint64(len(fixture.content)) || stat.Node.Attributes.SizeKnown != nil {
 				t.Fatalf("authoritative stat = %+v", stat.Node)
 			}

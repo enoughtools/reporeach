@@ -38,26 +38,27 @@ type Options struct {
 // Service owns the catalogue, daemon runtimes, and background operations.
 // Closing its control window does not affect its lifetime.
 type Service struct {
-	ctx              context.Context
-	cancel           context.CancelFunc
-	opts             Options
-	logger           *slog.Logger
-	github           *GitHub
-	engine           *daemon.Service
-	mu               sync.Mutex
-	state            persistedState
-	message          string
-	ops              []Operation
-	cancels          map[string]context.CancelFunc
-	locks            map[string]chan struct{}
-	pins             map[string]string
-	closing          bool
-	quitPrepared     bool
-	closed           bool
-	closeMu          sync.Mutex
-	maintenance      bool
-	recoveryRequired bool
-	workers          sync.WaitGroup
+	ctx                     context.Context
+	cancel                  context.CancelFunc
+	opts                    Options
+	logger                  *slog.Logger
+	github                  *GitHub
+	engine                  *daemon.Service
+	mu                      sync.Mutex
+	state                   persistedState
+	message                 string
+	retainedCheckoutMessage string
+	ops                     []Operation
+	cancels                 map[string]context.CancelFunc
+	locks                   map[string]chan struct{}
+	pins                    map[string]string
+	closing                 bool
+	quitPrepared            bool
+	closed                  bool
+	closeMu                 sync.Mutex
+	maintenance             bool
+	recoveryRequired        bool
+	workers                 sync.WaitGroup
 	// lifecycle protects mount changes. Repository operations never hold mu
 	// while waiting on FUSE or invoking git.
 	lifecycle              sync.Mutex
@@ -70,6 +71,11 @@ type Service struct {
 	// FSKit 26 cannot invalidate catalogue changes made outside the mounted
 	// filesystem. Publish them only after a normal, successful unmount.
 	quiescentCatalogue bool
+	// Native virtual repositories live behind ordinary catalogue directories.
+	// Local checkouts never need this filesystem to expose their files.
+	hybridCatalogue bool
+	preview         *PreviewCache
+	previewGit      *gitstore.Store
 }
 
 func New(ctx context.Context, opts Options) (*Service, error) {
@@ -136,15 +142,35 @@ func New(ctx context.Context, opts Options) (*Service, error) {
 		ops: []Operation{}, cancels: map[string]context.CancelFunc{},
 		locks: map[string]chan struct{}{}, pins: map[string]string{},
 		dependencyReady: platformDependencyReady, quiescentCatalogue: runtime.GOOS == "darwin",
+		hybridCatalogue: runtime.GOOS == "darwin",
 	}
 	s.mountCatalogue = s.platformMountCatalogue
 	s.closeCatalogueMetadata = (*overlay.Store).Close
+	if err := s.recoverLocalHandoffs(ctx); err != nil {
+		_ = engine.Close()
+		cancel()
+		return nil, fmt.Errorf("recover local checkout handoff: %w", err)
+	}
+	s.retainedCheckoutMessage, err = s.retainedLocalCheckoutMessage()
+	if err != nil {
+		_ = engine.Close()
+		cancel()
+		return nil, fmt.Errorf("inspect retained local checkouts: %w", err)
+	}
 	if err := s.recoverRootMigration(ctx); err != nil {
 		_ = engine.Close()
 		cancel()
 		return nil, fmt.Errorf("recover mount folder: %w", err)
 	}
 	for _, repo := range s.state.Repositories {
+		if repo.LocalPath != "" {
+			if _, err := validateAdoptionLocalSource(repo.LocalPath, opts.StateDir, opts.StateDir); err != nil {
+				_ = engine.Close()
+				cancel()
+				return nil, errors.New("the local checkout overlaps RepoReach's private storage")
+			}
+			continue
+		}
 		if repo.Source == "manual" {
 			remote, err := parseAdoptionRemote(repo.CloneURL)
 			if err == nil {
@@ -170,7 +196,9 @@ func New(ctx context.Context, opts Options) (*Service, error) {
 	}
 	for i := range s.state.Repositories {
 		repo := &s.state.Repositories[i]
-		if prepared[engineName(repo.ID)] {
+		if repo.LocalPath != "" {
+			repo.State = "local"
+		} else if prepared[engineName(repo.ID)] {
 			repo.State = "available"
 		} else {
 			repo.State = "virtual"
@@ -182,6 +210,16 @@ func New(ctx context.Context, opts Options) (*Service, error) {
 		_ = engine.Close()
 		cancel()
 		return nil, err
+	}
+	if s.hybridCatalogue {
+		s.previewGit = gitstore.New(opts.Logger)
+		s.preview, err = NewPreviewCache(serviceCtx, opts.StateDir, s.previewGit, s.github)
+		if err != nil {
+			s.previewGit.Close()
+			_ = engine.Close()
+			cancel()
+			return nil, err
+		}
 	}
 	return s, nil
 }
@@ -213,6 +251,12 @@ func (s *Service) Close() error {
 	if err := s.engine.Close(); err != nil {
 		return err
 	}
+	if s.preview != nil {
+		if err := s.preview.Close(); err != nil {
+			return err
+		}
+		s.previewGit.Close()
+	}
 	s.mu.Lock()
 	s.closed = true
 	s.mu.Unlock()
@@ -220,6 +264,7 @@ func (s *Service) Close() error {
 }
 
 func (s *Service) Restore() {
+	s.startPreviewSeeding()
 	s.mu.Lock()
 	desired := s.state.MountDesired
 	s.mu.Unlock()
@@ -259,7 +304,7 @@ func (s *Service) Status() Status {
 	return Status{Version: Version, MountRoot: s.state.MountRoot,
 		Mounted: s.mounted != nil, DependencyReady: s.dependencyReady(),
 		Account: account, Repositories: repos, Operations: operations,
-		Organizations: s.organizationsLocked(), Message: s.message}
+		Organizations: s.organizationsLocked(), Message: strings.TrimSpace(s.message + "\n" + s.retainedCheckoutMessage)}
 }
 
 func (s *Service) Discover(ctx context.Context) (status Status, retErr error) {
@@ -317,6 +362,7 @@ func (s *Service) Discover(ctx context.Context) (status Status, retErr error) {
 			} else {
 				repo.State, repo.Pinned, repo.DownloadedBytes, repo.Error = existing.State, existing.Pinned, existing.DownloadedBytes, existing.Error
 				repo.Disabled, repo.Source = existing.Disabled, existing.Source
+				repo.LocalPath, repo.LocalKind = existing.LocalPath, existing.LocalKind
 				// Keep the stable catalogue identity when GitHub changes casing.
 				repo.ID, repo.Owner, repo.Name = existing.ID, existing.Owner, existing.Name
 				repo.CloneURL, repo.HTMLURL = existing.CloneURL, existing.HTMLURL
@@ -346,6 +392,9 @@ func (s *Service) Discover(ctx context.Context) (status Status, retErr error) {
 	sort.Slice(repos, func(i, j int) bool { return strings.ToLower(repos[i].ID) < strings.ToLower(repos[j].ID) })
 	s.state.Repositories, s.state.Account = repos, account
 	err = ctx.Err()
+	if err == nil {
+		err = s.publishHybridCatalogueLocked()
+	}
 	if err == nil {
 		err = s.persistLocked()
 		if err == nil {
@@ -410,7 +459,10 @@ func (s *Service) mountLocked(ctx context.Context) error {
 	if s.opts.FSKitSocketDir != "" && pathsOverlap(root, s.opts.FSKitSocketDir) {
 		return errors.New("mount folder and File System Extension connection folder must be separate")
 	}
-	if err := s.checkMountDirectory(root); err != nil {
+	if err := s.checkCatalogueDirectory(root); err != nil {
+		return err
+	}
+	if err := s.publishHybridCatalogue(); err != nil {
 		return err
 	}
 	// A previous session may be detached but retain its store after a close
@@ -425,14 +477,17 @@ func (s *Service) mountLocked(ctx context.Context) error {
 	s.mu.Lock()
 	s.catalogMetadata = metadata
 	s.mu.Unlock()
-	fs, err := catalogfs.NewWithMetadata(entries, func(ctx context.Context, entry catalogfs.Entry) (*fusefs.ArtifactFuse, error) {
-		unlock, err := s.lockRepo(ctx, entry.ID)
+	fs, err := catalogfs.NewWithPreview(entries, func(ctx context.Context, entry catalogfs.Entry) (*fusefs.ArtifactFuse, error) {
+		if backend, ok := s.engine.ExistingCatalogRepository(engineName(entry.ID)); ok {
+			return backend, nil
+		}
+		unlock, err := s.lockRepoForActivation(ctx, entry.ID)
 		if err != nil {
 			return nil, err
 		}
 		defer unlock()
 		return s.ensureRepository(ctx, entry.ID)
-	}, metadata)
+	}, metadata, s.cataloguePreview)
 	if err != nil {
 		return errors.Join(err, s.closeCatalogueStoreLocked())
 	}
@@ -609,6 +664,11 @@ func (s *Service) Settings(ctx context.Context, root string) error {
 	}
 	var localRepositories []Repository
 	for _, repo := range s.state.Repositories {
+		if repo.LocalPath != "" {
+			// Ordinary adopted/kept checkouts retain their own physical location
+			// when the catalogue moves. The new catalogue links to that location.
+			continue
+		}
 		if repo.Source != "manual" {
 			continue
 		}
@@ -652,7 +712,7 @@ func (s *Service) Settings(ctx context.Context, root string) error {
 			return err
 		}
 	}
-	if err := s.checkMountDirectory(root); err != nil {
+	if err := s.checkCatalogueDirectory(root); err != nil {
 		return err
 	}
 	if err := s.detachLocked(); err != nil {
@@ -681,6 +741,14 @@ func (s *Service) Settings(ctx context.Context, root string) error {
 		}
 		return err
 	}
+	if s.hybridCatalogue {
+		if err := s.syncHybridCatalogue(oldRoot, nil); err != nil {
+			return err
+		}
+		if err := s.publishHybridCatalogue(); err != nil {
+			return err
+		}
+	}
 	if desired {
 		return s.mountLocked(ctx)
 	}
@@ -703,6 +771,9 @@ func (s *Service) ensureRepository(ctx context.Context, id string) (*fusefs.Arti
 	if !enabled {
 		return nil, errors.New("enable this repository and its owner group before opening it virtually")
 	}
+	if repo.LocalPath != "" {
+		return nil, errors.New("this repository is an ordinary local checkout")
+	}
 	configs, err := s.engine.ListRepos(ctx)
 	if err != nil {
 		return nil, err
@@ -721,12 +792,21 @@ func (s *Service) ensureRepository(ctx context.Context, id string) (*fusefs.Arti
 				return nil, err
 			}
 		}
+		var requiredCommit string
+		if s.hybridCatalogue && s.preview != nil {
+			preview, err := s.preview.Acquire(ctx, repo)
+			if err != nil {
+				return nil, err
+			}
+			requiredCommit = preview.Commit
+		}
 		s.setRepositoryState(id, "preparing", "")
 		cfg := model.RepoConfig{
 			ID: model.RepoID(name), Name: name, RemoteURL: repo.CloneURL,
 			Branch: "refs/heads/" + repo.DefaultBranch, Enabled: true,
 			MountRoot: root, MountPath: filepath.Join(root, repo.Owner, repo.Name),
 			RefreshInterval: 5 * time.Minute, RemoteRefreshDisabled: true,
+			RequiredCommit: requiredCommit,
 		}
 		if repo.Source != "manual" {
 			cfg.CredentialHelper = githubCredentialHelper(s.opts.GHPath)
@@ -737,6 +817,20 @@ func (s *Service) ensureRepository(ctx context.Context, id string) (*fusefs.Arti
 		if err := s.engine.AddRepo(ctx, cfg); err != nil {
 			s.setRepositoryState(id, "error", safeError(err))
 			return nil, err
+		}
+		if config == nil && requiredCommit != "" {
+			// Verified source acquisition deliberately produces a detached HEAD.
+			// A new desktop working tree instead starts on its requested local
+			// branch. Do this before exposing it; existing indexes and branches
+			// are never reset when reopening prepared repository storage.
+			gitDir := filepath.Join(s.opts.StateDir, "engine", "repos", name, "git")
+			branch := "refs/heads/" + repo.DefaultBranch
+			if _, err := localCheckoutGit(ctx, gitDir, "update-ref", branch, requiredCommit); err != nil {
+				return nil, errors.New("could not initialize the new checkout's local branch")
+			}
+			if _, err := localCheckoutGit(ctx, gitDir, "symbolic-ref", "HEAD", branch); err != nil {
+				return nil, errors.New("could not attach the new checkout to its local branch")
+			}
 		}
 	}
 	gitDir := filepath.Join(s.opts.StateDir, "engine", "repos", name, "git")
@@ -769,7 +863,7 @@ func (s *Service) Action(id, action string) (Operation, error) {
 	if s.closing || s.quitPrepared {
 		return Operation{}, errors.New("service is closing")
 	}
-	if s.maintenance {
+	if s.maintenance || s.recoveryRequired {
 		return Operation{}, errors.New("wait for the folder change to finish")
 	}
 	repo, ok := s.repositoryLocked(id)
@@ -821,7 +915,14 @@ func (s *Service) runAction(ctx context.Context, cancel context.CancelFunc, op O
 	unlock, err := s.lockRepo(ctx, op.RepositoryID)
 	if err == nil {
 		defer unlock()
-		if op.Action == "free" {
+		s.mu.Lock()
+		repo, found := s.repositoryLocked(op.RepositoryID)
+		s.mu.Unlock()
+		if found && s.hybridCatalogue && repo.LocalPath != "" {
+			err = s.runLocalAction(ctx, op, repo)
+		} else if found && s.hybridCatalogue && repo.State == "virtual" && op.Action == "refresh" {
+			err = s.refreshPreview(ctx, repo)
+		} else if op.Action == "free" {
 			err = s.freeRepository(ctx, op.RepositoryID)
 		} else {
 			_, err = s.ensureRepository(ctx, op.RepositoryID)
@@ -886,6 +987,9 @@ func (s *Service) download(ctx context.Context, op Operation) error {
 	})
 	if err != nil {
 		return err
+	}
+	if s.hybridCatalogue {
+		return s.materializeRepository(ctx, op, result.DownloadedBytes)
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1004,6 +1108,9 @@ func (s *Service) pinLoop() {
 			}
 			s.mu.Unlock()
 			for _, repo := range pinned {
+				if repo.LocalPath != "" {
+					continue
+				}
 				st, err := s.engine.Status(s.ctx, engineName(repo.ID))
 				s.mu.Lock()
 				knownHead := s.pins[repo.ID]
@@ -1065,7 +1172,7 @@ func (s *Service) repositoryLocked(id string) (Repository, bool) {
 func (s *Service) entriesLocked() []catalogfs.Entry {
 	entries := make([]catalogfs.Entry, 0, len(s.state.Repositories))
 	for _, repo := range s.state.Repositories {
-		if !s.repositoryEnabledLocked(repo) {
+		if !s.repositoryEnabledLocked(repo) || s.hybridCatalogue && repo.LocalPath != "" {
 			continue
 		}
 		entries = append(entries, catalogfs.Entry{ID: repo.ID, Owner: repo.Owner, Name: repo.Name})

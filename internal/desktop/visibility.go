@@ -189,6 +189,9 @@ func (s *Service) changeVisibility(ctx context.Context, owner, id string, enable
 	catalog, entries := s.catalog, s.entriesLocked()
 	err = ctx.Err()
 	if err == nil {
+		err = s.publishHybridCatalogueLocked()
+	}
+	if err == nil {
 		err = s.persistLocked()
 		if err == nil {
 			err = ctx.Err()

@@ -1822,13 +1822,22 @@ func (b *batchCatFile) readObjectSize(oid string) (int64, error) {
 
 // CommitTimestamp returns the committer timestamp of the given commit OID.
 func (s *Store) CommitTimestamp(ctx context.Context, repo model.RepoConfig, oid string) (int64, error) {
-	out, err := runGit(ctx, repo.GitDir, "show", "-s", "--format=%ct", oid)
+	// show --no-patch still initializes diff/rename processing and can fetch
+	// missing blobs. rev-list's timestamp output reads only commit metadata,
+	// without walking parents or invoking diff machinery. The local-only guard
+	// keeps even an unavailable commit from starting a promisor acquisition.
+	out, err := runGitWithEnv(ctx, repo.GitDir, []string{"GIT_NO_LAZY_FETCH=1"},
+		"rev-list", "--timestamp", "--no-walk", "--max-count=1", oid, "--")
 	if err != nil {
 		return 0, err
 	}
-	ts, err := strconv.ParseInt(strings.TrimSpace(out), 10, 64)
+	fields := strings.Fields(out)
+	if len(fields) != 2 || !verificationObjectOID(fields[1]) {
+		return 0, errors.New("invalid commit timestamp metadata")
+	}
+	ts, err := strconv.ParseInt(fields[0], 10, 64)
 	if err != nil {
-		return 0, fmt.Errorf("parse commit timestamp %q: %w", out, err)
+		return 0, errors.New("invalid commit timestamp metadata")
 	}
 	return ts, nil
 }

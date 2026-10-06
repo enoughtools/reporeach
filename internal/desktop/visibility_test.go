@@ -492,11 +492,11 @@ func TestVisibilityStateMigratesLegacyAndRejectsInvalidPolicies(t *testing.T) {
 		t.Fatal(err)
 	}
 	loaded, err := readState(path, root)
-	if err != nil || loaded.SchemaVersion != 2 || len(loaded.DisabledOrganizations) != 0 || loaded.Repositories[0].Disabled || loaded.Repositories[0].Source != "" || loaded.Repositories[0] != repo {
+	if err != nil || loaded.SchemaVersion != 3 || len(loaded.DisabledOrganizations) != 0 || loaded.Repositories[0].Disabled || loaded.Repositories[0].Source != "" || loaded.Repositories[0] != repo {
 		t.Fatalf("legacy migration changed repository defaults: %+v, %v", loaded, err)
 	}
 	for name, mutate := range map[string]func(*persistedState){
-		"unknown schema":  func(s *persistedState) { s.SchemaVersion = 3 },
+		"unknown schema":  func(s *persistedState) { s.SchemaVersion = 4 },
 		"unknown source":  func(s *persistedState) { s.Repositories[0].Source = "unsupported" },
 		"relative owner":  func(s *persistedState) { s.DisabledOrganizations = []string{".."} },
 		"owner traversal": func(s *persistedState) { s.DisabledOrganizations = []string{"../Team"} },

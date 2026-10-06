@@ -43,10 +43,13 @@ func (s *Service) quiesceCatalogueChange(ctx context.Context) (bool, error) {
 	// that is waiting for its repository lock. Refuse before any unmount; new
 	// operations cannot enter this cycle after maintenance is claimed below.
 	for _, operation := range s.ops {
-		if operation.Action == "free" && operation.Status == "running" {
+		if (operation.Action == "free" || (s.hybridCatalogue && (operation.Action == "keep" || operation.Action == "refresh"))) && operation.Status == "running" {
 			s.maintenance = false
 			s.mu.Unlock()
-			return false, errors.New("finish the storage removal before changing the repository catalogue")
+			if operation.Action == "free" {
+				return false, errors.New("finish the storage removal before changing the repository catalogue")
+			}
+			return false, errors.New("finish the repository operation before changing the repository catalogue")
 		}
 	}
 	s.mu.Unlock()
@@ -64,6 +67,14 @@ func (s *Service) quiesceCatalogueChange(ctx context.Context) (bool, error) {
 // the service's own cancellation and a deadline so shutdown remains bounded.
 // lifecycle is held and mu must be released during every mount callback.
 func (s *Service) restoreCatalogueAfterChange(ctx context.Context, remount bool) error {
+	if err := s.publishHybridCatalogue(); err != nil {
+		s.mu.Lock()
+		s.maintenance = false
+		s.message = safeError(err)
+		s.mu.Unlock()
+		return err
+	}
+	s.startPreviewSeeding()
 	if !remount {
 		if s.quiescentCatalogue {
 			s.mu.Lock()

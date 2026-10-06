@@ -22,18 +22,20 @@ struct FSBridgeRequest: Encodable, Sendable {
     var n: UInt64?
     var attributes: FSBridgeAttributeChanges?
     var forgets: [FSBridgeForget]?
+    var requireSize: Bool?
 
     enum CodingKeys: String, CodingKey {
         case version, op, inode, parent, name, handle, offset, size, mode, access, target, n, attributes, forgets
         case oldParent = "old_parent", oldName = "old_name"
         case newParent = "new_parent", newName = "new_name"
+        case requireSize = "require_size"
     }
 
     init(op: String, inode: UInt64? = nil, parent: UInt64? = nil, name: String? = nil,
          handle: UInt64? = nil, offset: UInt64? = nil, size: Int64? = nil, mode: UInt32? = nil, access: UInt32? = nil,
          oldParent: UInt64? = nil, oldName: String? = nil, newParent: UInt64? = nil,
          newName: String? = nil, target: String? = nil, n: UInt64? = nil,
-         attributes: FSBridgeAttributeChanges? = nil, forgets: [FSBridgeForget]? = nil) {
+         attributes: FSBridgeAttributeChanges? = nil, forgets: [FSBridgeForget]? = nil, requireSize: Bool? = nil) {
         self.op = op
         self.inode = inode
         self.parent = parent
@@ -51,6 +53,7 @@ struct FSBridgeRequest: Encodable, Sendable {
         self.n = n
         self.attributes = attributes
         self.forgets = forgets
+        self.requireSize = requireSize
     }
 }
 

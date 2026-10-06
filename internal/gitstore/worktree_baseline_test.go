@@ -363,3 +363,58 @@ func TestVerifySafeToDiscardRecognizesOnlyRecoverableWorkingTreeBaseline(t *test
 		})
 	}
 }
+
+func TestVerifySafeToDiscardAcceptsDisabledMonitorAndRejectsExternalHook(t *testing.T) {
+	for _, name := range []string{"disabled", "external-hook"} {
+		t.Run(name, func(t *testing.T) {
+			cfg, _, _, _, _ := baselineFixture(t, "sha1")
+			ctx := context.Background()
+			called := filepath.Join(t.TempDir(), "external-monitor-called")
+			t.Setenv("AFS_TEST_EXTERNAL_MONITOR_CALLED", called)
+			monitor := "false"
+			if name == "external-hook" {
+				monitor = filepath.Join(t.TempDir(), "external-monitor")
+				if err := os.WriteFile(monitor, []byte("#!/bin/sh\n: > \"$AFS_TEST_EXTERNAL_MONITOR_CALLED\"\nexit 0\n"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			run(t, "git", "-C", cfg.MountPath, "config", "core.fsmonitor", monitor)
+			preserved := make(map[string][]byte)
+			for _, filename := range []string{"HEAD", "index", "config"} {
+				data, err := os.ReadFile(filepath.Join(cfg.GitDir, filename))
+				if err != nil {
+					t.Fatal(err)
+				}
+				preserved[filename] = data
+			}
+			store := New(nil)
+			defer store.Close()
+			err := store.VerifySafeToDiscard(ctx, cfg)
+			if name == "disabled" && err != nil {
+				t.Fatalf("clean remotely recoverable materialized checkout was refused with monitoring disabled: %v", err)
+			}
+			if name == "external-hook" && (err == nil || !strings.Contains(err.Error(), "custom Git filesystem monitor")) {
+				t.Fatalf("external monitor was not refused before discard verification: %v", err)
+			}
+			if _, err := os.Lstat(called); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("discard verification invoked an external filesystem monitor: %v", err)
+			}
+			for filename, expected := range preserved {
+				// A fresh filtered fetch may add origin's promisor settings to a
+				// full-clone fixture. That owned acquisition configuration is
+				// allowed to change, while HEAD/index and the monitor setting are
+				// preserved. External-hook refusal never reaches the fetch.
+				if filename == "config" && name == "disabled" {
+					continue
+				}
+				actual, err := os.ReadFile(filepath.Join(cfg.GitDir, filename))
+				if err != nil || !bytes.Equal(actual, expected) {
+					t.Fatalf("discard verification changed %s: %v", filename, err)
+				}
+			}
+			if value, err := runGit(ctx, cfg.GitDir, "config", "--local", "--get", "core.fsmonitor"); err != nil || value != monitor {
+				t.Fatalf("discard verification changed the monitor setting: %q, %v", value, err)
+			}
+		})
+	}
+}

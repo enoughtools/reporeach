@@ -23,7 +23,7 @@ type persistedState struct {
 }
 
 func readState(path, mountRoot string) (persistedState, error) {
-	state := persistedState{SchemaVersion: 2, MountRoot: mountRoot, Repositories: []Repository{}}
+	state := persistedState{SchemaVersion: 3, MountRoot: mountRoot, Repositories: []Repository{}}
 	f, err := os.Open(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return state, nil
@@ -41,13 +41,13 @@ func readState(path, mountRoot string) (persistedState, error) {
 	if decoder.Decode(new(any)) != io.EOF {
 		return state, errors.New("catalogue has trailing data")
 	}
-	if saved.SchemaVersion != 1 && saved.SchemaVersion != 2 {
+	if saved.SchemaVersion != 1 && saved.SchemaVersion != 2 && saved.SchemaVersion != 3 {
 		return state, fmt.Errorf("unsupported catalogue schema version %d", saved.SchemaVersion)
 	}
 	state = saved
 	// Version 1 had neither manual sources nor visibility policies. Defaults
 	// preserve its catalogue; the next atomic save records the upgraded schema.
-	state.SchemaVersion = 2
+	state.SchemaVersion = 3
 	owners := make(map[string]bool, len(state.DisabledOrganizations))
 	for _, owner := range state.DisabledOrganizations {
 		if err := validateComponent(owner); err != nil {
@@ -131,6 +131,18 @@ func writeState(path string, state persistedState) error {
 }
 
 func validateRepository(repo Repository) error {
+	if repo.LocalPath == "" && repo.LocalKind != "" || repo.LocalPath != "" && repo.LocalKind != "adopted" && repo.LocalKind != "materialized" {
+		return errors.New("invalid local checkout storage kind")
+	}
+	if repo.LocalPath != "" && (!filepath.IsAbs(repo.LocalPath) || hasAdoptionControl(repo.LocalPath)) {
+		return errors.New("local checkout path must be absolute")
+	}
+	if repo.LocalKind == "adopted" && repo.Source != "manual" {
+		return errors.New("adopted checkouts require a manual source")
+	}
+	if repo.LocalKind == "adopted" && repo.CloneURL != repo.LocalPath {
+		return errors.New("adopted checkouts must retain their original Git source path")
+	}
 	if err := validateComponent(repo.Owner); err != nil {
 		return fmt.Errorf("invalid owner: %w", err)
 	}

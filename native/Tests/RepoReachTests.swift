@@ -44,6 +44,66 @@ final class FinderCacheTests: XCTestCase {
         XCTAssertNil(FinderStatusCache.repositoryID(for: URL(fileURLWithPath: "/Users/example/Repositories/owner/repo/../../../unrelated"), in: status))
     }
 
+    func testAdoptedCheckoutMapsOriginalAndCataloguePathsWithoutReadingFiles() {
+        let repository = FinderRepositoryStatus(id: "local/project", state: "available", pinned: false,
+                                                localPath: "/Users/example/Source Projects/project", localKind: "adopted")
+        let status = FinderStatusSnapshot(mountRoot: "/Users/example/Repositories", repositories: [repository])
+
+        XCTAssertEqual(FinderStatusCache.repositoryID(for: URL(fileURLWithPath: "/Users/example/Source Projects/project/.git/index"), in: status), repository.id)
+        XCTAssertEqual(FinderStatusCache.repositoryID(for: URL(fileURLWithPath: "/Users/example/Repositories/local/project/Sources/main.swift"), in: status), repository.id)
+        XCTAssertNil(FinderStatusCache.repositoryID(for: URL(fileURLWithPath: "/Users/example/Source Projects/project-other"), in: status))
+        XCTAssertNil(FinderStatusCache.repositoryID(for: URL(fileURLWithPath: "/Users/example/Source Projects/project/../outside"), in: status))
+        XCTAssertEqual(FinderStatusCache.observedDirectoryURLs(in: status), [
+            URL(fileURLWithPath: status.mountRoot, isDirectory: true), repository.localURL!
+        ])
+    }
+
+    func testNestedCheckoutSelectionUsesDeepestRegisteredRepository() {
+        let outer = FinderRepositoryStatus(id: "local/outer", state: "available", pinned: false, localPath: "/Users/example/Source/outer", localKind: "adopted")
+        let inner = FinderRepositoryStatus(id: "local/inner", state: "available", pinned: false, localPath: "/Users/example/Source/outer/nested", localKind: "adopted")
+        let status = FinderStatusSnapshot(mountRoot: "/Users/example/Repositories", repositories: [outer, inner])
+        XCTAssertEqual(FinderStatusCache.repositoryID(for: URL(fileURLWithPath: "/Users/example/Source/outer/nested/file"), in: status), inner.id)
+        XCTAssertEqual(FinderStatusCache.repositoryID(for: URL(fileURLWithPath: "/Users/example/Source/outer/file"), in: status), outer.id)
+    }
+
+    func testAmbiguousPhysicalRegistrationsOfferNoRepositoryAction() {
+        let status = FinderStatusSnapshot(mountRoot: "/Users/example/Repositories", repositories: [
+            FinderRepositoryStatus(id: "local/first", state: "available", pinned: false, localPath: "/Users/example/Source/project", localKind: "adopted"),
+            FinderRepositoryStatus(id: "local/second", state: "available", pinned: false, localPath: "/Users/example/Source/project", localKind: "adopted")
+        ])
+        XCTAssertNil(FinderStatusCache.repositoryID(for: URL(fileURLWithPath: "/Users/example/Source/project/file"), in: status))
+    }
+
+    func testLegacyFinderSnapshotAndLocalMetadataRoundTrip() throws {
+        let legacy = try JSONDecoder().decode(FinderStatusSnapshot.self, from: Data(#"{"mountRoot":"/Users/example/Repositories","repositories":[{"id":"owner/repo","state":"virtual","pinned":false}]}"#.utf8))
+        XCTAssertNil(legacy.repositories.first?.localPath)
+        XCTAssertNil(legacy.repositories.first?.localKind)
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let cache = FinderStatusCache(fileURL: directory.appendingPathComponent("status.json"))
+        let status = FinderStatusSnapshot(mountRoot: legacy.mountRoot, repositories: [
+            FinderRepositoryStatus(id: "owner/repo", state: "available", pinned: true,
+                                   localPath: "/Users/example/Repositories/owner/repo", localKind: "materialized")
+        ])
+        try cache.write(status)
+        XCTAssertEqual(cache.read(), status)
+        XCTAssertEqual(FinderStatusCache.repositoryURLs(for: status.repositories[0], in: status).count, 1)
+    }
+
+    func testFinderCacheRejectsUnsafeOrIncompleteLocalMetadata() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let cache = FinderStatusCache(fileURL: directory.appendingPathComponent("status.json"))
+        let invalid: [(String?, String?)] = [("/", "adopted"), ("relative/project", "adopted"), ("/Users/example/project", "unknown"),
+                                            ("/Users/example/pro\u{0000}ject", "materialized"), ("/Users/example/project", nil), (nil, "adopted")]
+        for (path, kind) in invalid {
+            let status = FinderStatusSnapshot(mountRoot: "/Users/example/Repositories", repositories: [
+                FinderRepositoryStatus(id: "owner/repo", state: "available", pinned: false, localPath: path, localKind: kind)
+            ])
+            XCTAssertThrowsError(try cache.write(status))
+        }
+    }
+
     func testRepeatedAtomicWriteAndPrivatePermissions() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         defer { try? FileManager.default.removeItem(at: directory) }

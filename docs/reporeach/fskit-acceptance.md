@@ -1,10 +1,18 @@
 # Mounted FSKit acceptance harness
 
-`TestFSKitMountedAcceptance` exercises the native macOS 26 filesystem through real mounted paths and the desktop control service. It uses private temporary state, a private mount folder, and local Git fixtures. It does not install an app, activate an extension, update the OS, or change security settings.
+`TestFSKitMountedAcceptance` exercises the native macOS 26 filesystem through real mounted paths and the desktop control service. It uses private temporary state, an ordinary chosen catalogue folder, a separate hidden native volume under `state/native-catalogue/volume`, and local Git fixtures. It does not install an app, activate an extension, update the OS, or change security settings.
 
-This is a narrow acceptance harness, not complete native release qualification. A skipped test, a successful Go compilation, and bridge tests are not mounted FSKit evidence. The complete primary sequence passes at `8807963` with the signed validation module on macOS 27.0.1 ARM64, including native binary/empty extended attributes and persistence across visibility changes, remount and restart. Fresh cached kernel inspection confirms final detachment and both helper exits. This establishes that runtime, not a macOS 26 mounted pass. See [the native backend's remaining release gates](native-fskit.md).
+The current harness tests the hybrid catalogue contract: organization folders are ordinary host directories, virtual repository entries are owned links to the private volume, adopted repositories retain their original checkout, and Keep publishes an ordinary checkout with its own `.git` directory. After normal quit, adopted originals and kept checkouts remain usable without the app. Cached kernel inspection captures the private volume's identity; the chosen catalogue root must never itself be mounted. These assertions now have real mounted passes on the development Mac, recorded below. Historical passes below exercised the previous whole-root mounted design and do not establish the hybrid contract.
 
-Latest combined result: clean helper `f47c1fd` with unchanged installed beta.5 native app `6c77f89` passes primary (6.04 seconds) and cold storage (3.38 seconds) on macOS 27.0.1 ARM64. Independent complete cached inspection confirms all seven disposable mount identities and four helpers absent; the separate GUI catalogue remains live. This result does not qualify the forthcoming beta.6 native directory-performance changes, macOS 26, or Intel runtime.
+This is a narrow acceptance harness, not complete native release qualification. A skipped test, a successful Go compilation, and bridge tests are not mounted FSKit evidence.
+
+Current hybrid result (2026-10-06): the primary sequence passes in 6.94 seconds and cold storage in 6.83 seconds on macOS 27.0.1 ARM64 using the installed local build 8 native module (`CFBundleShortVersionString=0.1.0`, `CFBundleVersion=8`). The disposable Go helpers came from the uncommitted development working tree based on `aedad10`, with additional fixes between the two runs; this is not a clean-commit or combined local-build-9 qualification. Primary evidence is `build/fskit-evidence/local8/mounted-symlink-mode.log`; cold evidence is `build/fskit-evidence/local9/mounted-cold-verified.log` (the latter folder name records the development cycle, while its log explicitly identifies the installed module as build 8).
+
+The cold pass records a 211 ms initial preview phase, a 3 ms cached names-only listing and a 4 ms prepared directory listing. Ordinary organization browsing creates no writable checkout or source requests; both preview and prepared listing leave all five committed blobs missing before Keep. Keep materializes five unique blobs (107 bytes), and ordinary checkout reads with the app stopped and after an offline restart generate zero source requests. Extended-metadata Free refusal, clean Free, restored virtual policy and reacquisition all complete, with normal helper shutdown and cleanup. These loopback fixture timings do not establish cold Finder or real GitHub network performance. A combined rerun against the forthcoming local build 9 and actual Finder validation remain pending; macOS 26 and Intel runtime remain unqualified.
+
+Historical whole-root record: The complete primary sequence passes at `8807963` with the signed validation module on macOS 27.0.1 ARM64, including native binary/empty extended attributes and persistence across visibility changes, remount and restart. Fresh cached kernel inspection confirms final detachment and both helper exits. This establishes that runtime, not a macOS 26 mounted pass. See [the native backend's remaining release gates](native-fskit.md).
+
+Historical combined whole-root result: clean helper `f47c1fd` with unchanged installed beta.5 native app `6c77f89` passes primary (6.04 seconds) and cold storage (3.38 seconds) on macOS 27.0.1 ARM64. Independent complete cached inspection confirms all seven disposable mount identities and four helpers absent; the separate GUI catalogue remains live. This historical result does not qualify subsequent beta.6 directory-performance changes, the current hybrid contract, macOS 26, or Intel runtime.
 
 ## Prerequisites
 
@@ -118,34 +126,31 @@ The harness never installs, enables or signs the selected app or extension; only
 
 The core sequence checks:
 
-- Adoption of a local repository without GitHub sign-in or a `gh` invocation, with the original checkout preserved.
-- Lazy reads of text and binary files, symlink targets, and executable files.
+- Adoption of an existing local checkout without GitHub sign-in or a `gh` invocation; its original staged, unstaged and untracked work remains in place, and its catalogue entry points to that same checkout.
+- A separate bare-source virtual repository exercising lazy reads of text and binary files, symlink targets, and executable files.
 - Native Git status, staging, commits, and branch checkout with warmed file lookups.
 - Native binary/empty extended attributes, create/replace/default policies, missing/remove errors, lists and short buffers; lazy catalogue metadata and symlink/gitfile isolation.
 - Retained open-file reads and writes across rename and unlink.
-- A busy visibility change refusing to publish, preserving the catalogue and mounted view; successful repository and organization hide/show changes using normal reconnects.
-- Normal unmount/remount and desktop helper restart using the same FSKit resource directory, with fresh lookups of retained working-tree content and metadata.
+- A busy virtual visibility change refusing to publish, preserving the catalogue and mounted view; successful repository and organization hide/show changes using normal reconnects. Empty ordinary organization directories are retained, and hiding adopted entries never changes their original checkout.
+- Normal unmount/remount and desktop helper restart using the same FSKit resource directory, with fresh lookups of retained virtual working-tree content and metadata.
+- Keep materializing a dirty virtual checkout with identical HEAD, index, staged/unstaged/untracked binary files and native file metadata; the ordinary checkout remains readable and Git reports the same status after the private daemon stops.
 
 Each release candidate needs its own complete package, signing/notarization and architecture checks. Remaining mounted gates include explicit read-only mutation refusal, Refresh, dirty/staged Free refusal, unsupported-file behavior, failure injection and interrupted-session recovery. macOS 26 and Intel runtime remain unqualified. Passing the primary sequence does not establish those gates.
 
 ## Cold downloads and clean eviction
 
-This sequence passes on macOS 27.0.1 ARM64 with the clean `a708aba` Go test helper and preserved `8807963` signed native validation app. Independent comparison confirms all native source inputs and compiled module bytes before the signature are identical between those revisions. It downloads three initially missing unique blobs (39 bytes), restarts and serves them with zero remote requests, and verifies clean Free/reacquisition with native metadata retained. Cached kernel inspection confirms all three captured mount identities and both helper exits after normal cleanup.
+Historical whole-root cold-storage record: this sequence passed on macOS 27.0.1 ARM64 with the clean `a708aba` Go test helper and preserved `8807963` signed native validation app. Independent comparison confirms all native source inputs and compiled module bytes before the signature are identical between those revisions. It downloads three initially missing unique blobs (39 bytes), restarts and serves them with zero remote requests, and verifies clean Free/reacquisition with native metadata retained. Cached kernel inspection confirms all three captured mount identities and both helper exits after normal cleanup.
 
 Two attempts with the newly registered `a708aba` validation app failed during helper dispatch before mounting, despite public discovery reporting the exact enabled module. Narrow logs show registration/IPC error codes; the cause is unproven. Restoring the preserved app through normal exact-path registration allowed the sequence to pass. This result establishes storage behavior with that installed app, not activation of the newer app or the production distribution.
 
 After recording the primary result and normal cleanup, run
 `TestFSKitMountedColdStorageAcceptance` with the same explicit prerequisites and
 environment, changing only the `-run` test selection. This is a separate disposable
-fixture with a filtered loopback HTTP Git source. Before Keep, it verifies missing
-Git blobs with `GIT_NO_LAZY_FETCH=1` and an empty cache without mounted repo lookups.
-It then checks exact unique-blob accounting and offline restart/reads with zero
-source requests.
+fixture with a filtered loopback HTTP Git source and two commits of history. Ordinary root and organization listings must generate no source requests and no writable engine registration. Missing-child metadata probes acquire at most an immutable shallow preview; repository names include legitimately committed `.DS_Store` and `Icon\r` files, and preview Git contains one commit with five unique blobs still missing under `GIT_NO_LAZY_FETCH=1`. The synthesized `.git` pointer appears in this cold listing; lookup/stat returns its exact metadata without writable engine preparation. Initial preview acquisition and cached names-only listing are timed separately. This tests mounted metadata and enumeration behavior; it does not substitute for measuring cold Finder navigation.
 
-Metadata-only native attributes must allow clean Free. The test inspects eviction
-through the API and private state before any mounted lookup can reacquire the repo,
-then verifies reacquired bytes, attributes, pin policy and original-source
-preservation. The fixture's bounded Git HTTP children are reaped; filesystem
+Reading the `.git` pointer's contents must promote the same retained preview item to the authoritative writable checkout, with pointer bytes agreeing with its earlier exact size. This preparation must still leave the blob cache empty and all five committed blobs missing. Names-only directory enumeration must generate zero additional source requests. Keep must report exact unique-blob accounting, publish an ordinary checkout containing its own `.git` directory, and remove its active engine registration. Offline reads are verified both with the app stopped and after a normal restart, with zero source requests.
+
+Extended file attributes are local data that Git cannot recover. A materialized Free with fixture attributes must fail while retaining the ordinary checkout and attribute bytes. The test removes only the attributes it created and then verifies clean Free, restored virtual link, durable policy, removed private engine storage, reacquired file bytes and original-source preservation. The fixture's bounded Git HTTP children are reaped; filesystem
 shutdown still follows the ordinary owned-detachment checks below. This case does
 not cover dirty/staged Free refusal, Refresh or abrupt failure recovery.
 
@@ -173,3 +178,5 @@ Save the full test output together with the source revision and working-tree sta
 Include the inspector's source/build provenance and its successful bounded JSON
 selection report. GUI enablement and public discovery are separate evidence;
 neither substitutes for the subsequent mounted filesystem checks.
+
+For a disposable diagnostic run, `AFS_FSKIT_TRACE_GIT_COMMANDS=1` enables a private Git wrapper only in the fixture daemon's environment. The already copied helper records command/flag categories, fixture location classes and whether `GIT_NO_LAZY_FETCH=1` is present, then replaces itself with the original absolute Git binary. Argument values, URLs, credentials, HTTP headers and blob/pack output are excluded. On failure, bounded command categories and the loopback source's wanted-object metadata are included in the test output. This option adds process overhead; leave it unset when measuring cold-browsing latency.

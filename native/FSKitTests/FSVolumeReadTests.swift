@@ -652,6 +652,78 @@ final class FSVolumeReadTests: XCTestCase {
         XCTAssertTrue(fixture.failures.isEmpty)
     }
 
+    func testMetadataOnlyAttributesLeaveUnknownSizeUnresolvedUntilRequested() async throws {
+        let fixture = try sizeFixture(knownSize: 4099)
+        defer { fixture.stop() }
+        let (volume, item) = try await prepare(fixture)
+        let metadata = FSItem.GetAttributesRequest()
+        metadata.wantedAttributes = [.type, .mode, .fileID]
+
+        let cheap = try await attributes(volume, item: item, desired: metadata)
+
+        XCTAssertTrue(cheap.isValid(.type))
+        XCTAssertEqual(cheap.type, .file)
+        XCTAssertEqual(cheap.mode, 0o644)
+        XCTAssertTrue(cheap.isValid(.fileID))
+        XCTAssertFalse(cheap.isValid(.size), "A metadata probe must not invent an unknown size")
+        let exact = FSItem.GetAttributesRequest()
+        exact.wantedAttributes = [.size, .fileID]
+        let resolved = try await attributes(volume, item: item, desired: exact)
+        XCTAssertTrue(resolved.isValid(.size))
+        XCTAssertEqual(resolved.size, 4099)
+        XCTAssertFalse(resolved.isValid(.type), "The reply must respect the requested attribute mask")
+        let requests = fixture.requests.filter { $0.operation == "getattr" && $0.inode == 7 }
+        XCTAssertEqual(requests.count, 2)
+        let cheapFields = try XCTUnwrap(JSONSerialization.jsonObject(with: requests[0].body) as? [String: Any])
+        let exactFields = try XCTUnwrap(JSONSerialization.jsonObject(with: requests[1].body) as? [String: Any])
+        XCTAssertNil(cheapFields["require_size"])
+        XCTAssertEqual(exactFields["require_size"] as? Bool, true)
+        XCTAssertTrue(fixture.requests.filter { ["open", "read"].contains($0.operation) }.isEmpty)
+        try await shutdown(volume)
+        XCTAssertTrue(fixture.failures.isEmpty)
+    }
+
+    func testExactAttributesUseExistingReadHandleAndResolveUnknownSize() async throws {
+        let fixture = try sizeFixture(knownSize: 65539)
+        defer { fixture.stop() }
+        let (volume, item) = try await prepare(fixture)
+        let openError = try await open(volume, item: item, modes: .read)
+        XCTAssertNil(openError)
+        let desired = FSItem.GetAttributesRequest()
+        desired.wantedAttributes = [.size]
+
+        let resolved = try await attributes(volume, item: item, desired: desired)
+
+        XCTAssertTrue(resolved.isValid(.size))
+        XCTAssertEqual(resolved.size, 65539)
+        let request = try XCTUnwrap(fixture.requests.first { $0.operation == "getattr" && $0.inode == 7 })
+        XCTAssertEqual(request.handle, 101)
+        let fields = try XCTUnwrap(JSONSerialization.jsonObject(with: request.body) as? [String: Any])
+        XCTAssertEqual(fields["require_size"] as? Bool, true)
+        XCTAssertEqual(fixture.requests.filter { $0.operation == "open" }.count, 1)
+        let closeError = try await close(volume, item: item, modes: [])
+        XCTAssertNil(closeError)
+        XCTAssertEqual(fixture.requests.filter { $0.operation == "release" }.map(\.handle), [101])
+        try await shutdown(volume)
+        XCTAssertTrue(fixture.failures.isEmpty)
+    }
+
+    func testExactSizeRequestRejectsPeerThatLeavesSizeUnknown() async throws {
+        let fixture = try sizeFixture(knownSize: 4099, resolvesSize: false)
+        defer { fixture.stop() }
+        let (volume, item) = try await prepare(fixture)
+        let desired = FSItem.GetAttributesRequest()
+        desired.wantedAttributes = [.size]
+
+        do {
+            _ = try await attributes(volume, item: item, desired: desired)
+            XCTFail("An exact size request must not succeed with an unresolved size")
+        } catch { assertPOSIX(error, EIO) }
+
+        try await shutdown(volume)
+        XCTAssertTrue(fixture.failures.isEmpty)
+    }
+
     func testLegacyDirectorySizeRemainsValidWithoutSizeKnownField() async throws {
         let fixture = try directoryFixture(entries: [directoryEntry(0)])
         defer { fixture.stop() }
@@ -954,6 +1026,34 @@ final class FSVolumeReadTests: XCTestCase {
     private func requestName(_ request: VolumeReadFixture.Request) throws -> String {
         let fields = try XCTUnwrap(JSONSerialization.jsonObject(with: request.body) as? [String: Any])
         return try XCTUnwrap(fields["name"] as? String)
+    }
+
+    private func sizeFixture(knownSize: UInt64, resolvesSize: Bool = true) throws -> VolumeReadFixture {
+        try VolumeReadFixture(read: { _ in VolumeReadFixture.binary(Data()) }, metadata: { request in
+            switch request.operation {
+            case "getattr":
+                if request.inode == 1 { return try VolumeReadFixture.metadata(["node": VolumeReadFixture.node(inode: 1, type: "dir")]) }
+                let fields = try XCTUnwrap(JSONSerialization.jsonObject(with: request.body) as? [String: Any])
+                let resolve = fields["require_size"] as? Bool == true && resolvesSize
+                return try VolumeReadFixture.metadata(["node": VolumeReadFixture.node(inode: 7, type: "file",
+                    size: resolve ? knownSize : 0, sizeKnown: resolve)])
+            case "lookup":
+                return try VolumeReadFixture.metadata(["node": VolumeReadFixture.node(inode: 7, type: "file", size: 0, sizeKnown: false)])
+            case "open": return try VolumeReadFixture.metadata(["handle": 101])
+            case "statfs", "forget", "flush", "fsync", "release": return try VolumeReadFixture.metadata([:])
+            default: return VolumeReadFixture.error(EOPNOTSUPP)
+            }
+        })
+    }
+
+    private func attributes(_ volume: RepoReachVolume, item: FSItem, desired: FSItem.GetAttributesRequest) async throws -> FSItem.Attributes {
+        try await withCheckedThrowingContinuation { continuation in
+            volume.getAttributes(desired, of: item) { result, error in
+                if let error { continuation.resume(throwing: error) }
+                else if let result { continuation.resume(returning: result) }
+                else { continuation.resume(throwing: POSIXError(.EIO)) }
+            }
+        }
     }
 
     private func directoryFixture(entries: [[String: Any]], eof: Bool = true, lookupNode: [String: Any]? = nil,

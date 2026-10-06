@@ -455,6 +455,7 @@ final class RepoReachVolume: FSVolume, FSVolume.Operations,
 
     func getAttributes(_ desiredAttributes: FSItem.GetAttributesRequest, of item: FSItem,
                        replyHandler: @escaping (FSItem.Attributes?, Error?) -> Void) {
+        let requireSize = desiredAttributes.isAttributeWanted(.size)
         perform(exclusive: false, reply: replyHandler) {
             let state = try self.state(for: item)
             let attributes: FSBridgeAttributes
@@ -462,11 +463,12 @@ final class RepoReachVolume: FSVolume, FSVolume.Operations,
                 attributes = state.attributes
             } else {
                 let node = try self.requireNode(try await self.client.request(FSBridgeRequest(op: "getattr", inode: state.item.inode,
-                    handle: state.handle)))
+                    handle: state.handle, requireSize: requireSize ? true : nil)))
                 try self.validateIdentity(node, item: state.item)
                 attributes = node.attributes
-                self.updateAttributes(attributes, inode: state.item.inode)
             }
+            if requireSize && attributes.sizeKnown == false { throw FSBridgeError.malformedResponse }
+            self.updateAttributes(attributes, inode: state.item.inode)
             return try self.makeAttributes(attributes, inode: state.item.inode, parent: state.parent,
                                            desired: desiredAttributes, removed: state.removed)
         }

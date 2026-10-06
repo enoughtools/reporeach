@@ -20,8 +20,8 @@ import (
 	"github.com/cloudflare/artifact-fs/internal/auth"
 )
 
-// AdoptionRequest adds a Git source to the catalogue. It does not migrate a
-// checkout: a local source contributes only its committed, advertised branch.
+// AdoptionRequest adds a Git source or adopts an existing ordinary checkout.
+// Adoption preserves the existing checkout and all of its local Git state.
 type AdoptionRequest struct {
 	RemoteURL string `json:"remoteURL"`
 	Owner     string `json:"owner,omitempty"`
@@ -64,7 +64,11 @@ func (s *Service) Adopt(ctx context.Context, request AdoptionRequest) (status St
 	err = s.adoptionAllowedLocked(remote)
 	if err == nil && remote.localPath != "" {
 		var resolved string
-		resolved, err = validateAdoptionLocalSource(remote.localPath, s.state.MountRoot, s.opts.StateDir)
+		protectedRoot := s.state.MountRoot
+		if s.hybridCatalogue {
+			protectedRoot = s.opts.StateDir
+		}
+		resolved, err = validateAdoptionLocalSource(remote.localPath, protectedRoot, s.opts.StateDir)
 		if err == nil {
 			remote.localPath, remote.url = resolved, resolved
 		} else {
@@ -79,13 +83,33 @@ func (s *Service) Adopt(ctx context.Context, request AdoptionRequest) (status St
 	defer cancel()
 	stop := context.AfterFunc(s.ctx, cancel)
 	defer stop()
-	branch, err := probeAdoptionBranch(probeCtx, s.opts.StateDir, remote.url, request.Branch)
-	if err != nil {
-		return Status{}, err
+	var branch, localPath string
+	if remote.localPath != "" && s.hybridCatalogue {
+		checkout, inspectErr := InspectLocalCheckout(probeCtx, remote.localPath)
+		if inspectErr == nil {
+			if request.Branch != "" && request.Branch != checkout.Branch {
+				return Status{}, errors.New("adoption retains the checkout's current branch; remove the branch override")
+			}
+			branch, localPath = checkout.Branch, checkout.Path
+		} else {
+			bare, bareErr := localCheckoutGit(probeCtx, remote.localPath, "rev-parse", "--is-bare-repository")
+			if bareErr != nil || bare != "true" {
+				return Status{}, inspectErr
+			}
+		}
+	}
+	if localPath == "" {
+		branch, err = probeAdoptionBranch(probeCtx, s.opts.StateDir, remote.url, request.Branch)
+		if err != nil {
+			return Status{}, err
+		}
 	}
 	repo := Repository{ID: owner + "/" + name, Owner: owner, Name: name,
 		CloneURL: remote.url, HTMLURL: remote.htmlURL, DefaultBranch: branch,
 		Source: "manual", State: "virtual"}
+	if localPath != "" {
+		repo.LocalPath, repo.LocalKind, repo.State = localPath, "adopted", "local"
+	}
 	if err := validateRepository(repo); err != nil {
 		return Status{}, err
 	}
@@ -106,8 +130,11 @@ func (s *Service) Adopt(ctx context.Context, request AdoptionRequest) (status St
 	repo.ID = repo.Owner + "/" + repo.Name
 	if existing, found := s.repositoryLocked(repo.ID); found {
 		s.mu.Unlock()
-		if existing.Source == "manual" && existing.CloneURL == repo.CloneURL && existing.DefaultBranch == repo.DefaultBranch {
+		if existing.Source == "manual" && existing.CloneURL == repo.CloneURL && existing.DefaultBranch == repo.DefaultBranch && existing.LocalPath == repo.LocalPath && existing.LocalKind == repo.LocalKind {
 			return s.Status(), nil
+		}
+		if existing.Source == "manual" && existing.CloneURL == repo.CloneURL && existing.LocalPath == "" && repo.LocalPath != "" {
+			return Status{}, errors.New("that name already represents a separate virtual checkout; choose another name to adopt the original folder without replacing its managed work")
 		}
 		return Status{}, errors.New("that owner and repository name are already in the catalogue; choose a different name or group")
 	}
@@ -143,6 +170,9 @@ func (s *Service) Adopt(ctx context.Context, request AdoptionRequest) (status St
 	})
 	catalog, entries := s.catalog, s.entriesLocked()
 	err = ctx.Err()
+	if err == nil {
+		err = s.publishHybridCatalogueLocked()
+	}
 	if err == nil {
 		err = s.persistLocked()
 		if err == nil {
@@ -184,10 +214,14 @@ func (s *Service) adoptionSourceAllowedLocked(remote adoptionRemote) error {
 	if remote.localPath == "" {
 		return nil
 	}
-	if pathsLexicallyOverlap(remote.localPath, s.state.MountRoot) || pathsLexicallyOverlap(remote.localPath, s.opts.StateDir) {
+	protectedRoot := s.state.MountRoot
+	if s.hybridCatalogue {
+		protectedRoot = s.opts.StateDir
+	}
+	if pathsLexicallyOverlap(remote.localPath, protectedRoot) || pathsLexicallyOverlap(remote.localPath, s.opts.StateDir) {
 		return errors.New("choose a Git folder outside RepoReach's mount and private storage folders")
 	}
-	if _, err := validateAdoptionLocalSource(remote.localPath, s.state.MountRoot, s.opts.StateDir); err != nil {
+	if _, err := validateAdoptionLocalSource(remote.localPath, protectedRoot, s.opts.StateDir); err != nil {
 		return errors.New("choose a Git folder outside RepoReach's mount and private storage folders")
 	}
 	return nil
@@ -196,6 +230,12 @@ func (s *Service) adoptionSourceAllowedLocked(remote adoptionRemote) error {
 // validateManualSourceLocation is also called before deferred acquisition: a
 // source's linked-worktree metadata can change after catalogue registration.
 func validateManualSourceLocation(repo Repository, mountRoot, stateDir string) error {
+	if repo.LocalPath != "" {
+		if _, err := validateAdoptionLocalSource(repo.LocalPath, stateDir, stateDir); err != nil {
+			return errors.New("the local checkout must stay outside RepoReach's private storage")
+		}
+		return nil
+	}
 	remote, err := parseAdoptionRemote(repo.CloneURL)
 	if err != nil {
 		return err
@@ -390,7 +430,7 @@ func validateManualRepository(repo Repository) error {
 	if remote.url != repo.CloneURL || repo.HTMLURL != remote.htmlURL {
 		return errors.New("manual repository URLs must match their validated Git source")
 	}
-	if !validAdoptionBranch(repo.DefaultBranch) {
+	if !(repo.LocalKind == "adopted" && repo.DefaultBranch == "") && !validAdoptionBranch(repo.DefaultBranch) {
 		return errors.New("manual repository must have a valid Git branch")
 	}
 	return nil

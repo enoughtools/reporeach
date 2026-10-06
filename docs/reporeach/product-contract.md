@@ -2,91 +2,118 @@
 
 Cold browsing is the main product requirement. RepoReach should make repositories
 visible in the user's chosen folder without downloading their file contents.
-Getting a filesystem extension installed is a means to that experience, not the
-acceptance criterion. Release work is deferred until the local experience meets
-these requirements.
+Release work is deferred until the local experience meets these requirements.
 
 ## Required behavior
 
 1. **Chosen location and mixed local storage.** The catalogue belongs in the
-   folder the user chooses. It must support existing local checkouts alongside
-   virtual repositories without hiding the existing files underneath a mount.
-   Finder's volume name or icon alone does not establish this behavior.
-2. **Cold catalogue browsing first.** Showing the root, an organization, and its
-   repository placeholders must not synchronously prepare every listed repo.
-   Finder metadata probes must not turn an organization listing into a sequence
-   of clones. A never-seen repository needs authoritative tree metadata once;
-   obtaining it must be separate from downloading file contents. Cached trees
-   should remain browsable offline. No invented empty directories or guessed
-   negative lookups may conceal legitimate committed files.
-3. **Content on demand.** Listing a repository hierarchy must not download blobs
-   merely to obtain their exact sizes. Reading content may fetch the required
-   blobs. A remote that cannot filter Git objects needs a clear capability limit;
-   requesting a blobless clone does not prove that no blobs were transferred.
-4. **Adopt an existing checkout.** Adoption must manage the existing native Git
-   checkout, preserving its location, index, staged edits, unstaged edits,
-   untracked files, branches, and Git configuration. Adding a remote as a new
-   virtual repository is a separate operation. Neither needs GitHub sign-in.
-5. **Keep locally.** Keeping a repository should make it an ordinary local
-   checkout, accessible at its selected path after RepoReach quits. Hydrating a
-   private cache is useful for offline virtual access but does not fulfill that
-   requirement. Conversion must preserve local work and must not silently reset
-   or publish it. Complete history, LFS, and submodule availability need their own
-   explicit support rather than being implied by a completed current-tree fetch.
-6. **Free space without losing work.** Returning a local repository to a virtual
-   entry must prove its data is recoverable first. Unpushed commits, staged or
-   unstaged edits, and untracked data must prevent automatic removal. The
-   placeholder and its identity remain discoverable afterward.
-7. **Independent visibility controls.** Organization and repository controls
-   must persist independently. Disabling an organization must retain each repo's
-   choice and its local data. GitHub discovery is optional; manually added Git
-   sources continue to use native Git authentication.
+   folder the user chooses. Ordinary local checkouts and virtual repositories
+   must coexist without hiding existing files beneath a mount.
+2. **Cold catalogue browsing first.** Root and organization listings use saved
+   metadata. Dormant repository lookups acquire authoritative tree metadata
+   separately from writable checkout preparation. Finder metadata probes must
+   not prepare every listed repo. Cached complete trees remain browsable offline;
+   failed discovery must not become invented empty directories or conceal
+   legitimate committed files.
+3. **Content on demand.** Names, types, and available sizes must be usable without
+   fetching file bodies. Reading content may hydrate blobs. Unknown sizes remain
+   unknown until a caller requires an exact size. A remote that ignores Git's
+   partial-clone filter has a capability limit.
+4. **Adopt an existing checkout.** Adoption preserves its original location,
+   index, staged and unstaged changes, untracked files, branches, and configuration.
+   Adding a remote as a new virtual repo is a separate operation. Neither needs
+   GitHub sign-in.
+5. **Keep locally.** Keep Downloaded creates an ordinary checkout at its catalogue
+   path, accessible after RepoReach quits. Conversion preserves the existing
+   private Git directory and current visible files without resetting or publishing
+   work. Complete offline history, LFS, and submodule availability require explicit
+   support.
+6. **Free space without losing work.** Returning an app-created checkout to a
+   virtual entry requires proof that its data is recoverable. Unpushed history,
+   edits, untracked or ignored files, local metadata, and active access can prevent
+   removal. RepoReach never removes an adopted original.
+7. **Independent visibility controls.** Organization and repository choices
+   persist independently. Hiding a group retains each repo's choice and local
+   data. Ordinary directories stay on disk; hiding changes only owned catalogue
+   links and virtual access. Manual sources use native Git authentication
+   independently of optional GitHub discovery.
 
-## Current implementation and gaps
+## Native development implementation
 
-The local native implementation retains ArtifactFS's Git store, snapshots,
-overlays, hydration, and writable filesystem engine. FSKit replaces the FUSE
-transport. The entire owner/repository catalogue is currently one FSKit volume
-mounted directly at the selected folder. It requires an empty mount root and
-cannot mix ordinary physical checkouts into that root.
+The selected root and organization folders are ordinary host directories. Virtual
+repos are app-owned symbolic links into one hidden FSKit volume in private app
+storage. Adopted external checkouts receive direct links to their original paths.
+Kept checkouts are ordinary directories at their catalogue paths. Publication
+refuses existing directories and foreign links. This design retains a single
+filesystem volume; it does not mount a volume over the entire chosen folder or
+create a mount for every repo.
 
-Current **Adopt** registers a separate managed clone of a local source's committed
-branch. It leaves the original checkout unchanged; it does not adopt that
-checkout in place. Current **Keep Downloaded** stores committed blobs in private
-host storage. The data persists across normal shutdown, but the selected path
-requires the filesystem service to expose it. Neither operation yet fulfills
-the corresponding required behavior above.
+ArtifactFS remains the Git, snapshot, overlay, hydration, and writable engine.
+FSKit replaces its FUSE transport and is bundled for macOS 26 or later. Virtual
+links require the filesystem service; ordinary adopted and kept checkouts remain
+available independently of it.
 
-The native persistent-working-tree policy also disables the background HEAD
-watcher and remote refresh. Explicit Refresh fetches source data while preserving
-the visible baseline. This compatibility policy must not be advertised as live
-working-tree synchronization. See [native cache coherence](native-fskit.md#cache-coherence-is-a-release-gate).
+GitHub roots are acquired in bounded GraphQL batches; deeper trees load lazily by
+immutable object identity. Manual sources use separate shallow filtered Git
+previews. Browsing a preview neither prepares the writable engine nor alters a
+source checkout. If Git cannot supply a blob size locally, cheap metadata access
+omits it; a request requiring an exact size can activate content acquisition.
+Content reads promote a preview to writable storage at its selected commit.
 
-Cold names-only directory enumeration now avoids hydration. However, any child
-lookup beneath a dormant repository currently activates its managed checkout
-before checking whether the child exists. Actual Finder observations still show
-serial preparation of repositories while displaying an organization, even with
-concurrent native lookup admission. The specific triggering Finder requests
-have not yet been captured. Warm timings and unit tests are not evidence that
-this cold Finder problem is fixed.
+Explicit Refresh on an unprepared virtual repo quiesces the catalogue and replaces
+its preview baseline. Refresh on a prepared repo fetches Git data while preserving
+its persistent visible baseline. Background HEAD watching and remote refresh
+remain disabled under the native policy; this is not live working-tree sync. See
+[native cache coherence](native-fskit.md#cache-coherence-is-a-release-gate).
+Refresh on a local checkout fetches its own remotes without resetting files or
+index.
 
-## Implementation direction to validate
+Keep stages and verifies a standalone checkout, drains the filesystem, and
+publishes through a durable handoff journal. Former private engine storage stays
+as a verified rollback copy until successful Free cleanup. Free verifies local
+state and remote recovery, moves the owned checkout aside, publishes its virtual
+link, then removes verified owned copies. Startup recovery completes or rolls
+back interrupted handoffs. Changed files or uncertain ownership retain data and
+produce an error; incomplete cleanup must not be reported as reclaimed space.
+An interrupted Keep's retained standalone checkout and its path remain in status
+after restart. Free cleanup records progress per owned entry so an interrupted
+deletion can resume without requiring already removed files to reappear.
 
-Ordinary catalogue/organization directories, virtual per-repository filesystems,
-and ordinary adopted or materialized checkouts are a candidate way to satisfy
-the location and local-storage requirements. This is an architecture change,
-not a volume-label change. Multiple FSKit resources, mount ownership, Finder
-behavior, restart, and safe conversion all require proof. Per-repo mounts alone
-do not solve cold preparation caused by Finder probes.
+## Acceptance status
 
-The next performance work must distinguish lightweight tree discovery and
-metadata probing from activating a writable checkout. It must measure actual
-first-time Finder browsing with empty managed state, counting source requests,
-prepared repositories, and hydrated blobs. Root/org browsing, entering one repo,
-traversing its subdirectories, and reading one file are separate measurements.
-Include legitimate committed Finder metadata filenames so a shortcut cannot
-pass by hiding them. Use disposable fixtures for storage conversions; do not
-migrate the user's live checkout as an experiment.
+The primary disposable mounted sequence passed in 6.94 seconds on macOS 27.0.1
+ARM64 using the signed local8 native module and a development engine based on
+`aedad10`.
+It covers ordinary-folder placement, adoption, dirty working files and Git-index
+preservation through Keep, local metadata preservation, and ordinary checkout
+access with the app stopped.
 
-Iterate with incremental local app builds and targeted checks. Native release
-packaging, notarization, and deployment follow a working local experience.
+The complete cold storage fixture passed in 6.83 seconds with that same installed
+module and the updated development engine. Initial preview acquisition took
+211 ms, cached preview listing 3 ms, and prepared names-only listing 4 ms. The
+names-only listing made zero source requests, left all five blobs missing, and
+kept the blob cache empty. Keep verified five unique blobs totaling 107 bytes;
+the ordinary checkout worked with the app stopped and zero offline requests.
+Free correctly refused local extended metadata, then reclaimed the clean checkout
+and rollback storage before successful preparation and reacquisition. These are
+disposable fixture results, not Finder navigation timings.
+
+Actual cold Finder navigation and the signed combined local9 build remain pending
+installation and testing. See the [mounted acceptance record](fskit-acceptance.md)
+for the precise tested scope.
+
+Source tests do not establish that Finder's cold experience is fixed. Validate the
+signed local build using disposable fixtures and record source requests, prepared
+repos, hydrated blobs, and elapsed time separately for root/org browsing, entering
+one repo, traversing subdirectories, and reading one file. Include real committed
+Finder metadata filenames and the synthetic `.git` entry so shortcuts cannot pass
+by hiding them.
+
+Further acceptance must verify Finder navigation and repeat the relevant storage,
+restart recovery, and busy-operation checks for the final combined build.
+Do not use the user's live checkout as a conversion experiment.
+
+Historical beta.3 downloads retain their macFUSE transport, separate-clone
+adoption, and cache-based Keep behavior. Native development changes do not alter
+those releases. Incremental local app builds precede release packaging,
+notarization, and deployment.

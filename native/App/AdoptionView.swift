@@ -100,9 +100,9 @@ struct AdoptionView: View {
                 .foregroundStyle(ReachTheme.accent)
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 7) {
-                Text("Your original checkout stays yours.")
+                Text("Your local checkout stays where it is.")
                     .font(.system(size: 13, weight: .semibold))
-                Text("Adopting a local folder creates a separate virtual checkout from its committed data. The original folder, including uncommitted changes and staged work, stays untouched.")
+                Text("RepoReach adds your existing checkout to the catalogue without moving or copying it. Your staged changes, uncommitted work, untracked files, and Git settings stay intact. Adding a remote creates an on-demand repository instead.")
                     .font(.system(size: 12))
                     .foregroundStyle(ReachTheme.muted)
                     .fixedSize(horizontal: false, vertical: true)
@@ -117,7 +117,7 @@ struct AdoptionView: View {
     private var optionalDetails: some View {
         DisclosureGroup(isExpanded: $showsDetails) {
             VStack(alignment: .leading, spacing: 16) {
-                Text("Leave these blank to use the repository’s owner, name, and default branch.")
+                Text("Leave these blank to use the repository’s owner, name, and default branch. An existing local checkout keeps its current branch.")
                     .font(.system(size: 12))
                     .foregroundStyle(ReachTheme.muted)
                     .fixedSize(horizontal: false, vertical: true)
@@ -125,7 +125,7 @@ struct AdoptionView: View {
                     labeledInput("Owner", placeholder: "Automatic", text: $owner, field: .owner)
                     labeledInput("Repository name", placeholder: "Automatic", text: $name, field: .name)
                 }
-                labeledInput("Branch", placeholder: "Default branch", text: $branch, field: .branch)
+                labeledInput("Branch for new remote", placeholder: "Default branch", text: $branch, field: .branch)
             }
             .padding(.top, 16)
         } label: {

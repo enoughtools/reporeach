@@ -5,12 +5,22 @@ struct FinderRepositoryStatus: Codable, Equatable {
     let state: String
     let pinned: Bool
     let error: String?
+    let localPath: String?
+    let localKind: String?
 
-    init(id: String, state: String, pinned: Bool, error: String? = nil) {
+    init(id: String, state: String, pinned: Bool, error: String? = nil, localPath: String? = nil, localKind: String? = nil) {
         self.id = id
         self.state = state
         self.pinned = pinned
         self.error = error
+        self.localPath = localPath
+        self.localKind = localKind
+    }
+
+    var isAdopted: Bool { localKind == "adopted" && localURL != nil }
+    var localURL: URL? {
+        guard ["adopted", "materialized"].contains(localKind ?? ""), let localPath else { return nil }
+        return FinderStatusCache.directoryURL(for: localPath)
     }
 }
 
@@ -87,34 +97,60 @@ struct FinderStatusCache {
     }
 
     static func mountRootURL(in snapshot: FinderStatusSnapshot) -> URL? {
-        guard snapshot.mountRoot.hasPrefix("/"), !snapshot.mountRoot.contains("\0") else { return nil }
-        let root = URL(fileURLWithPath: snapshot.mountRoot, isDirectory: true).standardizedFileURL
-        guard root.path != "/" else { return nil }
-        return root
+        directoryURL(for: snapshot.mountRoot)
+    }
+
+    static func directoryURL(for path: String) -> URL? {
+        guard path.hasPrefix("/"),
+              !path.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) else { return nil }
+        let url = URL(fileURLWithPath: path, isDirectory: true).standardizedFileURL
+        return url.path == "/" ? nil : url
+    }
+
+    static func repositoryURLs(for repository: FinderRepositoryStatus, in snapshot: FinderStatusSnapshot) -> [URL] {
+        guard ActionRoute.isValidRepositoryID(repository.id), let root = mountRootURL(in: snapshot) else { return [] }
+        let catalogueURL = root.appendingPathComponent(repository.id, isDirectory: true)
+        if let localURL = repository.localURL, localURL != catalogueURL { return [catalogueURL, localURL] }
+        return [catalogueURL]
+    }
+
+    static func observedDirectoryURLs(in snapshot: FinderStatusSnapshot) -> Set<URL> {
+        guard let root = mountRootURL(in: snapshot) else { return [] }
+        return Set([root] + snapshot.repositories.compactMap(\.localURL))
     }
 
     /// Resolve the containing repository from a selection without reading files.
     /// Component comparison keeps /Repos-other outside a /Repos catalogue.
     static func repositoryID(for selectionURL: URL, in snapshot: FinderStatusSnapshot) -> String? {
         guard selectionURL.isFileURL, let root = mountRootURL(in: snapshot) else { return nil }
-        let rootComponents = root.pathComponents
         let selectedComponents = selectionURL.standardizedFileURL.pathComponents
-        guard selectedComponents.count >= rootComponents.count + 2,
-              selectedComponents.starts(with: rootComponents)
-        else { return nil }
-        let owner = selectedComponents[rootComponents.count]
-        let name = selectedComponents[rootComponents.count + 1]
-        let id = "\(owner)/\(name)"
-        guard ActionRoute.isValidRepositoryID(id), snapshot.repositories.contains(where: { $0.id == id })
-        else { return nil }
-        return id
+        var matches: [(id: String, depth: Int)] = []
+        let rootComponents = root.pathComponents
+        if selectedComponents.count >= rootComponents.count + 2, selectedComponents.starts(with: rootComponents) {
+            let id = "\(selectedComponents[rootComponents.count])/\(selectedComponents[rootComponents.count + 1])"
+            if ActionRoute.isValidRepositoryID(id), snapshot.repositories.contains(where: { $0.id == id }) {
+                matches.append((id, rootComponents.count + 2))
+            }
+        }
+        for repository in snapshot.repositories {
+            if let url = repository.localURL, ActionRoute.isValidRepositoryID(repository.id) {
+                let components = url.pathComponents
+                if selectedComponents.starts(with: components) { matches.append((repository.id, components.count)) }
+            }
+        }
+        // The deepest registered checkout owns a selection. An overlapping
+        // equal-depth registration is ambiguous and must offer no action.
+        guard let depth = matches.map(\.depth).max() else { return nil }
+        let ids = Set(matches.filter { $0.depth == depth }.map(\.id))
+        return ids.count == 1 ? ids.first : nil
     }
 
     private static func isValid(_ snapshot: FinderStatusSnapshot) -> Bool {
         guard mountRootURL(in: snapshot) != nil, snapshot.repositories.count <= 100_000 else { return false }
         var identifiers = Set<String>()
         return snapshot.repositories.allSatisfy { repository in
-            ActionRoute.isValidRepositoryID(repository.id) && identifiers.insert(repository.id).inserted
+            let localMetadataValid = repository.localPath == nil && repository.localKind == nil || repository.localURL != nil
+            return localMetadataValid && ActionRoute.isValidRepositoryID(repository.id) && identifiers.insert(repository.id).inserted
         }
     }
 

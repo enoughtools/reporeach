@@ -1,6 +1,6 @@
 import Foundation
 
-/// Compile with App/Models.swift and App/EngineClient.swift, then pass the built
+/// Compile with App/Models.swift, App/EngineClient.swift, and Shared/ActionRoute.swift, then pass the built
 /// Go executable as the first argument. Uses a fake gh, no GitHub/network data.
 @main
 struct ControlSmoke {
@@ -90,7 +90,11 @@ struct ControlSmoke {
         let adoption = RepositoryAdoptionRequest(remoteURL: checkout.path, owner: "fixture.group", name: "adopted.repo", branch: nil)
         let adopted: EngineStatus = try await client.request("POST", path: "/v1/repositories/adopt", body: adoption, timeout: 125)
         let adoptedID = "fixture.group/adopted.repo"
-        try expect(adopted.account == nil && adopted.repositories.contains(where: { $0.id == adoptedID && $0.isManual && $0.state == "virtual" }), "local adoption without GitHub sign-in")
+        let adoptedRepository = adopted.repositories.first(where: { $0.id == adoptedID })
+        try expect(adopted.account == nil && adoptedRepository?.isManual == true && adoptedRepository?.isAdopted == true, "local adoption without GitHub sign-in")
+        try expect(adoptedRepository?.localURL?.path == checkout.resolvingSymlinksInPath().standardizedFileURL.path,
+                   "adoption retains original checkout location")
+        try expect(adoptedRepository?.defaultBranch == "main", "adoption retains original branch")
         let hiddenGroup: EngineStatus = try await client.request("POST", path: "/v1/organizations/settings", body: OrganizationSettingsRequest(owner: "fixture.group", enabled: false))
         try expect(hiddenGroup.organizations.contains(where: { $0.name == "fixture.group" && !$0.enabled }), "group disable contract")
         try expect(hiddenGroup.repositories.first(where: { $0.id == adoptedID })?.isEnabled(in: hiddenGroup.organizations) == false, "group effectively hides manual repository")

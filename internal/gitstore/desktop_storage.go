@@ -1,16 +1,19 @@
 package gitstore
 
 import (
+	"bufio"
 	"context"
 	"crypto/rand"
 	"errors"
 	"fmt"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/cloudflare/artifact-fs/internal/auth"
 	"github.com/cloudflare/artifact-fs/internal/model"
 )
 
@@ -81,8 +84,24 @@ func (s *Store) VerifySafeToDiscard(ctx context.Context, repo model.RepoConfig) 
 			}
 		}
 	}()
-	fetchEnv := append(nonInteractiveGitEnv(), credentials...)
-	if _, err := runGitWithEnv(ctx, repo.GitDir, fetchEnv, "fetch", "--no-tags", "--no-write-fetch-head", "--filter=blob:none", safeURL,
+	// Fetching a literal URL with a partial-clone filter creates persistent
+	// remote.<URL>.promisor settings, making a refused discard impossible to
+	// retry under the strict configuration check. Use the existing owned remote,
+	// overriding its URL only in this command's environment. Explicit credentials
+	// stay in the credential helper and the local origin URL remains unchanged.
+	fetchEnv, err := gitCommandEnv(append(nonInteractiveGitEnv(), credentials...), []string{
+		// An empty value clears the multivalued URL list before selecting the
+		// verified source, including when native origin has a different URL.
+		"GIT_CONFIG_COUNT=2", "GIT_CONFIG_KEY_0=remote.origin.url", "GIT_CONFIG_VALUE_0=",
+		"GIT_CONFIG_KEY_1=remote.origin.url", "GIT_CONFIG_VALUE_1=" + safeURL,
+	})
+	if err != nil {
+		return err
+	}
+	if err := verifyDiscardRemoteSelection(ctx, repo.GitDir, fetchEnv, safeURL); err != nil {
+		return err
+	}
+	if _, err := runGitWithEnv(ctx, repo.GitDir, fetchEnv, "fetch", "--no-tags", "--no-write-fetch-head", "--filter=blob:none", "origin",
 		"+refs/heads/*:"+namespace+"heads/*", "+refs/tags/*:"+namespace+"tags/*"); err != nil {
 		return fmt.Errorf("cannot verify remote backup: %w", err)
 	}
@@ -129,14 +148,139 @@ func (s *Store) VerifySafeToDiscard(ctx context.Context, repo model.RepoConfig) 
 	// Refs and reflogs do not name every recoverable object: staging and then
 	// resetting a file leaves a dangling blob, and commit-tree can create an
 	// unattached commit. Refuse those objects too rather than silently pruning.
-	unreachable, err := runGitWithEnv(ctx, repo.GitDir, env, "fsck", "--connectivity-only", "--unreachable", "--no-progress")
-	if err != nil {
-		return fmt.Errorf("cannot verify object storage: %w", err)
-	}
-	if unreachable != "" {
-		return errors.New("repository has unreachable Git objects; preserve or explicitly prune them before freeing space")
+	if err := verifyUnreachableObjects(ctx, repo.GitDir, env, remoteTips); err != nil {
+		return err
 	}
 	return ctx.Err()
+}
+
+func verifyDiscardRemoteSelection(ctx context.Context, gitDir string, fetchEnv []string, safeURL string) error {
+	// Older Git releases do not clear a multivalued remote URL on an empty
+	// value. Compare the selected fetch URL with the requested source after
+	// native insteadOf expansion, refusing any mismatch before network access.
+	// --get-url exits without contacting the source. Only the sanitized URL
+	// enters arguments; expanded native metadata is compared without logging it.
+	selected, err := runGitWithEnv(ctx, gitDir, fetchEnv, "ls-remote", "--get-url", "origin")
+	if err != nil {
+		return fmt.Errorf("cannot verify remote selection: %w", err)
+	}
+	expected, err := runGitWithEnv(ctx, gitDir, fetchEnv, "ls-remote", "--get-url", safeURL)
+	if err != nil {
+		return fmt.Errorf("cannot verify requested source: %w", err)
+	}
+	if selected != expected {
+		return errors.New("installed Git cannot select the requested remote without changing native configuration")
+	}
+	return nil
+}
+
+const maxDiscardUnreachableObjects = 65536
+
+var errUnrecoverableGitObjects = errors.New("repository has unreachable Git objects; preserve or explicitly prune them before freeing space")
+
+func verifyUnreachableObjects(ctx context.Context, gitDir string, env, remoteTips []string) error {
+	unreachable := make(map[string]struct{})
+	if err := discardMetadataLines(ctx, gitDir, env, func(line string) error {
+		fields := strings.Fields(line)
+		if len(fields) != 3 || fields[0] != "unreachable" || !verificationObjectOID(fields[2]) {
+			return errors.New("unrecognized object reachability metadata")
+		}
+		switch fields[1] {
+		case "blob", "tree", "commit", "tag":
+		default:
+			return errors.New("unrecognized unreachable object type")
+		}
+		unreachable[fields[2]] = struct{}{}
+		if len(unreachable) > maxDiscardUnreachableObjects {
+			return errUnrecoverableGitObjects
+		}
+		return nil
+	}, "fsck", "--connectivity-only", "--unreachable", "--no-progress"); err != nil {
+		return fmt.Errorf("cannot verify object storage: %w", err)
+	}
+	if len(unreachable) == 0 {
+		return nil
+	}
+	// Connectivity-only fsck can call published ancestors and their trees
+	// unreachable in a partial clone after individual promisor blobs are fetched.
+	// Accept only object IDs independently proven reachable from the freshly
+	// fetched, named remote tips. A staged/reset blob or unattached commit still
+	// fails this check. Missing promised blobs are skipped without fetching bytes.
+	args := []string{"rev-list", "--objects", "--missing=allow-promisor", "--no-object-names"}
+	for _, oid := range remoteTips {
+		if !verificationObjectOID(oid) {
+			return errors.New("invalid remote object metadata")
+		}
+	}
+	args = append(args, remoteTips...)
+	args = append(args, "--")
+	if err := discardMetadataLines(ctx, gitDir, env, func(line string) error {
+		if !verificationObjectOID(line) {
+			return errors.New("unrecognized remote reachability metadata")
+		}
+		delete(unreachable, line)
+		return nil
+	}, args...); err != nil {
+		return fmt.Errorf("cannot verify remote object recovery: %w", err)
+	}
+	if len(unreachable) != 0 {
+		return errUnrecoverableGitObjects
+	}
+	return nil
+}
+
+// discardMetadataLines bounds each metadata record, stderr and retained object
+// IDs while streaming large histories. It never captures object contents.
+func discardMetadataLines(ctx context.Context, gitDir string, extraEnv []string, consume func(string) error, args ...string) error {
+	commandCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	cmd := exec.CommandContext(commandCtx, "git", args...)
+	configureCancelableCommand(cmd)
+	env, err := gitCommandEnv(inheritedGitEnvironment(os.Environ()), extraEnv)
+	if err != nil {
+		return err
+	}
+	cmd.Env = append(env, "GIT_DIR="+gitDir)
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return err
+	}
+	stderr := &boundedGitError{limit: maxGitErrorBytes}
+	cmd.Stderr = stderr
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	stopClose := context.AfterFunc(commandCtx, func() { _ = stdout.Close() })
+	defer stopClose()
+	scanner := bufio.NewScanner(stdout)
+	scanner.Buffer(make([]byte, 256), 1024)
+	var readErr error
+	for scanner.Scan() {
+		if readErr = consume(scanner.Text()); readErr != nil {
+			break
+		}
+	}
+	if readErr == nil {
+		readErr = scanner.Err()
+	}
+	if readErr != nil {
+		cancel()
+	}
+	waitErr := cmd.Wait()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if readErr != nil {
+		return readErr
+	}
+	if waitErr != nil {
+		message := auth.RedactString(strings.TrimSpace(stderr.String()))
+		if message == "" {
+			message = auth.RedactString(waitErr.Error())
+		}
+		return errors.New(message)
+	}
+	return nil
 }
 
 func verifyDisposableGitConfig(ctx context.Context, repo model.RepoConfig) error {
@@ -175,7 +319,7 @@ func verifyDisposableGitConfig(ctx context.Context, repo model.RepoConfig) error
 				return errors.New("repository has a custom Git worktree")
 			}
 		case "core.fsmonitor":
-			if value != filepath.Join(repo.GitDir, "hooks", "artifact-fs-fsmonitor") {
+			if value != "false" && value != filepath.Join(repo.GitDir, "hooks", "artifact-fs-fsmonitor") {
 				return errors.New("repository has a custom Git filesystem monitor")
 			}
 		default:

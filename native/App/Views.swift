@@ -12,7 +12,7 @@ struct ContentView: View {
         case all = "All repositories"
         case kept = "Kept downloaded"
         case active = "In progress"
-        case hidden = "Hidden from Finder"
+        case hidden = "Hidden from catalogue"
     }
 
     private var visibleRepositories: [RepositoryRecord] {
@@ -117,7 +117,7 @@ struct ContentView: View {
                                 store.selectedRepositoryID = nil
                             }
                             .contextMenu {
-                                Button(store.isOwnerEnabled(owner) ? "Hide Group from Finder" : "Show Group in Finder") {
+                                Button(store.isOwnerEnabled(owner) ? "Hide Group from Catalogue" : "Show Group in Catalogue") {
                                     Task { await store.setOrganizationEnabled(owner, !store.isOwnerEnabled(owner)) }
                                 }
                                 .disabled(store.isBusy || store.demoMode || store.isOwnerWorking(owner))
@@ -193,7 +193,7 @@ struct ContentView: View {
                     .foregroundStyle(ReachTheme.muted)
                     .font(.system(size: 12))
                 if let owner = store.ownerFilter {
-                    Toggle("Show group in Finder", isOn: Binding(get: { store.isOwnerEnabled(owner) }, set: { enabled in
+                    Toggle("Show group in catalogue", isOn: Binding(get: { store.isOwnerEnabled(owner) }, set: { enabled in
                         Task { await store.setOrganizationEnabled(owner, enabled) }
                     }))
                     .toggleStyle(.checkbox)
@@ -260,7 +260,7 @@ struct ContentView: View {
         let selected = repo.id == store.selectedRepositoryID
         return Button { store.selectedRepositoryID = repo.id } label: {
             HStack(alignment: .top, spacing: 13) {
-                Image(systemName: repo.pinned ? "folder.fill" : "folder")
+                Image(systemName: repo.isLocal || repo.pinned ? "folder.fill" : "folder")
                     .font(.system(size: 20, weight: .light))
                     .foregroundStyle(repo.pinned ? ReachTheme.accent : ReachTheme.muted)
                     .frame(width: 24)
@@ -319,7 +319,7 @@ struct ContentView: View {
                     ReachEyebrow(text: "How it works")
                     Text("Repositories stay in your catalogue. File contents download as you use them.")
                         .font(.system(size: 12)).foregroundStyle(ReachTheme.muted).lineSpacing(4)
-                    Text("Keep Downloaded makes the current checkout available offline. Git history may still need a connection.")
+                    Text("Keep Downloaded creates an ordinary local checkout that stays available when RepoReach quits. Git history may still need a connection.")
                         .font(.system(size: 12)).foregroundStyle(ReachTheme.muted).lineSpacing(4)
                 }
             }
@@ -331,7 +331,7 @@ struct ContentView: View {
 
     @ViewBuilder
     private func repositoryDetails(_ repo: RepositoryRecord) -> some View {
-        Image(systemName: repo.pinned ? "folder.fill" : "folder")
+        Image(systemName: repo.isLocal || repo.pinned ? "folder.fill" : "folder")
             .font(.system(size: 32, weight: .light))
             .foregroundStyle(ReachTheme.accent)
         VStack(alignment: .leading, spacing: 7) {
@@ -343,7 +343,7 @@ struct ContentView: View {
         }
         stateBadge(repo)
         ReachDivider()
-        Toggle("Show repository in Finder", isOn: Binding(get: { !repo.disabled }, set: { enabled in
+        Toggle("Show in catalogue", isOn: Binding(get: { !repo.disabled }, set: { enabled in
             Task { await store.setRepositoryEnabled(repo, enabled) }
         }))
         .toggleStyle(.checkbox)
@@ -351,19 +351,24 @@ struct ContentView: View {
         .disabled(store.isRepositoryWorking(repo) || store.isBusy || store.demoMode || operation(for: repo)?.isRunning == true)
         .accessibilityIdentifier("repository-visibility")
         if !store.isOwnerEnabled(repo.owner) {
-            Text("This group is hidden. Enable it to show this repository in Finder.")
+            Text(repo.isLocal ? "This group is hidden from the catalogue. Your local checkout is retained." : "This group is hidden. Enable it to show this repository in Finder.")
                 .font(.system(size: 11)).foregroundStyle(ReachTheme.muted).lineSpacing(3)
             Button("Enable Group") { Task { await store.setOrganizationEnabled(repo.owner, true) } }
                 .buttonStyle(ReachButtonStyle(compact: true)).disabled(store.isBusy || store.demoMode || store.isOwnerWorking(repo.owner))
         } else if repo.disabled {
-            Text("Its folder is hidden and background downloads are paused. Cached data and local work stay on your Mac.")
+            Text(repo.isLocal ? "This catalogue entry is hidden. Your local checkout stays on your Mac." : "Its virtual folder is hidden and background downloads are paused. Cached data and local work stay on your Mac.")
                 .font(.system(size: 11)).foregroundStyle(ReachTheme.muted).lineSpacing(3)
         }
         VStack(spacing: 13) {
             detailValue("Source", value: repo.isManual ? "Added directly" : "GitHub discovery")
-            detailValue("Default branch", value: repo.defaultBranch)
-            detailValue("Local downloads", value: ReachTheme.bytes(repo.downloadedBytes))
+            detailValue(repo.isAdopted ? "Branch at adoption" : "Default branch", value: repo.defaultBranch.isEmpty && repo.isAdopted ? "Detached HEAD" : repo.defaultBranch)
+            detailValue("Storage", value: repo.isAdopted ? "Original checkout" : repo.isLocal ? "Local checkout" : "On demand")
+            if !repo.isLocal { detailValue("Local downloads", value: ReachTheme.bytes(repo.downloadedBytes)) }
             detailValue("Visibility", value: repo.isManual ? "Not provided" : repo.privateRepository ? "Private" : "Public")
+        }
+        if let localURL = repo.localURL {
+            Text(localURL.path).font(.system(size: 11)).foregroundStyle(ReachTheme.muted)
+                .textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
         }
         if let error = repo.error, !error.isEmpty {
             Text(error).font(.system(size: 12)).foregroundStyle(ReachTheme.danger).textSelection(.enabled)
@@ -383,7 +388,7 @@ struct ContentView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
             .buttonStyle(ReachButtonStyle(kind: .primary))
-            .disabled(store.status?.mounted != true || store.isRepositoryWorking(repo) || store.demoMode || !store.isRepositoryEnabled(repo))
+            .disabled((!repo.isLocal && (store.status?.mounted != true || !store.isRepositoryEnabled(repo))) || store.isRepositoryWorking(repo) || store.demoMode)
             .accessibilityIdentifier("open-repository")
 
             if !repo.pinned {
@@ -405,8 +410,9 @@ struct ContentView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
             .buttonStyle(ReachButtonStyle())
-            .disabled(store.isRepositoryWorking(repo) || store.isBusy || store.demoMode || (!repo.pinned && repo.downloadedBytes == 0))
+            .disabled(repo.isAdopted || store.isRepositoryWorking(repo) || store.isBusy || store.demoMode || (!repo.isLocal && !repo.pinned && repo.downloadedBytes == 0))
             .accessibilityIdentifier("free-repository")
+            .help(repo.isAdopted ? "Your original checkout is retained. RepoReach never removes an adopted folder." : "Return a safely recoverable checkout to an on-demand repository")
 
             Button {
                 Task { await store.action(repo, .refresh) }
@@ -418,7 +424,7 @@ struct ContentView: View {
             .disabled(store.isRepositoryWorking(repo) || store.isBusy || store.demoMode || !store.isRepositoryEnabled(repo))
             .padding(.leading, -11)
         }
-        Text(repo.pinned ? "The current checkout is kept for offline use." : "Opening files downloads their contents as needed.")
+        Text(repo.isAdopted ? "Your original checkout is retained, including local work. It stays available when RepoReach quits." : repo.isLocal ? "This ordinary local checkout stays available when RepoReach quits." : "Opening files downloads their contents as needed. Keep Downloaded creates a local checkout.")
             .font(.system(size: 11)).foregroundStyle(ReachTheme.muted).lineSpacing(3)
         if let url = URL(string: repo.htmlURL), url.scheme == "https" {
             Link(destination: url) {
@@ -441,7 +447,7 @@ struct ContentView: View {
     private func stateBadge(_ repo: RepositoryRecord) -> some View {
         HStack(spacing: 5) {
             Circle().fill(!store.isRepositoryEnabled(repo) ? ReachTheme.muted : repo.error != nil ? ReachTheme.danger : repo.pinned ? ReachTheme.success : ReachTheme.muted).frame(width: 5, height: 5)
-            Text(store.isRepositoryEnabled(repo) ? repo.displayState : "Hidden from Finder").font(.system(size: 10, weight: .medium))
+            Text(store.isRepositoryEnabled(repo) ? repo.displayState : "Hidden from catalogue").font(.system(size: 10, weight: .medium))
         }
         .foregroundStyle(repo.error != nil ? ReachTheme.danger : ReachTheme.muted)
         .padding(.horizontal, 7).padding(.vertical, 5)
@@ -494,11 +500,11 @@ struct ContentView: View {
                         .buttonStyle(ReachButtonStyle(kind: .primary, compact: true))
                         .disabled(store.isBusy || store.authSession?.pending == true || store.demoMode)
                     }
-                    setupStep(number: "02", title: "Choose your home for repositories", detail: store.status?.mountRoot ?? "Choose an empty folder, such as GitHub inside your home folder.") {
+                    setupStep(number: "02", title: "Choose your home for repositories", detail: store.status?.mountRoot ?? "Choose a folder, such as Repositories inside your home folder.") {
                         Button("Choose Folder") { store.chooseMountFolder() }
                             .buttonStyle(ReachButtonStyle(compact: true)).disabled(store.isBusy || store.demoMode)
                     }
-                    setupStep(number: "03", title: "Make room for your work", detail: "Opening files downloads them. Keep Downloaded makes a checkout available offline.") {
+                    setupStep(number: "03", title: "Make room for your work", detail: "Opening files downloads them. Keep Downloaded creates a local checkout that works without RepoReach.") {
                         Button("Open Settings") { store.showSettings() }
                             .buttonStyle(ReachButtonStyle(compact: true))
                     }
@@ -551,7 +557,7 @@ struct ContentView: View {
     private var statusBar: some View {
         HStack(spacing: 8) {
             Circle().fill(store.status?.mounted == true ? ReachTheme.success : ReachTheme.muted).frame(width: 6, height: 6)
-            Text(store.demoMode ? "Demo catalogue" : store.status?.mounted == true ? "Folders available" : store.serviceRunning ? "Background service running" : "Background service stopped")
+            Text(store.demoMode ? "Demo catalogue" : store.status?.mounted == true ? "Virtual folders available" : store.serviceRunning ? "Background service running" : "Background service stopped")
                 .font(.system(size: 10)).foregroundStyle(ReachTheme.muted)
             if let status = store.status, !status.mountRoot.isEmpty {
                 Text("·").foregroundStyle(ReachTheme.hairline)
@@ -559,12 +565,12 @@ struct ContentView: View {
                     Text(status.mountRoot).font(.system(size: 10)).lineLimit(1).truncationMode(.middle)
                 }
                 .buttonStyle(.plain).foregroundStyle(ReachTheme.muted)
-                .disabled(!status.mounted || store.demoMode)
+                .disabled(store.demoMode)
                 .help(status.mountRoot)
             }
             Spacer(minLength: 10)
             if !store.demoMode {
-                Button(store.status?.mounted == true ? "Unmount" : "Mount Folders") {
+                Button(store.status?.mounted == true ? "Pause Virtual Folders" : "Enable Virtual Folders") {
                     Task {
                         if store.status?.mounted == true { await store.unmount() }
                         else { await store.mount() }
@@ -616,7 +622,7 @@ struct ContentView: View {
                 Text(message).font(.system(size: 11)).foregroundStyle(ReachTheme.muted).textSelection(.enabled)
             }
             Spacer(minLength: 8)
-            Button("Try Mounting Again") { Task { await store.mount() } }
+            Button("Try Again") { Task { await store.mount() } }
                 .buttonStyle(ReachButtonStyle(compact: true)).disabled(store.isBusy)
         }
     }
@@ -696,18 +702,18 @@ struct SettingsView: View {
                 settingSection("Repository folder", symbol: "folder") {
                     Text(store.status?.mountRoot ?? "Loading folder location…")
                         .font(.system(size: 12)).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
-                    Text("Choose an empty folder. RepoReach groups repositories by their owner or chosen group inside it.")
+                    Text("RepoReach groups repositories by owner inside this folder. Existing checkouts stay in their original locations; kept repositories become ordinary local checkouts.")
                         .font(.system(size: 12)).foregroundStyle(ReachTheme.muted).lineSpacing(3)
                     HStack(spacing: 10) {
                         Button("Choose Folder…") { store.chooseMountFolder() }
                             .buttonStyle(ReachButtonStyle(compact: true)).disabled(store.isBusy || store.demoMode)
                         Button("Open Folder") { store.openFolder() }
-                            .buttonStyle(ReachButtonStyle(compact: true)).disabled(store.status?.mounted != true || store.demoMode)
+                            .buttonStyle(ReachButtonStyle(compact: true)).disabled(store.status == nil || store.demoMode)
                     }
                 }
                 if !store.organizations.isEmpty {
                     settingSection("Owners & organizations", symbol: "building.2") {
-                        Text("Choose which groups appear in Finder. Hiding a group pauses its background downloads and retains cached data and local work.")
+                        Text("Choose which groups appear in the virtual catalogue. Hiding a group pauses its background downloads and retains cached data and local checkouts.")
                             .font(.system(size: 12)).foregroundStyle(ReachTheme.muted).lineSpacing(3)
                         ForEach(store.organizations) { group in
                             Toggle(group.name, isOn: Binding(get: { store.isOwnerEnabled(group.name) }, set: { enabled in
@@ -723,7 +729,7 @@ struct SettingsView: View {
                 settingSection("Background & startup", symbol: "power") {
                     Toggle("Open RepoReach at login", isOn: Binding(get: { store.launchAtLogin }, set: { enabled in Task { await store.setLaunchAtLogin(enabled) } }))
                         .toggleStyle(.checkbox).disabled(store.demoMode)
-                    Text("Closing the window keeps RepoReach running so folders stay available. Reopen it from Applications. Use Quit RepoReach to stop the app.")
+                    Text("Closing the window keeps virtual folders available. Reopen RepoReach from Applications. Quitting stops virtual folders; adopted and kept local checkouts stay available.")
                         .font(.system(size: 12)).foregroundStyle(ReachTheme.muted).lineSpacing(3)
                 }
                 settingSection("Finder actions", symbol: "macwindow") {
@@ -737,7 +743,7 @@ struct SettingsView: View {
                         Circle().fill(store.status?.dependencyReady == true ? ReachTheme.success : ReachTheme.muted).frame(width: 6, height: 6)
                         Text(store.status?.dependencyReady == true ? "macOS 26 filesystem support available" : "Virtual folders require macOS 26").font(.system(size: 12, weight: .semibold))
                     }
-                    Text("Enable RepoReach in System Settings → General → Login Items & Extensions → File System Extensions, then choose Mount Folders. The filesystem extension is included in the app.")
+                    Text("Enable RepoReach in System Settings → General → Login Items & Extensions → File System Extensions, then choose Enable Virtual Folders. The filesystem extension is included in the app.")
                         .font(.system(size: 12)).foregroundStyle(ReachTheme.muted).lineSpacing(3)
                     Button("Open Filesystem Extension Settings") { store.showFilesystemExtensionSettings() }
                         .buttonStyle(ReachButtonStyle(compact: true))

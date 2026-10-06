@@ -28,6 +28,7 @@ func newDesktopTestService(t *testing.T, ghScript string) *Service {
 	// These shared fixtures exercise FUSE's live catalogue publication. Tests
 	// for native FSKit's quiescent catalogue transactions opt in explicitly.
 	s.quiescentCatalogue = false
+	s.hybridCatalogue = false
 	t.Cleanup(func() {
 		if err := s.Close(); err != nil {
 			t.Errorf("close desktop service: %v", err)

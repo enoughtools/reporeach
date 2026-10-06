@@ -31,6 +31,7 @@ type fixture struct {
 	backend   *fusefs.ArtifactFuse
 	hydration *testHydrator
 	content   []byte
+	config    model.RepoConfig
 }
 
 type testHydrator struct {
@@ -84,7 +85,7 @@ func repositoryFixture(t *testing.T, id string) fixture {
 	resolver := &fusefs.Resolver{Snapshot: snap, Overlay: ov}
 	resolver.SetGeneration(gen)
 	engine := &fusefs.Engine{Repo: cfg, Resolver: resolver, Overlay: ov, Hydrator: h}
-	return fixture{backend: fusefs.NewArtifactFuse(cfg, resolver, engine), hydration: h, content: content}
+	return fixture{backend: fusefs.NewArtifactFuse(cfg, resolver, engine), hydration: h, content: content, config: cfg}
 }
 
 func lookup(t *testing.T, fs *FileSystem, parent fuseops.InodeID, name string) fuseops.InodeID {
@@ -372,6 +373,60 @@ func TestActivationSerializesConcurrentEntryAndCanRetryFailure(t *testing.T) {
 	_ = openDir(t, retry, retryRoot)
 	if attempts.Load() != 2 {
 		t.Fatal("activation error was permanently cached")
+	}
+}
+
+func TestActivationBusyIsPreservedAndRetriedAfterLifecycleAction(t *testing.T) {
+	f := repositoryFixture(t, "alice/project")
+	var calls atomic.Int64
+	fs, err := New(testEntries[:1], func(context.Context, Entry) (*fusefs.ArtifactFuse, error) {
+		if calls.Add(1) == 1 {
+			return nil, fmt.Errorf("repository action in progress: %w", syscall.EBUSY)
+		}
+		return f.backend, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := repoRoot(t, fs, "alice")
+	if err := fs.OpenDir(context.Background(), &fuseops.OpenDirOp{Inode: root}); err != syscall.EBUSY {
+		t.Fatalf("lifecycle deferral reported as acquisition failure: %v", err)
+	}
+	handle := &fuseops.OpenDirOp{Inode: root}
+	if err := fs.OpenDir(context.Background(), handle); err != nil {
+		t.Fatalf("activation could not retry after lifecycle action: %v", err)
+	}
+	if calls.Load() != 2 {
+		t.Fatalf("activation attempts=%d want 2", calls.Load())
+	}
+	if err := fs.ReleaseDirHandle(context.Background(), &fuseops.ReleaseDirHandleOp{Handle: handle.Handle}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestActivationCancellationPreservesSafeRetryableErrnos(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		err  error
+		want syscall.Errno
+	}{
+		{"cancel", context.Canceled, syscall.EINTR},
+		{"wrapped cancel", fmt.Errorf("acquisition cancelled: %w", context.Canceled), syscall.EINTR},
+		{"interrupt", syscall.EINTR, syscall.EINTR},
+		{"deadline", context.DeadlineExceeded, syscall.ETIMEDOUT},
+		{"timeout", syscall.ETIMEDOUT, syscall.ETIMEDOUT},
+		{"arbitrary acquisition error", errors.New("private acquisition detail"), syscall.EIO},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fs, err := New(testEntries[:1], func(context.Context, Entry) (*fusefs.ArtifactFuse, error) { return nil, test.err })
+			if err != nil {
+				t.Fatal(err)
+			}
+			root := repoRoot(t, fs, "alice")
+			if err := fs.OpenDir(context.Background(), &fuseops.OpenDirOp{Inode: root}); err != test.want {
+				t.Fatalf("activation status=%v want %v", err, test.want)
+			}
+		})
 	}
 }
 

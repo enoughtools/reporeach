@@ -27,24 +27,25 @@ type Descriptor struct {
 }
 
 type Request struct {
-	Version    int            `json:"version"`
-	Op         string         `json:"op"`
-	Inode      uint64         `json:"inode,omitempty"`
-	Parent     uint64         `json:"parent,omitempty"`
-	Name       string         `json:"name,omitempty"`
-	Handle     uint64         `json:"handle,omitempty"`
-	Offset     uint64         `json:"offset,omitempty"`
-	Size       int64          `json:"size,omitempty"`
-	Mode       uint32         `json:"mode,omitempty"`
-	Access     uint32         `json:"access,omitempty"` // 1 read, 2 write, 3 both; zero defaults to both
-	OldParent  uint64         `json:"old_parent,omitempty"`
-	OldName    string         `json:"old_name,omitempty"`
-	NewParent  uint64         `json:"new_parent,omitempty"`
-	NewName    string         `json:"new_name,omitempty"`
-	Target     string         `json:"target,omitempty"`
-	N          uint64         `json:"n,omitempty"`
-	Forgets    []Forget       `json:"forgets,omitempty"`
-	Attributes *SetAttributes `json:"attributes,omitempty"`
+	Version     int            `json:"version"`
+	Op          string         `json:"op"`
+	RequireSize bool           `json:"require_size,omitempty"` // getattr needs an authoritative POSIX size
+	Inode       uint64         `json:"inode,omitempty"`
+	Parent      uint64         `json:"parent,omitempty"`
+	Name        string         `json:"name,omitempty"`
+	Handle      uint64         `json:"handle,omitempty"`
+	Offset      uint64         `json:"offset,omitempty"`
+	Size        int64          `json:"size,omitempty"`
+	Mode        uint32         `json:"mode,omitempty"`
+	Access      uint32         `json:"access,omitempty"` // 1 read, 2 write, 3 both; zero defaults to both
+	OldParent   uint64         `json:"old_parent,omitempty"`
+	OldName     string         `json:"old_name,omitempty"`
+	NewParent   uint64         `json:"new_parent,omitempty"`
+	NewName     string         `json:"new_name,omitempty"`
+	Target      string         `json:"target,omitempty"`
+	N           uint64         `json:"n,omitempty"`
+	Forgets     []Forget       `json:"forgets,omitempty"`
+	Attributes  *SetAttributes `json:"attributes,omitempty"`
 }
 
 type Forget struct {

@@ -235,10 +235,22 @@ func (h *Handler) dispatch(ctx context.Context, r Request) (Response, error) {
 	switch r.Op {
 	case "lookup":
 		op := &fuseops.LookUpInodeOp{Parent: parent, Name: r.Name}
-		if err := h.filesystem.LookUpInode(ctx, op); err != nil {
+		known := true
+		var err error
+		if fs, ok := h.filesystem.(*catalogfs.FileSystem); ok {
+			known, err = fs.LookUpMetadata(ctx, op)
+		} else if fs, ok := h.filesystem.(*fusefs.ArtifactFuse); ok {
+			known, err = fs.LookUpMetadata(ctx, op)
+		} else {
+			err = h.filesystem.LookUpInode(ctx, op)
+		}
+		if err != nil {
 			return response, err
 		}
 		node := nodeFromEntry(op.Entry)
+		if !known {
+			node.Attributes.SizeKnown = &known
+		}
 		h.remember(node)
 		response.Node = &node
 	case "getattr":
@@ -246,6 +258,7 @@ func (h *Handler) dispatch(ctx context.Context, r Request) (Response, error) {
 			return response, syscall.EINVAL
 		}
 		op := &fuseops.GetInodeAttributesOp{Inode: inode}
+		known := true
 		if r.Handle != 0 {
 			state, err := h.lockHandle(r.Handle, r.Inode, false)
 			if err != nil {
@@ -263,10 +276,23 @@ func (h *Handler) dispatch(ctx context.Context, r Request) (Response, error) {
 			if err != nil {
 				return response, err
 			}
-		} else if err := h.filesystem.GetInodeAttributes(ctx, op); err != nil {
-			return response, err
+		} else {
+			var err error
+			if fs, ok := h.filesystem.(*catalogfs.FileSystem); ok && !r.RequireSize {
+				known, err = fs.GetMetadataAttributes(ctx, op)
+			} else if fs, ok := h.filesystem.(*fusefs.ArtifactFuse); ok && !r.RequireSize {
+				known, err = fs.GetMetadataAttributes(ctx, op)
+			} else {
+				err = h.filesystem.GetInodeAttributes(ctx, op)
+			}
+			if err != nil {
+				return response, err
+			}
 		}
 		response.Node = &Node{Inode: r.Inode, Attributes: attributes(op.Attributes)}
+		if !known {
+			response.Node.Attributes.SizeKnown = &known
+		}
 	case "setattr":
 		if inode == 0 || r.Attributes == nil {
 			return response, syscall.EINVAL

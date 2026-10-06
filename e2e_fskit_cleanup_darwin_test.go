@@ -14,7 +14,7 @@ import (
 
 func TestFSKitCleanupInventory(t *testing.T) {
 	const uid = uint32(501)
-	captured := fsKitAcceptanceIdentity{fsid: [2]int32{123, 456}, owner: uid, root: "/private/tmp/rr-fskit-fixture/mount", source: "file:///private/tmp/rr-fskit-fixture/state/FSKit/", kind: "reporeach"}
+	captured := fsKitAcceptanceIdentity{fsid: [2]int32{123, 456}, owner: uid, root: "/private/tmp/rr-fskit-fixture/state/native-catalogue/volume", source: "file:///private/tmp/rr-fskit-fixture/state/FSKit/", kind: "reporeach"}
 	unrelated := fsKitAcceptanceIdentity{fsid: [2]int32{777, 888}, owner: uid, root: "/unrelated", source: "/dev/disk-other", kind: "apfs"}
 	for _, test := range []struct {
 		name       string
@@ -40,7 +40,7 @@ func TestFSKitCleanupInventory(t *testing.T) {
 		{name: "uncaptured but fully absent", inventory: []fsKitAcceptanceIdentity{unrelated}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			h := &fsKitAcceptanceHarness{root: "/private/tmp/rr-fskit-fixture", state: "/private/tmp/rr-fskit-fixture/state", mount: captured.root, capturedIdentity: test.capture}
+			h := &fsKitAcceptanceHarness{root: "/private/tmp/rr-fskit-fixture", state: "/private/tmp/rr-fskit-fixture/state", mount: "/private/tmp/rr-fskit-fixture/catalogue", capturedIdentity: test.capture}
 			inventory := test.inventory
 			if test.change != nil {
 				changed := captured
@@ -61,10 +61,64 @@ func TestFSKitCleanupInventory(t *testing.T) {
 	} {
 		invalid := captured
 		change(&invalid)
-		h := &fsKitAcceptanceHarness{root: "/private/tmp/rr-fskit-fixture", state: "/private/tmp/rr-fskit-fixture/state", mount: captured.root, capturedIdentity: invalid}
+		h := &fsKitAcceptanceHarness{root: "/private/tmp/rr-fskit-fixture", state: "/private/tmp/rr-fskit-fixture/state", mount: "/private/tmp/rr-fskit-fixture/catalogue", capturedIdentity: invalid}
 		if _, err := h.validateCleanupInventory(nil, uid); err == nil {
 			t.Fatal("invalid captured ownership accepted even with an empty inventory")
 		}
+	}
+}
+
+func TestFSKitCurrentIdentityTransition(t *testing.T) {
+	const uid = uint32(501)
+	previous := fsKitAcceptanceIdentity{fsid: [2]int32{123, 456}, owner: uid,
+		root: "/private/tmp/rr-fskit-fixture/state/native-catalogue/volume", source: "file:///private/tmp/rr-fskit-fixture/state/FSKit/", kind: "reporeach"}
+	current := previous
+	current.fsid = [2]int32{789, 1011}
+	unrelated := fsKitAcceptanceIdentity{fsid: [2]int32{12, 34}, owner: uid, root: "/unrelated", source: "/dev/disk", kind: "apfs"}
+	for _, test := range []struct {
+		name      string
+		capture   fsKitAcceptanceIdentity
+		inventory []fsKitAcceptanceIdentity
+		change    func(*fsKitAcceptanceIdentity)
+		valid     bool
+	}{
+		{name: "first owned capture", inventory: []fsKitAcceptanceIdentity{unrelated, current}, valid: true},
+		{name: "unchanged complete tuple", capture: current, inventory: []fsKitAcceptanceIdentity{unrelated, current}, valid: true},
+		{name: "replacement after previous FSID absent", capture: previous, inventory: []fsKitAcceptanceIdentity{unrelated, current}, valid: true},
+		{name: "previous FSID still present", capture: previous, inventory: []fsKitAcceptanceIdentity{previous, current}},
+		{name: "duplicate replacement", capture: previous, inventory: []fsKitAcceptanceIdentity{current, current}},
+		{name: "replacement missing", capture: previous, inventory: []fsKitAcceptanceIdentity{unrelated}},
+		{name: "owner changed", capture: previous, change: func(m *fsKitAcceptanceIdentity) { m.owner++ }},
+		{name: "kind changed", capture: previous, change: func(m *fsKitAcceptanceIdentity) { m.kind = "other" }},
+		{name: "source changed", capture: previous, change: func(m *fsKitAcceptanceIdentity) { m.source = "other" }},
+		{name: "wrong private root", capture: previous, change: func(m *fsKitAcceptanceIdentity) { m.root = "/elsewhere" }},
+		{name: "source mounted elsewhere too", capture: previous, inventory: []fsKitAcceptanceIdentity{current, {fsid: [2]int32{88, 99}, owner: uid, root: "/elsewhere", source: current.source, kind: current.kind}}},
+		{name: "chosen root mounted", capture: previous, inventory: []fsKitAcceptanceIdentity{current, {fsid: [2]int32{88, 99}, owner: uid, root: "/private/tmp/rr-fskit-fixture/catalogue", source: "other", kind: "apfs"}}},
+		{name: "replacement FSID also mounted elsewhere", capture: previous, inventory: []fsKitAcceptanceIdentity{current, {fsid: current.fsid, owner: uid, root: "/elsewhere", source: "other", kind: "apfs"}}},
+		{name: "previous FSID moved elsewhere", capture: previous, inventory: []fsKitAcceptanceIdentity{current, {fsid: previous.fsid, owner: uid, root: "/elsewhere", source: "other", kind: "apfs"}}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			h := &fsKitAcceptanceHarness{root: "/private/tmp/rr-fskit-fixture", state: "/private/tmp/rr-fskit-fixture/state", mount: "/private/tmp/rr-fskit-fixture/catalogue", capturedIdentity: test.capture}
+			inventory := test.inventory
+			if test.change != nil {
+				changed := current
+				test.change(&changed)
+				inventory = []fsKitAcceptanceIdentity{unrelated, changed}
+			}
+			got, err := h.validateCurrentIdentity(inventory, uid)
+			if (err == nil) != test.valid || test.valid && got != current {
+				t.Fatalf("capture identity=%+v error=%v want valid=%v", got, err, test.valid)
+			}
+			if h.capturedIdentity != test.capture {
+				t.Fatal("validation changed the captured receipt before success")
+			}
+			if test.valid {
+				h.capturedIdentity = got
+				if owned, err := h.validateCleanupInventory(inventory, uid); err != nil || !owned {
+					t.Fatalf("verified replacement cannot satisfy strict cleanup: owned=%v error=%v", owned, err)
+				}
+			}
+		})
 	}
 }
 
@@ -149,8 +203,8 @@ func TestFSKitCleanupRetry(t *testing.T) {
 	}
 
 	t.Run("known detachment continues endpoint drain", func(t *testing.T) {
-		captured := fsKitAcceptanceIdentity{fsid: [2]int32{123, 456}, owner: 501, root: "/private/tmp/rr-fskit-fixture/mount", source: "file:///private/tmp/rr-fskit-fixture/state/FSKit/", kind: "reporeach"}
-		h := &fsKitAcceptanceHarness{root: "/private/tmp/rr-fskit-fixture", state: "/private/tmp/rr-fskit-fixture/state", mount: captured.root, capturedIdentity: captured}
+		captured := fsKitAcceptanceIdentity{fsid: [2]int32{123, 456}, owner: 501, root: "/private/tmp/rr-fskit-fixture/state/native-catalogue/volume", source: "file:///private/tmp/rr-fskit-fixture/state/FSKit/", kind: "reporeach"}
+		h := &fsKitAcceptanceHarness{root: "/private/tmp/rr-fskit-fixture", state: "/private/tmp/rr-fskit-fixture/state", mount: "/private/tmp/rr-fskit-fixture/catalogue", capturedIdentity: captured}
 		checks, requests := 0, 0
 		err := fsKitPrepareQuitWithRetry(context.Background(), fsKitCleanupRetryOperations{
 			verify: func() error {

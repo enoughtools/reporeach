@@ -11,6 +11,9 @@ final class RepositoryAdditionModelTests: XCTestCase {
         XCTAssertFalse(repository.disabled)
         XCTAssertFalse(repository.isManual)
         XCTAssertTrue(repository.isEnabled(in: status.organizations))
+        XCTAssertNil(repository.localPath)
+        XCTAssertNil(repository.localKind)
+        XCTAssertFalse(repository.isLocal)
         XCTAssertTrue(status.organizations.isEmpty)
     }
 
@@ -70,6 +73,47 @@ final class RepositoryAdditionModelTests: XCTestCase {
             XCTAssertFalse(repository.isEnabled(in: []))
             XCTAssertFalse(repository.isEnabled(in: [OrganizationRecord(name: "owner", enabled: true)]))
         }
+    }
+
+    func testAdoptedCheckoutRetainsPhysicalLocationAndRoundTrips() throws {
+        let status = try decodeStatus(#"{"mountRoot":"/Users/example/Repositories","repositories":[{"id":"local/project","owner":"local","name":"project","source":"manual","localPath":"/Users/example/Source Projects/project","localKind":"adopted","state":"available"}]}"#)
+        let repository = try XCTUnwrap(status.repositories.first)
+
+        XCTAssertTrue(repository.isLocal)
+        XCTAssertTrue(repository.isAdopted)
+        XCTAssertEqual(repository.displayState, "Adopted checkout")
+        XCTAssertEqual(repository.folderURL(in: status.mountRoot)?.path, "/Users/example/Source Projects/project")
+        XCTAssertEqual(try JSONDecoder().decode(EngineStatus.self, from: JSONEncoder().encode(status)), status)
+    }
+
+    func testMaterializedCheckoutUsesLocalPathAndKeepsOperationStateVisible() {
+        let repository = RepositoryRecord(id: "owner/repo", owner: "owner", name: "repo", description: "", state: "available",
+                                          pinned: true, localPath: "/Users/example/Repositories/owner/repo", localKind: "materialized")
+        XCTAssertTrue(repository.isLocal)
+        XCTAssertFalse(repository.isAdopted)
+        XCTAssertEqual(repository.displayState, "Local checkout")
+        XCTAssertEqual(repository.folderURL(in: "/Users/example/Other")?.path, repository.localPath)
+        for (state, label) in [("downloading", "Downloading"), ("preparing", "Preparing"), ("error", "Needs attention")] {
+            let working = RepositoryRecord(id: repository.id, owner: repository.owner, name: repository.name, description: "", state: state,
+                                           localPath: repository.localPath, localKind: repository.localKind)
+            XCTAssertEqual(working.displayState, label)
+        }
+    }
+
+    func testLocalLocationMustBeAnAbsoluteNonRootPathWithKnownKind() {
+        for (path, kind) in [("relative/repo", "adopted"), ("/", "adopted"), ("/Users/example/pro\u{0000}ject", "adopted"),
+                             ("/Users/example/repo", "unknown"), ("/Users/example/repo", "")] {
+            let repository = RepositoryRecord(id: "owner/repo", owner: "owner", name: "repo", description: "", localPath: path, localKind: kind)
+            XCTAssertFalse(repository.isLocal)
+            XCTAssertEqual(repository.folderURL(in: "/Users/example/Repositories")?.path, "/Users/example/Repositories/owner/repo")
+        }
+    }
+
+    func testVirtualFolderUsesValidatedIdentityAndRejectsUnsafeRoot() {
+        let repository = RepositoryRecord(id: "owner/repo", owner: "../outside", name: "other", description: "")
+        XCTAssertEqual(repository.folderURL(in: "/Users/example/Repositories")?.path, "/Users/example/Repositories/owner/repo")
+        XCTAssertNil(repository.folderURL(in: "/"))
+        XCTAssertNil(repository.folderURL(in: "relative"))
     }
 
     private func decodeStatus(_ json: String) throws -> EngineStatus {

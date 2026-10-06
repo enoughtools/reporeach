@@ -8,6 +8,7 @@ package catalogfs
 import (
 	"context"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"runtime"
@@ -38,11 +39,17 @@ type Entry struct {
 type Activate func(context.Context, Entry) (*fusefs.ArtifactFuse, error)
 
 type repository struct {
-	entry     Entry
-	mu        sync.Mutex
-	backend   *fusefs.ArtifactFuse
-	preparing chan struct{}
-	err       error
+	entry              Entry
+	mu                 sync.Mutex
+	mutationMu         sync.RWMutex
+	writesFrozen       bool
+	backend            *fusefs.ArtifactFuse
+	preparing          chan struct{}
+	err                error
+	previewRevision    string
+	previewDirs        map[string]PreviewDirectory
+	previewPending     map[string]chan struct{}
+	previewUnavailable bool
 }
 
 type inode struct {
@@ -53,6 +60,10 @@ type inode struct {
 	local        fuseops.InodeID
 	refs         uint64
 	dirRefs      uint64
+	repoPath     string
+	preview      *model.BaseNode
+	backendRefs  uint64 // backend references owned by a promoted preview identity
+	binding      chan struct{}
 }
 
 type inodeKey struct {
@@ -69,29 +80,34 @@ type handle struct {
 	entries      []catalogEntry  // immutable snapshot for synthetic directory handles
 	directory    bool
 	direntInodes map[fuseops.InodeID]struct{}
+	repoPath     string
 }
 
 type catalogEntry struct {
 	name         string
 	inode        fuseops.InodeID
 	metadataPath string
+	preview      *model.BaseNode
 }
 
 // FileSystem multiplexes independent ArtifactFS adapters. It translates every
 // inode and handle so repositories cannot alias one another's kernel objects.
 type FileSystem struct {
 	fuseutil.NotImplementedFileSystem
-	activate     Activate
-	metadata     model.OverlayStore
-	mu           sync.Mutex
-	repositories map[string]*repository
-	paths        map[string]fuseops.InodeID
-	inodes       map[fuseops.InodeID]*inode
-	childInodes  map[inodeKey]fuseops.InodeID
-	handles      map[fuseops.HandleID]*handle
-	nextInode    fuseops.InodeID
-	nextHandle   fuseops.HandleID
-	created      time.Time
+	activate      Activate
+	preview       Preview
+	metadata      model.OverlayStore
+	mu            sync.Mutex
+	repositories  map[string]*repository
+	paths         map[string]fuseops.InodeID
+	inodes        map[fuseops.InodeID]*inode
+	childInodes   map[inodeKey]fuseops.InodeID
+	previewInodes map[previewInodeKey]fuseops.InodeID
+	handles       map[fuseops.HandleID]*handle
+	nextInode     fuseops.InodeID
+	nextHandle    fuseops.HandleID
+	created       time.Time
+	destroyed     bool
 }
 
 var _ fuseutil.FileSystem = (*FileSystem)(nil)
@@ -106,15 +122,22 @@ func New(entries []Entry, activate Activate) (*FileSystem, error) {
 // working trees. Its store must outlive this mount and survive repository
 // eviction; New preserves the metadata-free constructor for existing callers.
 func NewWithMetadata(entries []Entry, activate Activate, metadata model.OverlayStore) (*FileSystem, error) {
+	return NewWithPreview(entries, activate, metadata, nil)
+}
+
+// NewWithPreview separates immutable browsing metadata from the writable
+// working-tree lifecycle. A nil provider preserves ordinary activation.
+func NewWithPreview(entries []Entry, activate Activate, metadata model.OverlayStore, preview Preview) (*FileSystem, error) {
 	if activate == nil {
 		return nil, fmt.Errorf("catalogue activation callback is required")
 	}
 	fs := &FileSystem{
-		activate: activate, metadata: metadata, repositories: make(map[string]*repository),
+		activate: activate, preview: preview, metadata: metadata, repositories: make(map[string]*repository),
 		paths:       map[string]fuseops.InodeID{".": fuseops.RootInodeID},
 		inodes:      map[fuseops.InodeID]*inode{fuseops.RootInodeID: {path: ".", metadataPath: "."}},
 		childInodes: make(map[inodeKey]fuseops.InodeID), handles: make(map[fuseops.HandleID]*handle),
-		nextInode: fuseops.RootInodeID + 1, nextHandle: 1, created: time.Now(),
+		previewInodes: make(map[previewInodeKey]fuseops.InodeID),
+		nextInode:     fuseops.RootInodeID + 1, nextHandle: 1, created: time.Now(),
 	}
 	if err := fs.SetEntries(entries); err != nil {
 		return nil, err
@@ -209,13 +232,16 @@ func (fs *FileSystem) synthetic(path string, repo *repository) fuseops.InodeID {
 		// repository at the same display path cannot inherit it.
 		metadataPath = model.CleanPath("repos/" + hex.EncodeToString([]byte(repo.entry.ID)))
 	}
-	fs.inodes[id] = &inode{path: path, metadataPath: metadataPath, repo: repo, local: fuseops.RootInodeID}
+	fs.inodes[id] = &inode{path: path, metadataPath: metadataPath, repo: repo, local: fuseops.RootInodeID, repoPath: "."}
 	return id
 }
 
 func (fs *FileSystem) node(id fuseops.InodeID) (*inode, error) {
 	fs.mu.Lock()
 	defer fs.mu.Unlock()
+	if fs.destroyed {
+		return nil, syscall.ESTALE
+	}
 	n := fs.inodes[id]
 	if n == nil {
 		return nil, syscall.ESTALE
@@ -254,11 +280,12 @@ func (fs *FileSystem) activateRepo(ctx context.Context, repo *repository) (*fuse
 	if err == nil && backend == nil {
 		err = fmt.Errorf("activation returned no filesystem for %s", entry.ID)
 	}
+	activationErr := activationError(err)
 	repo.mu.Lock()
 	repo.backend = backend
 	if err != nil {
 		repo.backend = nil
-		repo.err = syscall.EIO
+		repo.err = activationErr
 	} else {
 		repo.err = nil
 	}
@@ -266,9 +293,27 @@ func (fs *FileSystem) activateRepo(ctx context.Context, repo *repository) (*fuse
 	close(pending)
 	repo.mu.Unlock()
 	if err != nil {
-		return nil, syscall.EIO
+		return nil, activationErr
 	}
 	return backend, nil
+}
+
+// Activation can be deliberately deferred by lifecycle operations. Preserve
+// those retryable statuses without exposing arbitrary acquisition errors.
+func activationError(err error) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, syscall.EINTR) {
+		return syscall.EINTR
+	}
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, syscall.ETIMEDOUT) {
+		return syscall.ETIMEDOUT
+	}
+	if errors.Is(err, syscall.EBUSY) {
+		return syscall.EBUSY
+	}
+	return syscall.EIO
 }
 
 func (fs *FileSystem) backend(ctx context.Context, id fuseops.InodeID) (*inode, *fusefs.ArtifactFuse, error) {
@@ -279,7 +324,17 @@ func (fs *FileSystem) backend(ctx context.Context, id fuseops.InodeID) (*inode, 
 	if n.repo == nil {
 		return nil, nil, syscall.EROFS
 	}
+	return fs.activateNode(ctx, id, n)
+}
+
+func (fs *FileSystem) activateNode(ctx context.Context, id fuseops.InodeID, n *inode) (*inode, *fusefs.ArtifactFuse, error) {
 	backend, err := fs.activateRepo(ctx, n.repo)
+	if err != nil {
+		return n, backend, err
+	}
+	if n.local == 0 {
+		n, err = fs.resolveLocal(ctx, id, backend)
+	}
 	return n, backend, err
 }
 
@@ -372,12 +427,17 @@ func (fs *FileSystem) StatFS(ctx context.Context, op *fuseops.StatFSOp) error {
 }
 
 func (fs *FileSystem) LookUpInode(ctx context.Context, op *fuseops.LookUpInodeOp) error {
+	_, err := fs.lookup(ctx, op, false)
+	return err
+}
+
+func (fs *FileSystem) lookup(ctx context.Context, op *fuseops.LookUpInodeOp, allowUnknown bool) (bool, error) {
 	if !validChild(op.Name) {
-		return syscall.EINVAL
+		return true, syscall.EINVAL
 	}
 	n, err := fs.node(op.Parent)
 	if err != nil {
-		return err
+		return true, err
 	}
 	if n.repo == nil {
 		path := model.CleanPath(n.path + "/" + op.Name)
@@ -385,32 +445,46 @@ func (fs *FileSystem) LookUpInode(ctx context.Context, op *fuseops.LookUpInodeOp
 		id, ok := fs.paths[path]
 		fs.mu.Unlock()
 		if !ok {
-			return syscall.ENOENT
+			return true, syscall.ENOENT
 		}
 		child, err := fs.node(id)
 		if err != nil {
-			return err
+			return true, err
 		}
 		attrs, err := fs.syntheticDirectoryAttrs(ctx, child)
 		if err != nil {
-			return err
+			return true, err
 		}
 		op.Entry = fuseops.ChildInodeEntry{Child: id, Attributes: attrs, AttributesExpiration: time.Now().Add(time.Second), EntryExpiration: time.Now().Add(time.Second)}
-		return nil
+		return true, nil
+	}
+	if entry, known, handled, err := fs.previewLookup(ctx, n, op.Name, allowUnknown); handled {
+		op.Entry = entry
+		return known, err
 	}
 	backend, err := fs.activateRepo(ctx, n.repo)
 	if err != nil {
-		return err
+		return true, err
+	}
+	n, err = fs.resolveLocal(ctx, op.Parent, backend)
+	if err != nil {
+		return true, err
 	}
 	child := *op
 	child.Parent = n.local
-	if err := backend.LookUpInode(ctx, &child); err != nil {
-		return err
+	known := true
+	if allowUnknown {
+		known, err = backend.LookUpMetadata(ctx, &child)
+	} else {
+		err = backend.LookUpInode(ctx, &child)
+	}
+	if err != nil {
+		return true, err
 	}
 	child.Parent = op.Parent
-	child.Entry.Child = fs.mapInode(n.repo, child.Entry.Child, true)
+	child.Entry.Child = fs.mapNamedInode(n.repo, model.CleanPath(n.repoPath+"/"+op.Name), child.Entry.Child, true, true)
 	*op = child
-	return nil
+	return known, nil
 }
 
 func (fs *FileSystem) GetInodeAttributes(ctx context.Context, op *fuseops.GetInodeAttributesOp) error {
@@ -426,7 +500,22 @@ func (fs *FileSystem) GetInodeAttributes(ctx context.Context, op *fuseops.GetIno
 		op.AttributesExpiration = time.Now().Add(time.Second)
 		return nil
 	}
+	if n.preview != nil {
+		n.repo.mu.Lock()
+		dormant := n.repo.backend == nil
+		n.repo.mu.Unlock()
+		attrs, known := fs.previewAttributes(*n.preview)
+		if dormant && known {
+			op.Attributes = attrs
+			op.AttributesExpiration = time.Now().Add(time.Second)
+			return nil
+		}
+	}
 	backend, err := fs.activateRepo(ctx, n.repo)
+	if err != nil {
+		return err
+	}
+	n, err = fs.resolveLocal(ctx, op.Inode, backend)
 	if err != nil {
 		return err
 	}
@@ -448,22 +537,33 @@ func (fs *FileSystem) ForgetInode(ctx context.Context, op *fuseops.ForgetInodeOp
 		return nil
 	}
 	copy := *n
+	var previewRelease uint64
 	if op.N >= n.refs {
 		n.refs = 0
 		if n.dirRefs == 0 {
 			delete(fs.inodes, op.Inode)
 			delete(fs.childInodes, inodeKey{n.repo, n.local})
+			if n.preview != nil {
+				delete(fs.previewInodes, previewInodeKey{n.repo, n.repoPath})
+				previewRelease = n.backendRefs
+			}
 		}
 	} else {
 		n.refs -= op.N
 	}
 	fs.mu.Unlock()
+	if copy.preview != nil && previewRelease == 0 {
+		return nil
+	}
 	copy.repo.mu.Lock()
 	backend := copy.repo.backend
 	copy.repo.mu.Unlock()
 	if backend != nil {
 		child := *op
 		child.Inode = copy.local
+		if copy.preview != nil {
+			child.N = previewRelease
+		}
 		return backend.ForgetInode(ctx, &child)
 	}
 	return nil
@@ -504,7 +604,14 @@ func (fs *FileSystem) OpenDir(ctx context.Context, op *fuseops.OpenDirOp) error 
 		op.Handle = fs.addHandle(&handle{directory: true, entries: entries})
 		return nil
 	}
+	if handled, err := fs.openPreviewDirectory(ctx, n, op); handled {
+		return err
+	}
 	backend, err := fs.activateRepo(ctx, n.repo)
+	if err != nil {
+		return err
+	}
+	n, err = fs.resolveLocal(ctx, op.Inode, backend)
 	if err != nil {
 		return err
 	}
@@ -514,7 +621,7 @@ func (fs *FileSystem) OpenDir(ctx context.Context, op *fuseops.OpenDirOp) error 
 		return err
 	}
 	child.Inode = op.Inode
-	child.Handle = fs.addHandle(&handle{directory: true, repo: n.repo, backend: backend, local: child.Handle, inode: n.local, globalInode: op.Inode})
+	child.Handle = fs.addHandle(&handle{directory: true, repo: n.repo, backend: backend, local: child.Handle, inode: n.local, globalInode: op.Inode, repoPath: n.repoPath})
 	*op = child
 	return nil
 }
@@ -525,6 +632,9 @@ func (fs *FileSystem) ReadDir(ctx context.Context, op *fuseops.ReadDirOp) error 
 		return err
 	}
 	if h.backend != nil {
+		if fs.preview != nil {
+			return fs.readBackendDirectory(ctx, h, op)
+		}
 		child := *op
 		child.Handle = h.local
 		child.Inode = h.inode
@@ -542,7 +652,11 @@ func (fs *FileSystem) ReadDir(ctx context.Context, op *fuseops.ReadDirOp) error 
 	}
 	for i := int(op.Offset); i < len(h.entries); i++ {
 		e := h.entries[i]
-		n := fuseutil.WriteDirent(op.Dst[op.BytesRead:], fuseutil.Dirent{Offset: fuseops.DirOffset(i + 1), Inode: e.inode, Name: e.name, Type: fuseutil.DT_Directory})
+		typ := fuseutil.DT_Directory
+		if e.preview != nil {
+			typ = previewDirentType(e.preview.Type)
+		}
+		n := fuseutil.WriteDirent(op.Dst[op.BytesRead:], fuseutil.Dirent{Offset: fuseops.DirOffset(i + 1), Inode: e.inode, Name: e.name, Type: typ})
 		if n == 0 {
 			break
 		}
@@ -555,7 +669,7 @@ func (fs *FileSystem) ReadDirPlus(ctx context.Context, op *fuseops.ReadDirPlusOp
 	// The upstream encoder currently assumes Linux's fuse_attr wire layout.
 	// Darwin's larger layout cannot be encoded safely; mounts use READDIR and
 	// LOOKUP, just as ordinary ArtifactFS mounts do on macOS.
-	if runtime.GOOS == "darwin" {
+	if runtime.GOOS == "darwin" || fs.preview != nil {
 		return syscall.ENOSYS
 	}
 	h, err := fs.getHandle(op.Handle, true)
@@ -572,6 +686,11 @@ func (fs *FileSystem) ReadDirPlus(ctx context.Context, op *fuseops.ReadDirPlusOp
 		child.Handle, child.Inode = op.Handle, op.Inode
 		*op = child
 		return nil
+	}
+	if h.repo != nil {
+		// The ordinary FUSE protocol has no unknown-size marker. Let its
+		// caller fall back to READDIR and exact stat rather than fabricate it.
+		return syscall.ENOSYS
 	}
 	if uint64(op.Offset) > uint64(len(h.entries)) {
 		return nil
@@ -601,6 +720,7 @@ func (fs *FileSystem) ReleaseDirHandle(ctx context.Context, op *fuseops.ReleaseD
 	}
 	fs.mu.Lock()
 	delete(fs.handles, op.Handle)
+	var releases []fuseops.ForgetInodeOp
 	for id := range h.direntInodes {
 		n := fs.inodes[id]
 		if n == nil {
@@ -610,9 +730,25 @@ func (fs *FileSystem) ReleaseDirHandle(ctx context.Context, op *fuseops.ReleaseD
 		if n.refs == 0 && n.dirRefs == 0 {
 			delete(fs.inodes, id)
 			delete(fs.childInodes, inodeKey{n.repo, n.local})
+			if n.preview != nil {
+				delete(fs.previewInodes, previewInodeKey{n.repo, n.repoPath})
+				if n.backendRefs > 0 {
+					releases = append(releases, fuseops.ForgetInodeOp{Inode: n.local, N: n.backendRefs})
+				}
+			}
 		}
 	}
 	fs.mu.Unlock()
+	if len(releases) != 0 {
+		h.repo.mu.Lock()
+		backend := h.repo.backend
+		h.repo.mu.Unlock()
+		for i := range releases {
+			if backend != nil {
+				_ = backend.ForgetInode(context.Background(), &releases[i])
+			}
+		}
+	}
 	if h.backend != nil {
 		child := *op
 		child.Handle = h.local

@@ -25,6 +25,10 @@ type Repository struct {
 	// Empty Source denotes a catalogue discovered through GitHub in older builds.
 	Source   string `json:"source,omitempty"`
 	Disabled bool   `json:"disabled,omitempty"`
+	// Local checkouts are ordinary host directories. Adopted directories remain
+	// owned by the user; materialized directories were published by Keep.
+	LocalPath string `json:"localPath,omitempty"`
+	LocalKind string `json:"localKind,omitempty"`
 }
 
 // Organization is a catalogue owner group. It can also represent the group

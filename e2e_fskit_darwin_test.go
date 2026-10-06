@@ -10,6 +10,7 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"net/http"
@@ -60,6 +61,7 @@ func TestFSKitMountedAcceptance(t *testing.T) {
 	t.Cleanup(func() { h.cleanup(t) })
 	t.Setenv("GIT_CONFIG_GLOBAL", filepath.Join(root, "global-config"))
 	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	t.Setenv("GIT_OPTIONAL_LOCKS", "0")
 	t.Setenv("GH_CONFIG_DIR", filepath.Join(root, "gh-config"))
 	// Fail on any GitHub call, including accidental background authentication.
 	ghSentinel := filepath.Join(root, "gh-called")
@@ -97,11 +99,18 @@ func TestFSKitMountedAcceptance(t *testing.T) {
 
 	h.copyServerImage(t)
 	h.start(t)
-	const owner, repoID = "Acceptance", "Acceptance/project"
+	const owner, repoID, adoptedID = "Acceptance", "Acceptance/project", "Acceptance/original"
 	var status desktop.Status
-	h.request(t, http.MethodPost, "/v1/repositories/adopt", desktop.AdoptionRequest{RemoteURL: source, Owner: owner, Name: "project"}, &status)
+	h.request(t, http.MethodPost, "/v1/repositories/adopt", desktop.AdoptionRequest{RemoteURL: source, Owner: owner, Name: "original"}, &status)
+	adopted := desktopAdoptedRepository(t, status, adoptedID)
+	if status.Account != nil || adopted.State != "local" || adopted.LocalKind != "adopted" || adopted.LocalPath != source {
+		t.Fatalf("local adoption did not retain the original ordinary checkout without sign-in: %+v", adopted)
+	}
+	// A bare source remains virtual. Native mutation checks must exercise the
+	// FSKit leaf, rather than accidentally running against the adopted original.
+	h.request(t, http.MethodPost, "/v1/repositories/adopt", desktop.AdoptionRequest{RemoteURL: bare, Owner: owner, Name: "project"}, &status)
 	if status.Account != nil || desktopAdoptedRepository(t, status, repoID).State != "virtual" {
-		t.Fatalf("manual adoption was not unauthenticated and lazy: %+v", status)
+		t.Fatalf("bare-source registration was not unauthenticated and lazy: %+v", status)
 	}
 	h.request(t, http.MethodPost, "/v1/mount", nil, &status)
 	if !status.Mounted {
@@ -109,13 +118,21 @@ func TestFSKitMountedAcceptance(t *testing.T) {
 	}
 	h.identity(t)
 	waitDesktopCatalogueNames(t, h.mount, []string{owner})
-	waitDesktopCatalogueNames(t, filepath.Join(h.mount, owner), []string{"project"})
+	waitDesktopCatalogueNames(t, filepath.Join(h.mount, owner), []string{"original", "project"})
+	adoptedPath := filepath.Join(h.mount, owner, "original")
+	if target, err := os.Readlink(adoptedPath); err != nil || target != source {
+		t.Fatalf("adopted catalogue entry target=%q error=%v; want original source", target, err)
+	}
+	fsKitReadEqual(t, filepath.Join(adoptedPath, "tracked.txt"), []byte("dirty original\n"))
+	if after := snapshotDesktopAdoptionSource(t, source); !reflect.DeepEqual(beforeSource, after) {
+		t.Fatal("adoption or catalogue publication changed the original checkout")
+	}
 	repo := filepath.Join(h.mount, owner, "project")
 	// Native metadata calls on synthetic directories must stay lazy, including
 	// mutations. Each identity keeps distinct bytes under the same names.
 	metadata := []fsKitXattrExpectation{
-		fsKitProbeNativeXattrs(t, fsKitXattrTarget{path: h.mount}, "catalogue root"),
-		fsKitProbeNativeXattrs(t, fsKitXattrTarget{path: filepath.Join(h.mount, owner)}, "owner placeholder"),
+		fsKitProbeNativeXattrs(t, fsKitXattrTarget{path: h.mount}, "ordinary catalogue root"),
+		fsKitProbeNativeXattrs(t, fsKitXattrTarget{path: filepath.Join(h.mount, owner)}, "ordinary owner folder"),
 		fsKitProbeNativeXattrs(t, fsKitXattrTarget{path: repo}, "repository placeholder"),
 	}
 	fsKitAssertNativeXattrs(t, "placeholder metadata", metadata)
@@ -194,7 +211,6 @@ func TestFSKitMountedAcceptance(t *testing.T) {
 
 	// A cwd and open file are retained during a normal detach attempt. No saved
 	// visibility, pin, operation or source state may change when it is refused.
-	h.server.action(t, repoID, "keep")
 	h.request(t, http.MethodGet, "/v1/status", nil, &status)
 	beforeStatus := status
 	beforeState, err := os.ReadFile(filepath.Join(h.state, "catalogue.json"))
@@ -268,7 +284,10 @@ func TestFSKitMountedAcceptance(t *testing.T) {
 	fsKitReadEqual(t, filepath.Join(repo, "tracked.txt"), branchText)
 	fsKitAssertNativeXattrs(t, "repository hide/show", metadata)
 	reconnect("/v1/organizations/settings", map[string]any{"owner": owner, "enabled": false})
-	waitDesktopCataloguePathMissing(t, filepath.Join(h.mount, owner))
+	waitDesktopCatalogueNames(t, filepath.Join(h.mount, owner), nil)
+	if after := snapshotDesktopAdoptionSource(t, source); !reflect.DeepEqual(beforeSource, after) {
+		t.Fatal("hiding an organization changed its adopted original checkout")
+	}
 	reconnect("/v1/repositories/visibility", map[string]any{"id": repoID, "enabled": false})
 	reconnect("/v1/organizations/settings", map[string]any{"owner": owner, "enabled": true})
 	waitDesktopCataloguePathMissing(t, repo)
@@ -293,8 +312,8 @@ func TestFSKitMountedAcceptance(t *testing.T) {
 	}
 	h.start(t)
 	h.request(t, http.MethodGet, "/v1/status", nil, &status)
-	if !status.Mounted || !desktopAdoptedRepository(t, status, repoID).Pinned {
-		t.Fatalf("restart lost desired mount or download intent: %+v", status)
+	if !status.Mounted || desktopAdoptedRepository(t, status, repoID).LocalPath != "" {
+		t.Fatalf("restart lost desired virtual catalogue state: %+v", status)
 	}
 	h.identity(t)
 	if h.session(t) == previous {
@@ -309,8 +328,44 @@ func TestFSKitMountedAcceptance(t *testing.T) {
 		t.Fatalf("restart branch=%q", branch)
 	}
 	fsKitCleanGit(t, repo)
+
+	// Keep publishes an ordinary checkout containing the exact visible native
+	// working tree and index, including uncommitted work. It must work after the
+	// private volume and its owning helper have both stopped normally.
+	fsKitWrite(t, filepath.Join(repo, "tracked.txt"), []byte("staged kept work\n"), 0o644)
+	fsKitGit(t, repo, "add", "tracked.txt")
+	keptDirty := []byte("unstaged kept work\n")
+	fsKitWrite(t, filepath.Join(repo, "tracked.txt"), keptDirty, 0o644)
+	keptUntracked := []byte{0, 255, 128, 0, 254}
+	fsKitWrite(t, filepath.Join(repo, "kept-untracked.dat"), keptUntracked, 0o644)
+	keptStatus := fsKitGit(t, repo, "status", "--porcelain=v1", "--untracked-files=all")
+	keptHead := strings.TrimSpace(fsKitGit(t, repo, "rev-parse", "HEAD"))
+	keptIndex := fsKitStorageRead(t, filepath.Join(actualGitDir, "index"))
+	fsKitStorageAction(t, h, repoID, "keep")
+	h.identity(t)
+	h.request(t, http.MethodGet, "/v1/status", nil, &status)
+	kept := desktopAdoptedRepository(t, status, repoID)
+	if kept.State != "local" || kept.LocalKind != "materialized" || kept.LocalPath != repo || !kept.Pinned {
+		t.Fatalf("Keep did not publish an ordinary checkout: %+v", kept)
+	}
+	fsKitOrdinaryCheckout(t, repo)
+	if !h.stop(t) {
+		t.Fatal("normal quit did not detach after local checkout publication")
+	}
+	fsKitOrdinaryCheckout(t, repo)
+	fsKitReadEqual(t, filepath.Join(repo, "tracked.txt"), keptDirty)
+	fsKitReadEqual(t, filepath.Join(repo, "kept-untracked.dat"), keptUntracked)
+	fsKitReadEqual(t, filepath.Join(repo, "binary.dat"), binary)
+	if after := fsKitGit(t, repo, "status", "--porcelain=v1", "--untracked-files=all"); after != keptStatus {
+		t.Fatalf("ordinary kept checkout changed staged/unstaged/untracked state: got %q want %q", after, keptStatus)
+	}
+	if after := strings.TrimSpace(fsKitGit(t, repo, "rev-parse", "HEAD")); after != keptHead || !bytes.Equal(keptIndex, fsKitStorageRead(t, filepath.Join(repo, ".git", "index"))) {
+		t.Fatal("ordinary kept checkout changed HEAD or the index")
+	}
+	fsKitAssertNativeXattrs(t, "kept metadata with app stopped", metadata[3:])
+	fsKitReadEqual(t, filepath.Join(source, "tracked.txt"), []byte("dirty original\n"))
 	if after := snapshotDesktopAdoptionSource(t, source); !reflect.DeepEqual(beforeSource, after) {
-		t.Fatal("mounted operations changed the original checkout bytes, modes, index, refs or configuration")
+		t.Fatal("mounted operations changed the adopted original checkout bytes, modes, index, refs or configuration")
 	}
 	if _, err := os.Stat(ghSentinel); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("manual native workflow invoked GitHub CLI: %v", err)
@@ -990,6 +1045,8 @@ type fsKitAcceptanceHarness struct {
 	capturedIdentity              fsKitAcceptanceIdentity
 	server                        *desktopAdoptionServer
 	preserve                      bool
+	gitTraceEnv                   []string
+	gitTracePath                  string
 }
 
 func (h *fsKitAcceptanceHarness) copyServerImage(t *testing.T) {
@@ -1028,6 +1085,9 @@ func (h *fsKitAcceptanceHarness) copyServerImage(t *testing.T) {
 
 func (h *fsKitAcceptanceHarness) start(t *testing.T) {
 	t.Helper()
+	if os.Getenv("AFS_FSKIT_TRACE_GIT_COMMANDS") == "1" && h.gitTraceEnv == nil {
+		h.installGitTrace(t)
+	}
 	h.server = &desktopAdoptionServer{socket: filepath.Join(h.root, "control.sock"), mountRoot: h.mount, logPath: filepath.Join(h.root, "server.log"), done: make(chan error, 1)}
 	s := h.server
 	log, err := os.OpenFile(s.logPath, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600)
@@ -1039,6 +1099,7 @@ func (h *fsKitAcceptanceHarness) start(t *testing.T) {
 	s.cmd.Stdout, s.cmd.Stderr = log, log
 	s.cmd.Dir = h.root
 	s.cmd.Env = append(os.Environ(), "AFS_E2E_DESKTOP_SERVER=1", "AFS_E2E_DESKTOP_STATE="+h.state, "AFS_E2E_DESKTOP_MOUNT="+h.mount, "AFS_E2E_DESKTOP_SOCKET="+s.socket, "AFS_E2E_DESKTOP_GH="+h.gh, "AFS_E2E_DESKTOP_FSKIT_SOCKET_DIR="+h.prerequisites.socketDir)
+	s.cmd.Env = append(s.cmd.Env, h.gitTraceEnv...)
 	if err := s.cmd.Start(); err != nil {
 		_ = log.Close()
 		t.Fatal(err)
@@ -1057,6 +1118,210 @@ func (h *fsKitAcceptanceHarness) start(t *testing.T) {
 		_, code, err := desktop.Request(ctx, s.socket, http.MethodGet, "/v1/status", nil)
 		return err == nil && code == http.StatusOK, fmt.Sprintf("status=%d err=%v; log=%s", code, err, s.logPath)
 	})
+}
+
+// Instrument only the disposable daemon's PATH. Native Git invoked by the
+// parent fixture and its HTTP backend retain their original environment.
+func (h *fsKitAcceptanceHarness) installGitTrace(t *testing.T) {
+	t.Helper()
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	realGit, err = filepath.Abs(realGit)
+	if err != nil || h.image == "" {
+		t.Fatal("fixture Git tracing requires the copied private helper and absolute original Git")
+	}
+	directory := filepath.Join(h.root, "git-trace-bin")
+	if err := os.Mkdir(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	wrapper := []byte("#!/bin/sh\nexec \"$AFS_E2E_FSKIT_TRACE_IMAGE\" -test.run=^TestFSKitGitTraceHelper$ -- \"$@\"\n")
+	fsKitWrite(t, filepath.Join(directory, "git"), wrapper, 0o700)
+	h.gitTracePath = filepath.Join(h.root, "git-command-categories.jsonl")
+	h.gitTraceEnv = []string{"PATH=" + directory + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"AFS_E2E_FSKIT_TRACE_GIT=1", "AFS_E2E_FSKIT_TRACE_REAL_GIT=" + realGit,
+		"AFS_E2E_FSKIT_TRACE_IMAGE=" + h.image, "AFS_E2E_FSKIT_TRACE_ROOT=" + h.root,
+		"AFS_E2E_FSKIT_TRACE_LOG=" + h.gitTracePath}
+}
+
+type fsKitGitCommandTrace struct {
+	Time        string   `json:"time"`
+	PID         int      `json:"pid"`
+	CWD         string   `json:"cwdClass"`
+	GitDir      string   `json:"gitDirClass"`
+	NoLazyFetch bool     `json:"noLazyFetch"`
+	Args        []string `json:"argumentCategories"`
+}
+
+func fsKitGitFixtureLocation(path, root string) string {
+	if path == "" {
+		return "unset"
+	}
+	if path != root && !strings.HasPrefix(path, root+string(os.PathSeparator)) {
+		return "external"
+	}
+	relative := strings.TrimPrefix(path, root)
+	for _, value := range []struct{ prefix, category string }{
+		{"/state/engine/", "engine"}, {"/state/previews/", "preview"},
+		{"/original", "source"}, {"/remote.git", "remote"}, {"/mount", "catalogue"},
+	} {
+		if strings.HasPrefix(relative, value.prefix) {
+			return value.category
+		}
+	}
+	return "fixture"
+}
+
+func fsKitGitArgumentCategories(args []string) []string {
+	verbs := map[string]bool{"init": true, "clone": true, "fetch": true, "config": true, "remote": true, "add": true,
+		"rev-parse": true, "rev-list": true, "read-tree": true, "ls-tree": true, "ls-files": true, "show": true, "log": true,
+		"cat-file": true, "for-each-ref": true, "show-ref": true, "symbolic-ref": true, "update-ref": true, "branch": true,
+		"checkout": true, "status": true, "diff": true, "diff-index": true, "diff-tree": true, "hash-object": true,
+		"merge-base": true, "check-ref-format": true, "reflog": true, "fsck": true, "version": true}
+	var result []string
+	valueNext := false
+	for _, arg := range args {
+		if len(result) == 128 {
+			result = append(result, "<truncated>")
+			break
+		}
+		if valueNext {
+			result = append(result, "<value>")
+			valueNext = false
+			continue
+		}
+		if arg == "-c" || arg == "-C" || arg == "--git-dir" || arg == "--work-tree" {
+			result = append(result, arg)
+			valueNext = true
+			continue
+		}
+		if verbs[arg] || arg == "HEAD" || arg == "FETCH_HEAD" {
+			result = append(result, arg)
+			continue
+		}
+		if strings.HasPrefix(arg, "--") {
+			key, _, equal := strings.Cut(arg, "=")
+			valid := len(key) <= 80
+			for _, b := range []byte(strings.TrimPrefix(key, "--")) {
+				if !(b >= 'a' && b <= 'z' || b >= '0' && b <= '9' || b == '-') {
+					valid = false
+				}
+			}
+			if valid {
+				if equal {
+					key += "=<value>"
+				}
+				result = append(result, key)
+				continue
+			}
+		}
+		if len(arg) == 2 && arg[0] == '-' && (arg[1] >= 'a' && arg[1] <= 'z' || arg[1] >= 'A' && arg[1] <= 'Z') {
+			result = append(result, arg)
+			continue
+		}
+		result = append(result, "<arg>")
+	}
+	return result
+}
+
+// The wrapper process is replaced by the original Git binary: stdout (which
+// may contain packs/blobs), stderr, exit status, PID and cancellation stay native.
+func TestFSKitGitTraceHelper(t *testing.T) {
+	if os.Getenv("AFS_E2E_FSKIT_TRACE_GIT") != "1" {
+		t.Skip("invoked only by the private acceptance Git wrapper")
+	}
+	args := flag.Args()
+	realGit, root, logPath := os.Getenv("AFS_E2E_FSKIT_TRACE_REAL_GIT"), os.Getenv("AFS_E2E_FSKIT_TRACE_ROOT"), os.Getenv("AFS_E2E_FSKIT_TRACE_LOG")
+	if !filepath.IsAbs(realGit) || !filepath.IsAbs(root) || filepath.Dir(logPath) != root || len(args) == 0 {
+		t.Fatal("invalid private Git trace invocation")
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	gitDir := os.Getenv("GIT_DIR")
+	for i, arg := range args {
+		if arg == "--git-dir" && i+1 < len(args) {
+			gitDir = args[i+1]
+		}
+		if strings.HasPrefix(arg, "--git-dir=") {
+			gitDir = strings.TrimPrefix(arg, "--git-dir=")
+		}
+	}
+	trace := fsKitGitCommandTrace{Time: time.Now().UTC().Format(time.RFC3339Nano), PID: os.Getpid(), CWD: fsKitGitFixtureLocation(cwd, root),
+		GitDir: fsKitGitFixtureLocation(gitDir, root), NoLazyFetch: os.Getenv("GIT_NO_LAZY_FETCH") == "1", Args: fsKitGitArgumentCategories(args)}
+	data, err := json.Marshal(trace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	file, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		t.Fatal("cannot open private Git command trace")
+	}
+	if info, err := file.Stat(); err == nil && info.Size() <= 512<<10 {
+		_, err = file.Write(append(data, '\n'))
+		if err != nil {
+			t.Fatal("cannot record private Git command categories")
+		}
+	}
+	_ = file.Close()
+	if err := syscall.Exec(realGit, append([]string{realGit}, args...), os.Environ()); err != nil {
+		t.Fatal("cannot replace fixture trace helper with original Git")
+	}
+}
+
+func TestFSKitGitTraceHelperExec(t *testing.T) {
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	realGit, err = filepath.Abs(realGit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	image, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	logPath := filepath.Join(root, "git-command-categories.jsonl")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	want, err := exec.CommandContext(ctx, realGit, "--version").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	command := exec.CommandContext(ctx, image, "-test.run=^TestFSKitGitTraceHelper$", "--", "--version")
+	command.Env = append(os.Environ(), "AFS_E2E_FSKIT_TRACE_GIT=1", "AFS_E2E_FSKIT_TRACE_REAL_GIT="+realGit,
+		"AFS_E2E_FSKIT_TRACE_ROOT="+root, "AFS_E2E_FSKIT_TRACE_LOG="+logPath)
+	got, err := command.CombinedOutput()
+	if err != nil || !bytes.Equal(got, want) {
+		t.Fatalf("Git trace changed native output/exit: error=%v got=%q want=%q", err, got, want)
+	}
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var record fsKitGitCommandTrace
+	if err := json.Unmarshal(data, &record); err != nil || !reflect.DeepEqual(record.Args, []string{"--version"}) {
+		t.Fatalf("native Git execution did not record bounded command categories: %v", err)
+	}
+}
+
+func TestFSKitGitArgumentCategoryRedaction(t *testing.T) {
+	args := []string{"-c", "credential.helper=fixture-secret", "--git-dir=/private/secret/path", "fetch", "https://user:password@example.invalid/private.git", "--format=%ct", "HEAD"}
+	got := fsKitGitArgumentCategories(args)
+	want := []string{"-c", "<value>", "--git-dir=<value>", "fetch", "<arg>", "--format=<value>", "HEAD"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("command categories=%v want %v", got, want)
+	}
+	encoded, _ := json.Marshal(got)
+	for _, secret := range []string{"fixture-secret", "password", "example.invalid", "/private/secret"} {
+		if strings.Contains(string(encoded), secret) {
+			t.Fatal("argument values escaped into fixture trace")
+		}
+	}
 }
 
 func fsKitAcceptanceDaemonCommand(image string, args ...string) *exec.Cmd {
@@ -1111,9 +1376,42 @@ func (h *fsKitAcceptanceHarness) request(t *testing.T, method, path string, body
 		t.Fatalf("native desktop %s %s: %d %s; log=%s", method, path, code, data, h.server.logPath)
 	}
 	if response != nil {
-		if err := json.Unmarshal(data, response); err != nil {
+		if err := fsKitDecodeResponse(data, response); err != nil {
 			t.Fatal(err)
 		}
+	}
+}
+
+// API responses are complete snapshots. Reusing struct/slice capacity during
+// JSON decoding otherwise retains omitted omitempty values from older states.
+func fsKitDecodeResponse(data []byte, response any) error {
+	target := reflect.ValueOf(response)
+	if target.Kind() != reflect.Pointer || target.IsNil() {
+		return json.Unmarshal(data, response) // Preserve standard invalid-target errors.
+	}
+	fresh := reflect.New(target.Elem().Type())
+	if err := json.Unmarshal(data, fresh.Interface()); err != nil {
+		return err
+	}
+	target.Elem().Set(fresh.Elem())
+	return nil
+}
+
+func TestFSKitResponseDropsOmittedPriorState(t *testing.T) {
+	status := desktop.Status{Mounted: true, Account: &desktop.Account{Login: "fixture"},
+		Repositories: []desktop.Repository{{ID: "owner/project", State: "local", Pinned: true, DownloadedBytes: 107,
+			LocalPath: "/private/fixture/project", LocalKind: "materialized", Error: "earlier refusal"}},
+		Operations: []desktop.Operation{{ID: "fixture-operation", Status: "failed", Error: "earlier refusal"}}}
+	data := []byte(`{"mounted":true,"repositories":[{"id":"owner/project","state":"virtual","pinned":false,"downloadedBytes":0}],"operations":[{"id":"fixture-operation","status":"complete"}]}`)
+	if err := fsKitDecodeResponse(data, &status); err != nil {
+		t.Fatal(err)
+	}
+	if status.Account != nil || len(status.Repositories) != 1 || status.Repositories[0].State != "virtual" || status.Repositories[0].Pinned || status.Repositories[0].DownloadedBytes != 0 || status.Repositories[0].LocalPath != "" || status.Repositories[0].LocalKind != "" || status.Repositories[0].Error != "" || len(status.Operations) != 1 || status.Operations[0].Error != "" {
+		t.Fatalf("complete API snapshot retained omitted fields from an earlier response: %+v", status)
+	}
+	before := status
+	if err := fsKitDecodeResponse([]byte(`{"mounted":false,"repositories":[`), &status); err == nil || !reflect.DeepEqual(status, before) {
+		t.Fatal("failed API decoding changed the previous complete snapshot")
 	}
 }
 
@@ -1280,7 +1578,7 @@ func (h *fsKitAcceptanceHarness) validateCleanupInventory(mounts []fsKitAcceptan
 	const uncertain = "cached inventory does not prove the same owned native session or its complete absence"
 	captured := h.capturedIdentity
 	known := captured.fsid != ([2]int32{})
-	if known && (captured.root != h.mount || captured.owner != uid || captured.kind == "" || !h.sourceMatches(captured.source)) {
+	if known && (captured.root != h.nativeMountRoot() || captured.owner != uid || captured.kind == "" || !h.sourceMatches(captured.source)) {
 		return false, errors.New(uncertain)
 	}
 	found := false
@@ -1301,6 +1599,12 @@ func (h *fsKitAcceptanceHarness) validateCleanupInventory(mounts []fsKitAcceptan
 // Preserve complete, bounded diagnostic lines before disposable cleanup.
 func (h *fsKitAcceptanceHarness) logFailure(t *testing.T) {
 	t.Helper()
+	if h.gitTracePath != "" {
+		data, err := os.ReadFile(h.gitTracePath)
+		if err == nil && len(data) <= 512<<10 {
+			t.Logf("private fixture Git command categories (no argument values):\n%s", data)
+		}
+	}
 	file, err := os.Open(h.server.logPath)
 	if err != nil {
 		return
@@ -1439,20 +1743,85 @@ func (h *fsKitAcceptanceHarness) resourceAttached(t *testing.T) bool {
 	return attached
 }
 
+// A normal lifecycle operation may replace the private mount. This capture is
+// separate from cleanup: cleanup never accepts an unexpected replacement FSID.
+// Renewing a capture requires the complete cached inventory to prove both the
+// old FSID's absence and the sole exact owned replacement before updating it.
+func (h *fsKitAcceptanceHarness) validateCurrentIdentity(mounts []fsKitAcceptanceIdentity, uid uint32) (fsKitAcceptanceIdentity, error) {
+	const uncertain = "cached inventory does not prove a sole owned private mount and the previous identity's absence"
+	previous := h.capturedIdentity
+	known := previous.fsid != ([2]int32{})
+	if known && (previous.root != h.nativeMountRoot() || previous.owner != uid || previous.kind == "" || !h.sourceMatches(previous.source)) {
+		return fsKitAcceptanceIdentity{}, errors.New(uncertain)
+	}
+	var current fsKitAcceptanceIdentity
+	found := false
+	for _, identity := range mounts {
+		if identity.root == h.mount {
+			return fsKitAcceptanceIdentity{}, errors.New("the chosen catalogue folder is itself mounted; it must remain an ordinary host directory")
+		}
+		if identity.root == h.nativeMountRoot() && h.sourceMatches(identity.source) && identity.fsid != ([2]int32{}) && identity.kind != "" && identity.owner == uid {
+			if found {
+				return fsKitAcceptanceIdentity{}, errors.New(uncertain)
+			}
+			current, found = identity, true
+		}
+	}
+	if !found || known && previous.kind != current.kind {
+		return fsKitAcceptanceIdentity{}, errors.New(uncertain)
+	}
+	for _, identity := range mounts {
+		fixturePath := identity.root == h.root || strings.HasPrefix(identity.root, h.root+string(os.PathSeparator))
+		previousFSID := known && identity.fsid == previous.fsid
+		currentFSID := identity.fsid == current.fsid
+		if !fixturePath && !previousFSID && !currentFSID && !h.sourceMatches(identity.source) {
+			continue
+		}
+		if identity != current || previous != current && previousFSID {
+			return fsKitAcceptanceIdentity{}, errors.New(uncertain)
+		}
+	}
+	return current, nil
+}
+
 func (h *fsKitAcceptanceHarness) identity(t *testing.T) fsKitAcceptanceIdentity {
 	t.Helper()
 	mounts, err := fsKitAcceptanceMounts()
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, identity := range mounts {
-		if identity.root == h.mount && h.sourceMatches(identity.source) && identity.fsid != ([2]int32{}) && identity.kind != "" && identity.owner == uint32(os.Getuid()) {
-			h.capturedIdentity = identity
-			return identity
+	current, err := h.validateCurrentIdentity(mounts, uint32(os.Getuid()))
+	if err != nil {
+		t.Fatalf("capture owned private FSKit mount at %s: %v", h.nativeMountRoot(), err)
+	}
+	h.capturedIdentity = current
+	return current
+}
+
+func (h *fsKitAcceptanceHarness) nativeMountRoot() string {
+	return filepath.Join(h.state, "native-catalogue", "volume")
+}
+
+func fsKitOrdinaryCheckout(t *testing.T, path string) {
+	t.Helper()
+	for _, directory := range []string{path, filepath.Join(path, ".git")} {
+		info, err := os.Lstat(directory)
+		if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+			t.Fatalf("kept checkout is not an ordinary directory: %s error=%v", directory, err)
 		}
 	}
-	t.Fatalf("kernel has no owned FSKit mount at %s using private resource %s", h.mount, filepath.Join(h.state, "FSKit"))
-	return fsKitAcceptanceIdentity{}
+	mounts, err := fsKitAcceptanceMounts()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, identity := range mounts {
+		if identity.root == path || strings.HasPrefix(identity.root, path+string(os.PathSeparator)) {
+			t.Fatalf("kept ordinary checkout contains a mounted filesystem: %s", identity.root)
+		}
+	}
+	if actual := strings.TrimSpace(fsKitGit(t, path, "rev-parse", "--absolute-git-dir")); actual != filepath.Join(path, ".git") {
+		t.Fatalf("kept checkout depends on external Git storage: %s", actual)
+	}
 }
 
 func (h *fsKitAcceptanceHarness) session(t *testing.T) [32]byte {

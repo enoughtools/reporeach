@@ -94,7 +94,12 @@ func (fs *FileSystem) GetXattr(ctx context.Context, op *fuseops.GetXattrOp) erro
 		return err
 	}
 	if n.path == "" {
-		backend, err := fs.activateRepo(ctx, n.repo)
+		if previewDormant(n) {
+			// Git tree objects carry no extended attributes. Existing local
+			// metadata is served by the writable view, never by a preview.
+			return fuse.ENOATTR
+		}
+		n, backend, err := fs.activateNode(ctx, op.Inode, n)
 		if err != nil {
 			return err
 		}
@@ -136,7 +141,11 @@ func (fs *FileSystem) ListXattr(ctx context.Context, op *fuseops.ListXattrOp) er
 		return err
 	}
 	if n.path == "" {
-		backend, err := fs.activateRepo(ctx, n.repo)
+		if previewDormant(n) {
+			op.BytesRead = 0
+			return nil
+		}
+		n, backend, err := fs.activateNode(ctx, op.Inode, n)
 		if err != nil {
 			return err
 		}
@@ -194,8 +203,13 @@ func (fs *FileSystem) SetXattr(ctx context.Context, op *fuseops.SetXattrOp) erro
 	if err != nil {
 		return err
 	}
+	release, err := fs.beginMutation(n.repo)
+	if err != nil {
+		return err
+	}
+	defer release()
 	if n.path == "" {
-		backend, err := fs.activateRepo(ctx, n.repo)
+		n, backend, err := fs.activateNode(ctx, op.Inode, n)
 		if err != nil {
 			return err
 		}
@@ -221,8 +235,13 @@ func (fs *FileSystem) RemoveXattr(ctx context.Context, op *fuseops.RemoveXattrOp
 	if err != nil {
 		return err
 	}
+	release, err := fs.beginMutation(n.repo)
+	if err != nil {
+		return err
+	}
+	defer release()
 	if n.path == "" {
-		backend, err := fs.activateRepo(ctx, n.repo)
+		n, backend, err := fs.activateNode(ctx, op.Inode, n)
 		if err != nil {
 			return err
 		}

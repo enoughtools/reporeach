@@ -131,7 +131,8 @@ final class RepositoryStore: ObservableObject {
         if let selectedRepositoryID, !loaded.repositories.contains(where: { $0.id == selectedRepositoryID }) { self.selectedRepositoryID = nil }
         if let ownerFilter, !owners.contains(where: { $0.caseInsensitiveCompare(ownerFilter) == .orderedSame }) { self.ownerFilter = nil }
         let snapshot = FinderStatusSnapshot(mountRoot: loaded.mountRoot, repositories: loaded.repositories.filter { $0.isEnabled(in: loaded.organizations) }.map {
-            FinderRepositoryStatus(id: $0.id, state: $0.state, pinned: $0.pinned, error: $0.error)
+            FinderRepositoryStatus(id: $0.id, state: $0.state, pinned: $0.pinned, error: $0.error,
+                                   localPath: $0.localPath, localKind: $0.localKind)
         })
         if snapshot != finderSnapshot {
             do {
@@ -243,7 +244,7 @@ final class RepositoryStore: ObservableObject {
         guard !demoMode else { return }
         let panel = NSOpenPanel()
         panel.title = "Choose your repository folder"
-        panel.message = "Choose an empty folder, or create a new one. RepoReach will display your repositories here."
+        panel.message = "Choose where RepoReach groups your repositories. Existing local checkouts stay in their original folders."
         panel.prompt = "Use Folder"; panel.canChooseDirectories = true; panel.canChooseFiles = false
         panel.canCreateDirectories = true; panel.allowsMultipleSelection = false
         if let current = status?.mountRoot { panel.directoryURL = URL(fileURLWithPath: current).deletingLastPathComponent() }
@@ -261,14 +262,16 @@ final class RepositoryStore: ObservableObject {
 
     func openFolder(_ repository: RepositoryRecord? = nil) {
         guard let status else { return }
-        guard status.mounted || demoMode else { errorMessage = "Connect your repository folder first."; return }
         var url = URL(fileURLWithPath: status.mountRoot, isDirectory: true)
         if let repository {
-            guard isRepositoryEnabled(repository) else { errorMessage = "Enable this repository and its group to show its folder in Finder."; return }
-            guard ActionRoute.isValidRepositoryID(repository.id) else { return }
-            url.appendPathComponent(repository.owner, isDirectory: true); url.appendPathComponent(repository.name, isDirectory: true)
+            if !repository.isLocal {
+                guard status.mounted || demoMode else { errorMessage = "Enable virtual folders to open this repository."; return }
+                guard isRepositoryEnabled(repository) else { errorMessage = "Enable this repository and its group to show its folder in Finder."; return }
+            }
+            guard let folderURL = repository.folderURL(in: status.mountRoot) else { return }
+            url = folderURL
         }
-        if !NSWorkspace.shared.open(url), !demoMode { errorMessage = "Finder could not open this folder. Check that your repository folder is connected." }
+        if !NSWorkspace.shared.open(url), !demoMode { errorMessage = "Finder could not open this folder. Check that it is still available on your Mac." }
     }
 
     func showSettings() { showSettingsHandler?() }

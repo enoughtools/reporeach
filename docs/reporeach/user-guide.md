@@ -1,6 +1,8 @@
-# Using the RepoReach beta
+# Using RepoReach
 
-RepoReach shows selected Git repositories under a folder you choose. GitHub sign-in is optional: add a Git remote or existing local checkout directly, or connect GitHub to discover accessible repositories.
+RepoReach groups repositories under a folder you choose. GitHub sign-in is
+optional: add a remote, adopt an existing checkout, or connect GitHub to discover
+accessible repositories.
 
 ```text
 Repositories/
@@ -10,87 +12,167 @@ Repositories/
     shared-project/
 ```
 
-For GitHub discovery, owner folders come from repository ownership, so organizations appear alongside personal accounts. Access is limited to repositories returned to the authorized GitHub credential. Organization approval, SSO, or token restrictions can make the list smaller than the one visible on GitHub's website. Manually added sources join the catalogue under their owner/repository labels.
+This guide describes the native development build. Its disposable mounted primary
+checks have passed on macOS 27.0.1 ARM64, including dirty Keep and local access
+after app shutdown. The complete cold storage fixture also passed metadata-only
+browsing, Keep, offline reads, safe Free refusal, clean cleanup, and reacquisition.
+Actual cold Finder navigation and the signed combined local9 build still need
+validation; see the
+[acceptance record](fskit-acceptance.md). Historical beta.3 downloads retain their
+macFUSE installation,
+separate-clone adoption, and cache-based Keep behavior. Development changes do
+not alter those releases.
 
-## Set up
+## Set up the native build
 
-1. Install the build for your Mac's architecture. The beta targets macOS 13 or later. Consult the release manifest for whether the download has a Developer ID signature and Apple notarization; an ad-hoc development build does not provide those assurances.
-2. Install [macFUSE](https://macfuse.io/) separately and complete its kernel backend setup. The current beta uses the kernel backend; an FSKit-only setup is insufficient. Apple Silicon setup can require Recovery and Reduced Security. RepoReach does not bundle or install a filesystem driver.
-3. Open RepoReach. Add a repository from its Git remote or local path, or optionally sign in to GitHub for discovery. GitHub sign-in uses the official GitHub CLI and opens GitHub's browser authorization flow.
-4. Choose a dedicated empty folder, then connect it. The default is `~/Repositories`. Existing files must not be hidden by the mount; a nonempty folder is refused.
-5. Enable the RepoReach Finder extension if you want Finder badges and context-menu actions. Use the app's extension-settings shortcut; the location of Finder extension settings varies by macOS version.
+1. Use the native build for macOS 26 or later. Its FSKit extension is bundled;
+   no separate macFUSE installation is required. Consult the build manifest for
+   signing and notarization status.
+2. Open RepoReach and enable its File System Extension in macOS settings when
+   requested. Enable the Finder extension separately for badges and actions.
+3. Choose your repository folder, then **Enable Virtual Folders**. Existing files
+   can stay there: the root and organization folders are ordinary directories.
+   A conflicting repo name is refused rather than replacing a folder or foreign
+   link. Keep the chosen folder separate from private app storage.
+4. Add a repo or optionally connect GitHub through its official CLI and browser
+   authorization flow.
 
-The chosen folder is a FUSE mount, not an Apple File Provider location. It can be placed outside `~/Library/CloudStorage`. For beta testing, use a dedicated folder on local internal storage; other location types have not been validated. A folder and the app's private state directory must remain separate. Changing the folder temporarily disconnects the catalogue and updates managed Git worktree locations. Read [macOS setup](platform-setup.md) for driver approval, opening an unnotarized beta, and Finder extension settings for your macOS version.
+Virtual repos link into a hidden app-managed filesystem. Adopted external
+checkouts link to their original folders. **Keep Downloaded** replaces a virtual
+entry with an ordinary local checkout. This supports mixed local and virtual
+repos without mounting over the entire chosen folder. Locations other than
+local internal storage still need testing. See [Native FSKit](native-fskit.md)
+for development requirements and proof status.
 
-## Add a Git source without signing in
+## Add or adopt without signing in
 
-Choose **Add Repository**, paste a Git remote or use **Choose Existing Folder**, then select **Adopt Repository**. Expand **Optional details** to set an owner label, repository name, or branch.
+Choose **Add Repository**, paste a remote or use **Choose Existing Folder**, then
+select **Adopt Repository**. Optional details set owner and repo labels or a
+branch for a virtual source. Local sources default to the `local` group.
 
-Add an HTTPS or SSH Git remote, an SSH address such as `git@example.com:team/project.git`, a local bare repository, or an absolute path to an existing checkout. Standard HTTP, `git://`, and local `file://` sources are also accepted. Owner/group and repository names can be inferred from the source or supplied explicitly; local paths default to the `local` group. Choose an original Git folder outside RepoReach's mount and private storage folders. Manual sources use your native Git credential helpers or SSH setup; configure access to a private server in Git before using it in RepoReach. Do not put credentials in an HTTP URL: those URLs are refused.
+HTTPS, SSH, SSH-style addresses such as `git@example.com:team/project.git`,
+`git://`, absolute local paths, and local `file://` sources are accepted. Manual
+sources use native Git credential helpers or SSH configuration. Configure private
+server access in Git first. Credentials embedded in HTTP URLs are refused.
 
-Adding a source registers metadata without cloning its file contents. Preparation is deferred until you enter it or use Prepare or Keep Downloaded. By default, remote sources use the advertised default branch, and an existing local checkout supplies the branch of its committed `HEAD`. Preparation acquires that branch's committed state at the time it runs. An optional branch override is available for advanced use. A source without a usable default branch may need an explicit branch; an empty repository needs committed data before it can be added.
+An existing nonbare checkout is adopted in place. Its branch or detached HEAD,
+staged and unstaged changes, untracked files, index, and configuration are retained.
+RepoReach neither moves it nor creates a separate managed clone. A checkout
+already inside the chosen catalogue stays there; an external one receives a direct
+catalogue link. Adopted originals work after app quit and cannot be removed by
+Free Up Space. Change their branches through normal Git operations.
 
-An existing checkout is a source for a **separate virtual checkout**. Adding and preparing it does not move or replace the original folder, reset its index, or import its staged changes, uncommitted edits, or untracked files. Committed history reachable from the selected source ref can be acquired even if it has not been pushed elsewhere. Keep using the original folder for work that has not been committed there. This feature does not migrate dirty work or back up the source folder.
-
-Refresh reads from the chosen source. A local path remains a local Git source; adding it does not automatically switch the new checkout's upstream to the original folder's cloud remote. Explicit Git pushes follow the configured remote and its normal permissions and receive policy.
+A remote or local bare repo becomes a virtual entry. Native Git inspects the
+source branch; an explicit branch can be supplied when needed. Empty repos need
+committed data. Browsing and preparation do not change local source files or
+index. Legacy entries retain their separate virtual checkout on upgrade rather
+than silently becoming adopted originals.
 
 ## Choose what appears
 
-Use **Show repository in Finder** in a repository's details or **Owners & organizations** in Settings to choose which entries appear in the virtual catalogue. The sidebar lists **Repository groups**, with a **Show group in Finder** control for the selected group. Turning a repository or owner off hides its folders, blocks new preparation through the catalogue, and pauses its background pin downloads. It retains the managed clone, cache, overlay, pin intent, and other local data. Use Free Up Space separately when you want to reclaim storage.
+Use **Show in catalogue** on a repo, **Owners & organizations** in Settings, or
+**Show group in catalogue** for the selected group. Group and repo choices persist
+independently: enabling a group leaves individually disabled repos hidden.
+Rediscovery retains those choices and manual sources. GitHub organization approval,
+SSO, and token limits can restrict the discovered list.
 
-Per-repository disabled choices survive GitHub rediscovery. Turning an owner back on re-exposes eligible repos while leaving individually disabled ones hidden. Owner controls also apply to manually added repos with that owner label.
-
-A switch change is refused while an affected explicit operation or lazy activation is busy. Cancel the operation or wait and retry. Existing open files can continue to work and download missing contents after their entry is hidden. Visibility controls are not an access-revocation mechanism or an offline/network firewall.
+Hiding removes an owned link or virtual visibility and pauses pin downloads.
+Local data is retained. An ordinary checkout at its physical path remains visible
+there, even if its group is hidden; this control does not remove real directories.
+Use Free Up Space separately for eligible app-created checkouts. A busy change
+can be refused; close active files or wait and retry. Visibility does not revoke
+credentials or prevent all existing processes from accessing data.
 
 ## Browse and work
 
-Listing the catalogue and owner folders uses saved metadata and does not clone every repository. Entering a repository prepares a blobless Git clone and a committed file-tree index. Reading a file downloads its contents when they are missing from the local cache. Preview tools, editors, searches, and build tools can read files too, so their access can trigger downloads.
+Root and organization listings use saved metadata. Within a dormant GitHub repo,
+RepoReach acquires tree metadata in batches and loads deeper trees as needed,
+without preparing every writable checkout or downloading file bodies. Complete
+cached trees are available offline. Manual sources use separate shallow filtered
+Git previews. A server ignoring filters can transfer more objects; an exact-size
+request can prepare content when Git does not know that size locally.
 
-On a Git server or local transport that does not honor partial-clone filters, preparation can transfer more Git objects than it does on a supporting server. The visible tree still uses the managed filesystem and local overlay.
+Reading a file promotes its preview to writable storage and downloads missing
+contents. Previews, editors, searches, and build tools also read files, so their
+access can trigger preparation or downloads. Promotion preserves the selected
+preview commit. Listing the synthetic `.git` entry needs no preparation; opening
+it prepares the real Git directory.
 
-The mounted repository is writable. Local file changes live in ArtifactFS's overlay until ordinary Git operations record them. A synthesized `.git` file points to the real Git directory in the app's state folder. You can use normal Git commands, including staging and committing, within the mounted repository. Configure your Git author name and email as you would for any checkout. The watcher updates the virtual base when local `HEAD` changes and reconciles the overlay.
+Virtual files are writable through ArtifactFS's overlay. Normal Git commands can
+stage and commit through the `.git` pointer. Configure your author identity as for
+any checkout. The native virtual view currently retains a persistent baseline:
+background HEAD watching and remote refresh are disabled, and fetching commits
+does not automatically rebuild the visible tree. Test branch changes and your
+editor/build workflow before relying on it for important work.
 
-Root, owner, and repository-folder browsing leaves repositories dormant. Inside a prepared repository, checking a file's attributes can download its contents when Git does not know the blob size. Finder previews, indexing, and file metadata requests can therefore trigger downloads before you explicitly open a file. This beta does not provide metadata-only browsing for every file.
-
-Changes are not automatically committed or pushed. Use Git to publish work. “Sync” or Refresh refers to acquiring Git data from the source, not uploading each saved file. This beta does not provide a complete replacement for a Git client, nor a backup of every file in your development environment.
+Adopted and kept checkouts are ordinary Git folders; files, index, and branch
+changes are independent of the virtual service. RepoReach does not automatically
+commit or push changes in either kind of repo.
 
 ## Repository actions
 
-| Action | Beta behavior |
+| Action | Native development behavior |
 | --- | --- |
-| Discover repositories | Requests the accessible repository list from GitHub and updates the catalogue. Previously known entries missing from the result are retained with a warning so local data is not orphaned. |
-| Add repository | Registers a manual Git source without requiring GitHub sign-in. Clone preparation waits until entry or a preparation/download action. |
-| Repository / owner switch | Changes catalogue visibility and background pin eligibility without deleting data. Individual exclusions remain when an owner is re-enabled. |
-| Open / prepare | Acquires Git metadata as needed from the selected source/ref. Reopening an already prepared repo preserves its local branch and index. |
-| Refresh Repository | Explicitly requests a remote fetch. Use ordinary Git operations to merge, rebase, or update the working branch as appropriate. |
-| Keep Downloaded | Downloads and verifies the unique Git blobs in the current committed tree. Completion is recorded only after checking that `HEAD` did not change during the download. |
-| Cancel | Stops an active repository operation. Already prepared data and downloaded cache contents remain available for retry. |
-| Free Up Space | Checks for locally valuable state before removing the repository's engine-owned clone, overlay, tree metadata, and blob cache. The discovered repo entry remains in the catalogue. |
+| Discover repositories | Updates GitHub entries; missing known entries and local data are retained. |
+| Add repository | Registers remote/bare sources virtually or adopts existing checkouts in place without GitHub sign-in. |
+| Repo / owner switch | Changes virtual or owned-link visibility and pin eligibility; retains directories and data. |
+| Open / prepare | Opens local checkouts directly; acquires virtual metadata or writable storage as needed. |
+| Refresh Repository | Replaces an unprepared preview after safe disconnection; fetches prepared Git data without resetting its visible baseline. Local checkouts fetch their own remotes. |
+| Keep Downloaded | Hydrates the current tree and safely publishes a local checkout with current files and existing Git state. |
+| Cancel | Stops the active operation; completed cache and necessary recovery data remain. |
+| Free Up Space | Returns app-created checkouts or managed virtual storage to on-demand entries after recovery checks. Adopted originals cannot be freed. |
 
-**Keep Downloaded covers the current committed tree.** It does not fetch every historical file version, LFS object, or submodule repository. Commands that need an uncached historical blob can still need access to the source. Submodules and `.gitattributes` checkout filters such as Git LFS are explicitly refused for offline pinning. The beta does not implement LFS object hydration; Git pointer files are not a promise that the corresponding payload is available offline.
+Keep preserves staged, unstaged, and untracked work in the virtual view without
+resetting or publishing it. It copies the existing Git directory, index, and refs,
+and verifies file data and supported local metadata. A verified private rollback
+copy remains until successful Free cleanup, so conversion uses additional space.
 
-Pin intent is saved. While the service runs, it checks visible enabled pinned repositories for a changed local `HEAD` and downloads the new committed tree. Disabled entries pause that background work. After a restart, prepared repositories become available while pin completeness is verified again. A kept repo can therefore temporarily need attention or access to its source after changing branches or restarting with incomplete cache data.
+**Keep covers the current checkout, not all offline history.** Uncached historical
+blobs may still need the remote. Submodules and filters such as Git LFS are refused;
+a pointer file does not mean its payload is available. Enabled pinned virtual
+entries receive current-tree availability checks while the service runs. Ordinary
+local files do not depend on that pin loop.
 
 ## When Free Up Space is refused
 
-Free Up Space is deliberately conservative. The implementation checks overlay files and deletions, staged changes, local refs and reflogs, unreachable Git objects, locks and in-progress operations, custom local Git configuration and hooks, local ignore and attribute rules, and ownership of storage paths. A fresh remote fetch must establish that the checked local history is reachable from remote branches or tags. A failed or canceled verification retains repository data.
+Free can refuse changed/staged/untracked/ignored files or folders, unpushed refs
+or reflog history, unreachable objects, custom Git configuration or hooks, shared
+Git storage, extended metadata such as Finder tags or resource forks, and active
+file access. A fresh remote check must prove recoverability. Failed or canceled
+checks retain the checkout; network failure can prevent freeing it.
 
-Commit and push work you want to preserve, or archive it yourself, then retry. The beta does not silently upload ignored files, force a push, or discard local work to satisfy this action. A network failure can also prevent freeing a repository because recoverability cannot be verified.
+Preserve local data and publish work you intend to recover before retrying.
+RepoReach does not upload ignored files, force a push, or discard work to make Free
+succeed. Adopted originals are always retained; manage their space through your
+normal backup and Git workflow.
 
-The catalogue is temporarily unmounted during the safety check, including when a request is refused, then remounted if it was previously connected. Open editors or terminals may need to reopen their folder. A busy unmount is refused rather than forced.
+Virtual access temporarily disconnects during handoffs and checks. Busy unmounts
+are refused rather than forced. Journals let startup finish cleanup or restore the
+previous state after interruption. Uncertain ownership, changed files, or failed
+cleanup retain data and report recovery needs; incomplete cleanup is not reported
+as fully reclaimed space. An interrupted Keep's retained standalone checkout path
+remains in status after restart, and partial Free cleanup can resume. Preserve
+those recovery folders until recovery succeeds. Keep independent backups for
+important work.
 
-Successful removal also discards the managed clone's local configuration and cached data. Keep independent backups for anything that is not reconstructable from the remote. These checks cover specified storage and Git states; they are not a guarantee against all external programs, concurrent writes, or filesystem failures.
+## Lifecycle and upgrades
 
-## Lifecycle and limits
+Closing the window leaves RepoReach running without a menu-bar item. **Pause
+Virtual Folders** disconnects virtual access. Quitting stops the owned service;
+reopen the app to restore virtual links. Ordinary adopted and kept checkouts remain
+usable. Launch at login is optional.
 
-Closing the management window leaves RepoReach and its service running, with no menu-bar item. Quitting the app stops its owned service; disconnected virtual files are not ordinary stored files. Reopen RepoReach to restore the connection. Launch at login is optional and may require approval in macOS settings.
+Discovery targets `github.com` and one selected GitHub CLI account. Manual sources
+can use other hosts with native Git auth. There is no GitHub Enterprise discovery
+selector, independent cloud backup restoration, or remote repo creation by writing
+owner folders. Cross-repository filesystem moves are refused.
 
-Automatic discovery currently targets `github.com` and one selected GitHub CLI account. Manual sources can use other Git hosts or local repositories, with native Git/SSH authentication. The beta does not expose a GitHub Enterprise discovery selector, restore removed repositories from an independent cloud backup, or create repos by writing owner-level catalogue folders. Cross-repository moves and filesystem extended attributes are not implemented by the catalogue layer. Test your editor and build workflow before relying on the beta for important work.
+Schema 3 records ordinary checkout ownership. Schemas 1 and 2 are accepted and
+upgraded on save without deleting sources or managed data. Older builds may not
+read upgraded state. Stop the app and service for a consistent backup of
+`~/Library/Application Support/RepoReach` before upgrading. Downgrading needs
+compatible saved state or manual recovery, with newer work preserved first; no
+automatic downgrade conversion exists.
 
-## Upgrading from beta.1
-
-The current catalogue uses schema version 2 to preserve manual sources and visibility settings. An existing version 1 catalogue is read and upgraded automatically on save, without deleting repository storage or source folders.
-
-Older betas cannot read the migrated catalogue. Preserve the app state rather than deleting it to make a downgrade launch. Before upgrading, stop RepoReach and its service if you want a consistent backup of `~/Library/Application Support/RepoReach`. Returning to an older beta requires a compatible pre-upgrade backup or a separate manual recovery/import process; first preserve any work added since that backup. There is no automatic downgrade conversion.
-
-For credential and data details, read [Privacy and authentication](privacy-auth.md). For source builds, read [Building and releasing](releasing.md).
+Read [Privacy and authentication](privacy-auth.md) for credential/data details
+and [Building and releasing](releasing.md) for builds.

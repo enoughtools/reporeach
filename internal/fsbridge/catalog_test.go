@@ -36,6 +36,7 @@ type bridgeCatalogFixture struct {
 	backend  *fusefs.ArtifactFuse
 	hydrator *bridgeCatalogHydrator
 	content  []byte
+	config   model.RepoConfig
 }
 
 // This fixture satisfies the canonical hydrator interface and keeps the blob
@@ -108,7 +109,7 @@ func newBridgeCatalogFixtureWithSizeState(t *testing.T, id, sizeState string) br
 	resolver := &fusefs.Resolver{Snapshot: snap, Overlay: ov}
 	resolver.SetGeneration(gen)
 	engine := &fusefs.Engine{Repo: cfg, Resolver: resolver, Overlay: ov, Hydrator: hydrator}
-	return bridgeCatalogFixture{backend: fusefs.NewArtifactFuse(cfg, resolver, engine), hydrator: hydrator, content: content}
+	return bridgeCatalogFixture{backend: fusefs.NewArtifactFuse(cfg, resolver, engine), hydrator: hydrator, content: content, config: cfg}
 }
 
 // Separate wire structs ensure that these tests exercise the HTTP protocol and
