@@ -267,9 +267,17 @@ func (h *Handler) dispatch(ctx context.Context, r Request) (Response, error) {
 			defer state.mu.RUnlock()
 			switch fs := h.filesystem.(type) {
 			case *catalogfs.FileSystem:
-				op.Attributes, err = fs.GetFileHandleAttributes(ctx, inode, handle)
+				if r.RequireSize {
+					op.Attributes, err = fs.GetFileHandleAttributes(ctx, inode, handle)
+				} else {
+					op.Attributes, known, err = fs.GetFileHandleMetadataAttributes(ctx, inode, handle)
+				}
 			case *fusefs.ArtifactFuse:
-				op.Attributes, err = fs.GetFileHandleAttributes(ctx, inode, handle)
+				if r.RequireSize {
+					op.Attributes, err = fs.GetFileHandleAttributes(ctx, inode, handle)
+				} else {
+					op.Attributes, known, err = fs.GetFileHandleMetadataAttributes(ctx, inode, handle)
+				}
 			default:
 				err = syscall.ENOSYS
 			}

@@ -1418,6 +1418,11 @@ func inodeAttrs(mode uint32, size uint64, typ string, mtime time.Time, ctime tim
 			size = 4096
 		}
 	case "symlink":
+		// A raw Git symlink mode has no permission bits. An explicit local
+		// chmod stores permissions alone, so mode 000 remains distinguishable.
+		if mode == 0o120000 {
+			m = 0o644
+		}
 		m |= os.ModeSymlink
 	}
 	return fuseops.InodeAttributes{

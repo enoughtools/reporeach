@@ -12,16 +12,13 @@ Repositories/
     shared-project/
 ```
 
-This guide describes the native development build. Its disposable mounted primary
-checks have passed on macOS 27.0.1 ARM64, including dirty Keep and local access
-after app shutdown. The complete cold storage fixture also passed metadata-only
-browsing, Keep, offline reads, safe Free refusal, clean cleanup, and reacquisition.
-Actual cold Finder navigation and the signed combined local9 build still need
-validation; see the
+This guide describes native development source. The signed local9 build passed
+mounted storage fixtures on macOS 27.0.1 ARM64, and local10 Finder checks verified
+folder traversal without permission badges. Later read-only preview and Finder
+action fixes still need final combined local12 validation; see the
 [acceptance record](fskit-acceptance.md). Historical beta.3 downloads retain their
-macFUSE installation,
-separate-clone adoption, and cache-based Keep behavior. Development changes do
-not alter those releases.
+macFUSE installation, separate-clone adoption, and cache-based Keep behavior.
+Development changes do not alter those releases or establish release readiness.
 
 ## Set up the native build
 
@@ -90,13 +87,16 @@ RepoReach acquires tree metadata in batches and loads deeper trees as needed,
 without preparing every writable checkout or downloading file bodies. Complete
 cached trees are available offline. Manual sources use separate shallow filtered
 Git previews. A server ignoring filters can transfer more objects; an exact-size
-request can prepare content when Git does not know that size locally.
+request can fetch the selected file when Git does not know its size locally.
+Native macOS opens can issue such size requests even before you read the file.
 
-Reading a file promotes its preview to writable storage and downloads missing
-contents. Previews, editors, searches, and build tools also read files, so their
-access can trigger preparation or downloads. Promotion preserves the selected
-preview commit. Listing the synthetic `.git` entry needs no preparation; opening
-it prepares the real Git directory.
+Reading a file downloads its selected immutable contents through a separate
+shallow Git source and shared cache, without preparing a writable checkout.
+Cached contents work offline. Finder thumbnails, editors, searches, and build
+tools can trigger these downloads too. A read-only open defers contents unless
+an exact unknown size is required. Git commands, writes, and explicit preparation
+create the writable checkout at the selected preview commit. Listing the synthetic
+`.git` entry needs no preparation; opening it prepares the real Git directory.
 
 Virtual files are writable through ArtifactFS's overlay. Normal Git commands can
 stage and commit through the `.git` pointer. Configure your author identity as for
@@ -120,7 +120,7 @@ commit or push changes in either kind of repo.
 | Refresh Repository | Replaces an unprepared preview after safe disconnection; fetches prepared Git data without resetting its visible baseline. Local checkouts fetch their own remotes. |
 | Keep Downloaded | Hydrates the current tree and safely publishes a local checkout with current files and existing Git state. |
 | Cancel | Stops the active operation; completed cache and necessary recovery data remain. |
-| Free Up Space | Returns app-created checkouts or managed virtual storage to on-demand entries after recovery checks. Adopted originals cannot be freed. |
+| Free Up Space | Reclaims verified preview content, or returns app-created checkouts/managed virtual storage to on-demand entries after recovery checks. Adopted originals cannot be freed. |
 
 Keep preserves staged, unstaged, and untracked work in the virtual view without
 resetting or publishing it. It copies the existing Git directory, index, and refs,

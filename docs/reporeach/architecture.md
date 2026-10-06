@@ -26,10 +26,13 @@ flowchart LR
     Root --> Kept[Ordinary kept checkouts]
     Native --> Catalog[Catalogue filesystem]
     Catalog --> Preview[Immutable metadata previews]
-    Catalog -->|Content access| AFS[Writable ArtifactFS backend]
+    Preview -->|Selected read-only blob| PreviewGit[Separate shallow Git source]
+    PreviewGit --> Cache[Verified shared blob cache]
+    PreviewGit --> Remote[Git remote]
+    Catalog -->|Git access or writes| AFS[Writable ArtifactFS backend]
     AFS --> Overlay[Local writable overlay]
     AFS --> Snapshot[Committed tree snapshot]
-    AFS --> Cache[Verified blob cache]
+    AFS --> Cache
     AFS --> Git[Private blobless Git clone]
     Git --> Remote[Git remote]
 ```
@@ -43,7 +46,7 @@ flowchart LR
 | `native/Shared` | Validated action URLs, bridge models, and metadata-only Finder status. |
 | `native/FinderExtension` | Finder badges and actions; no Git execution or content reads for status. |
 | `cmd/artifact-fs`, `internal/cli` | The sole engine executable and CLI entrypoints. |
-| `internal/desktop` | Discovery/auth, source registration, visibility state, metadata previews, owned catalogue links, and journaled local handoffs. |
+| `internal/desktop` | Discovery/auth, source registration, visibility, metadata/content previews, owned links, and journaled checkout/cache handoffs. |
 | `internal/catalogfs`, `internal/fsbridge` | Catalogue namespace, previews, activation, inode/handle translation, and private bridge protocol. |
 | `internal/daemon` | Writable preparation, snapshots, hydration, and managed storage lifecycle. |
 | `internal/fusefs` | Committed tree plus overlay, hydration, writable operations, and synthesized `.git`, shared by the transports. |
@@ -53,8 +56,10 @@ flowchart LR
 ## Host layout and ownership
 
 The state root is normally `~/Library/Application Support/RepoReach`. `engine/`
-holds managed Git directories, tree metadata, overlays, and blobs. `previews/`
-holds independent browsing metadata. The hidden native catalogue mounts at
+holds managed Git directories, tree metadata, overlays, and canonical blob caches
+shared with preview reads. `previews/` holds independent browsing metadata and
+manual metadata-acquisition Git state. Read-only content uses separate shallow
+sources under `engine/repos/<storage-name>/preview-git/`. The hidden catalogue mounts at
 `native-catalogue/volume` under the state root with `nobrowse`. The selected folder
 is separate and is never covered by this mount. The standalone CLI similarly
 distinguishes `ARTIFACT_FS_ROOT` from `daemon --root`.
@@ -91,13 +96,25 @@ Manual remote or bare sources use a separate depth-one filtered Git acquisition
 and canonical snapshot store. Local transports use shallow acquisition instead of
 hardlink cloning. Source files and index are untouched. Servers that ignore
 filters can transfer blobs. Unknown sizes are omitted from cheap native metadata;
-a caller requiring an exact size can activate content acquisition.
+a caller requiring an exact size can acquire just the selected immutable blob,
+without preparing the writable engine. Native POSIX opens can request this size.
+
+Read-only opens retain an immutable preview descriptor and defer bytes until a
+read or exact-size request. Reads use a separate depth-one Git source bound to
+the selected commit and stream the selected blob into the canonical shared cache.
+Object identity and available size metadata are verified before publication.
+Concurrent reads share acquisition, cached reads work offline, and unrelated
+blobs are not requested on a filter-capable source. This does not activate a
+writable runtime, create an overlay, or alter a source checkout's index. Symlink
+targets use the same immutable content
+path. Receipt generations record owned source/cache contents for safe reclamation.
 
 The preview includes a known-size synthetic `.git` entry. Metadata lookup does not
 prepare a clone; opening it prepares the real Git-directory pointer. Content
-promotion acquires the preview's selected commit and preserves inode identity and
-existing handles. Prepared repos retain their writable view instead of switching
-to a newer remote preview.
+reads through ordinary preview files do not promote. Git access, writes, or
+explicit preparation acquire the preview's selected commit and preserve inode
+identity and existing handles. Prepared repos retain their writable view instead
+of switching to a newer remote preview.
 
 Unprepared Refresh quiesces the catalogue, retires the preview receipt, and
 acquires a new immutable baseline. Retired handles keep their snapshots and cannot
@@ -149,6 +166,11 @@ Fresh remote verification uses temporary Git state and must prove recoverability
 The owned checkout is moved aside and fingerprinted again before state commits to
 virtual. Its owned link is published before verified checkout and rollback copies
 are removed. Uncertain state is retained; incomplete cleanup is reported.
+For a repo containing only preview content, Free pauses acquisition and normally
+detaches before reclaiming verified immutable sources and cached blobs without
+creating a writable runtime. It retains browsing snapshots and selected commits.
+Recorded generation identities and a durable cleanup journal prevent adopting
+unowned or changed cache data as disposable; incomplete cleanup is resumable.
 
 Startup recovery precedes publication or mounting. Durable catalogue state and
 journals determine whether to finish or roll back a transition. Changed bytes,
@@ -165,16 +187,13 @@ adopted and kept folders stay independent. Finder status is an atomic
 metadata-only cache, and action URLs are validated by the extension, app, and
 service. See [Finder extension details](../../native/FinderExtension/README.md).
 
-The disposable primary mounted sequence passed on macOS 27.0.1 ARM64 with the
-signed local8 module and a development engine based on `aedad10`, including dirty
-Keep, preserved Git index and local metadata, and local reads after app shutdown.
-The complete cold storage fixture also passed: metadata-only listing retained all
-five missing blobs with no source requests or cached content; Keep verified
-107 bytes, app-off reads required no requests, Free refused local extended
-metadata, and clean Free reclaimed both copies before successful reacquisition.
-Primary and cold sequences took 6.94 and 6.83 seconds respectively. These checks
-do not establish cold Finder navigation or qualify the signed combined local9
-build. Validate that build's actual Finder/Git behavior before release. See
+The installed signed local9 build at `7280ba1` passed primary and cold mounted
+fixtures on macOS 27.0.1 ARM64, including dirty Git state, Keep, app-off reads,
+safe Free refusal, full clean reclamation, and reacquisition. Local10 Finder
+checks verified ordinary-root and preview-directory traversal without permission
+badges. The complete `a6fc122` preview read path, Finder action corrections, and
+subsequent symlink mode fixes still require the combined local12 qualification.
+Fixture timings and UI capture duration do not establish Finder latency. See
 [the mounted record](fskit-acceptance.md),
 [the user guide](user-guide.md), and
 [Contributing](../../CONTRIBUTING.md) for visible behavior and engine invariants.

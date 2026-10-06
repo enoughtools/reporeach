@@ -16,19 +16,30 @@ import (
 // reference and directory entry. FSKit can request fstat after unlink or after
 // reclaiming the corresponding item; the open descriptor still owns the bytes.
 func (fs *ArtifactFuse) GetFileHandleAttributes(ctx context.Context, inode fuseops.InodeID, handle fuseops.HandleID) (fuseops.InodeAttributes, error) {
+	attrs, _, err := fs.getFileHandleAttributes(ctx, inode, handle, true)
+	return attrs, err
+}
+
+// GetFileHandleMetadataAttributes keeps open-descriptor authority after rename
+// or unlink, without acquiring an unknown-size base blob for an attached file.
+func (fs *ArtifactFuse) GetFileHandleMetadataAttributes(ctx context.Context, inode fuseops.InodeID, handle fuseops.HandleID) (fuseops.InodeAttributes, bool, error) {
+	return fs.getFileHandleAttributes(ctx, inode, handle, false)
+}
+
+func (fs *ArtifactFuse) getFileHandleAttributes(ctx context.Context, inode fuseops.InodeID, handle fuseops.HandleID, requireSize bool) (fuseops.InodeAttributes, bool, error) {
 	fs.handleOps.RLock()
 	defer fs.handleOps.RUnlock()
 	if err := ctx.Err(); err != nil {
-		return fuseops.InodeAttributes{}, fuseOperationError("handle getattr", err)
+		return fuseops.InodeAttributes{}, true, fuseOperationError("handle getattr", err)
 	}
 	fh, err := fs.fileHandle(handle)
 	if err != nil {
-		return fuseops.InodeAttributes{}, err
+		return fuseops.InodeAttributes{}, true, err
 	}
 	fh.mu.Lock()
 	if fh.inode.ID != inode {
 		fh.mu.Unlock()
-		return fuseops.InodeAttributes{}, syscall.EBADF
+		return fuseops.InodeAttributes{}, true, syscall.EBADF
 	}
 	if fh.detached {
 		attrs, err := detachedHandleAttributes(fh)
@@ -37,21 +48,28 @@ func (fs *ArtifactFuse) GetFileHandleAttributes(ctx context.Context, inode fuseo
 		if err == nil {
 			err = fs.applyMetadataObjectCtime(ctx, metadataID, &attrs)
 		}
-		return attrs, err
+		return attrs, true, err
 	}
 	path := fh.path
 	metadataID := fh.inode.MetadataID
 	fh.mu.Unlock()
 	if path == ".git" {
 		attrs := fs.gitFileAttrs()
-		return attrs, fs.applyMetadataObjectCtime(ctx, metadataID, &attrs)
+		return attrs, true, fs.applyMetadataObjectCtime(ctx, metadataID, &attrs)
+	}
+	if !requireSize {
+		attrs, known, _, _, err := fs.metadataAttributes(ctx, path)
+		if err != nil {
+			return fuseops.InodeAttributes{}, true, fuseOperationError("handle getattr metadata", err)
+		}
+		return attrs, known, fs.applyMetadataObjectCtime(ctx, metadataID, &attrs)
 	}
 	mode, size, typ, mtime, ctime, err := fs.resolveAttrs(ctx, path)
 	if err != nil {
-		return fuseops.InodeAttributes{}, fuseOperationError("handle getattr", err)
+		return fuseops.InodeAttributes{}, true, fuseOperationError("handle getattr", err)
 	}
 	attrs := inodeAttrs(mode, uint64(size), typ, mtime, ctime)
-	return attrs, fs.applyMetadataObjectCtime(ctx, metadataID, &attrs)
+	return attrs, true, fs.applyMetadataObjectCtime(ctx, metadataID, &attrs)
 }
 
 // SetFileHandleAttributes preserves the distinction between an attached

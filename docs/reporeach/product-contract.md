@@ -57,8 +57,14 @@ GitHub roots are acquired in bounded GraphQL batches; deeper trees load lazily b
 immutable object identity. Manual sources use separate shallow filtered Git
 previews. Browsing a preview neither prepares the writable engine nor alters a
 source checkout. If Git cannot supply a blob size locally, cheap metadata access
-omits it; a request requiring an exact size can activate content acquisition.
-Content reads promote a preview to writable storage at its selected commit.
+omits it. Read-only content access hydrates the selected immutable blob through
+a separate shallow Git source into the canonical cache shared with the writable
+engine, without preparing that engine. Cached blobs remain readable offline.
+A request requiring an exact unknown size can fetch that selected blob, including
+size requests issued by a native POSIX open. Ordinary read-only opens defer
+content acquisition where an exact size is not requested. Git access through
+the synthetic `.git` file, writes, and explicit preparation promote the preview
+to writable storage at its selected commit.
 
 Explicit Refresh on an unprepared virtual repo quiesces the catalogue and replaces
 its preview baseline. Refresh on a prepared repo fetches Git data while preserving
@@ -78,29 +84,29 @@ produce an error; incomplete cleanup must not be reported as reclaimed space.
 An interrupted Keep's retained standalone checkout and its path remain in status
 after restart. Free cleanup records progress per owned entry so an interrupted
 deletion can resume without requiring already removed files to reappear.
+For repos with only preview content, Free can reclaim verified immutable content
+and its shallow source without preparing a writable checkout, retaining browsing
+metadata. Ownership receipts and journals also protect that cleanup.
 
 ## Acceptance status
 
-The primary disposable mounted sequence passed in 6.94 seconds on macOS 27.0.1
-ARM64 using the signed local8 native module and a development engine based on
-`aedad10`.
-It covers ordinary-folder placement, adoption, dirty working files and Git-index
-preservation through Keep, local metadata preservation, and ordinary checkout
-access with the app stopped.
+The installed signed local9 build at `7280ba1` passed both disposable mounted
+sequences on macOS 27.0.1 ARM64: primary in 6.84 seconds and cold storage in
+6.43 seconds. It proved ordinary-folder placement, dirty adoption and native Git
+state preservation, Keep, app-off offline access, metadata-aware Free refusal,
+clean full cleanup, and reacquisition. Its initial preview took 226 ms, cached
+listing 3 ms, and prepared names-only listing 5 ms. Listing left all five fixture
+blobs missing with no source HTTP requests or blob-cache content. These fixture
+timings do not measure Finder navigation or real GitHub network latency.
 
-The complete cold storage fixture passed in 6.83 seconds with that same installed
-module and the updated development engine. Initial preview acquisition took
-211 ms, cached preview listing 3 ms, and prepared names-only listing 4 ms. The
-names-only listing made zero source requests, left all five blobs missing, and
-kept the blob cache empty. Keep verified five unique blobs totaling 107 bytes;
-the ordinary checkout worked with the app stopped and zero offline requests.
-Free correctly refused local extended metadata, then reclaimed the clean checkout
-and rollback storage before successful preparation and reacquisition. These are
-disposable fixture results, not Finder navigation timings.
-
-Actual cold Finder navigation and the signed combined local9 build remain pending
-installation and testing. See the [mounted acceptance record](fskit-acceptance.md)
-for the precise tested scope.
+Actual Finder checks on local10 verified traversal of the ordinary root and
+GitHub preview directories without permission badges. Missing Finder actions
+were traced to status-cache location and resolved private-volume paths, with
+corrections in local11. The extended local11 mounted sequence found a symlink
+mode regression and clarified that native opens can request exact unknown sizes;
+those fixes and the full `a6fc122` read-only content path require local12
+qualification. No final Finder latency or release-readiness claim is made. See
+the [mounted acceptance record](fskit-acceptance.md) for tested scope.
 
 Source tests do not establish that Finder's cold experience is fixed. Validate the
 signed local build using disposable fixtures and record source requests, prepared

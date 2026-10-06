@@ -150,6 +150,11 @@ func (fs *FileSystem) previewAttributes(node model.BaseNode) (fuseops.InodeAttri
 		mode |= os.ModeDir
 		known, size = true, 4096
 	case "symlink":
+		// Git stores only the symlink type. Match the runtime's readable
+		// presentation without changing the immutable Git metadata.
+		if node.Mode == 0o120000 {
+			mode = 0o644
+		}
 		mode |= os.ModeSymlink
 	}
 	if !known {

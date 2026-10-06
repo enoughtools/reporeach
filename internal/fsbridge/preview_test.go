@@ -6,6 +6,8 @@ import (
 	"bytes"
 	"context"
 	"net/http"
+	"os"
+	"path/filepath"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -13,7 +15,121 @@ import (
 	"github.com/cloudflare/artifact-fs/internal/catalogfs"
 	"github.com/cloudflare/artifact-fs/internal/fusefs"
 	"github.com/cloudflare/artifact-fs/internal/model"
+	"github.com/jacobsa/fuse/fuseutil"
 )
+
+func TestNativeCreatedSymlinkPermissionsPreserveExplicitChmod(t *testing.T) {
+	for _, catalogue := range []bool{false, true} {
+		name := "repository"
+		if catalogue {
+			name = "catalogue"
+		}
+		t.Run(name, func(t *testing.T) {
+			fixture := newBridgeCatalogFixture(t, "alice/project")
+			var filesystem fuseutil.FileSystem = fixture.backend
+			if catalogue {
+				fs, err := catalogfs.New(bridgeCatalogEntries[:1], func(context.Context, catalogfs.Entry) (*fusefs.ArtifactFuse, error) {
+					return fixture.backend, nil
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(fs.Destroy)
+				filesystem = fs
+			}
+			c, handler := directoryTestClient(t, filesystem)
+			t.Cleanup(func() { _ = handler.closeResources(context.Background()) })
+			root := uint64(1)
+			if catalogue {
+				root = c.repository(t, "alice")
+			}
+			created := c.call(t, map[string]any{"op": "symlink", "parent": root, "name": "created-link", "target": "README.md"}, 0).Node
+			if created.Attributes.Type != "symlink" || created.Attributes.Mode != 0o120644 {
+				t.Fatalf("native create emitted inaccessible symlink: %+v", created)
+			}
+			assertMode := func(mode uint32) {
+				t.Helper()
+				lookup := c.call(t, map[string]any{"op": "lookup", "parent": root, "name": "created-link"}, 0).Node
+				if lookup.Inode != created.Inode || lookup.Attributes.Mode != mode || lookup.Attributes.Type != "symlink" {
+					t.Fatalf("native lookup changed symlink identity or permissions: %+v", lookup)
+				}
+				for _, requireSize := range []bool{false, true} {
+					stat := c.call(t, map[string]any{"op": "getattr", "inode": created.Inode, "require_size": requireSize}, 0).Node
+					if stat.Attributes.Mode != mode || stat.Attributes.Type != "symlink" {
+						t.Fatalf("native stat changed symlink permissions: %+v", stat)
+					}
+				}
+			}
+			assertMode(0o120644)
+			if got := c.call(t, map[string]any{"op": "readlink", "inode": created.Inode}, 0); got.Target != "README.md" {
+				t.Fatal("native-created symlink changed target")
+			}
+			changed := c.call(t, map[string]any{"op": "setattr", "inode": created.Inode, "attributes": map[string]any{"mode": 0}}, 0).Node
+			if changed.Attributes.Mode != 0o120000 {
+				t.Fatalf("explicit chmod000 was replaced by default permissions: %+v", changed)
+			}
+			assertMode(0o120000)
+			if fixture.hydrator.calls.Load() != 0 {
+				t.Fatal("native overlay symlink permissions hydrated committed data")
+			}
+		})
+	}
+}
+
+func TestNativePreviewSymlinkPublishesReadablePermissionsWithoutActivation(t *testing.T) {
+	target := "target with spaces"
+	blob := filepath.Join(t.TempDir(), "link-target")
+	if err := os.WriteFile(blob, []byte(target), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var activations, contentCalls atomic.Int64
+	fs, err := catalogfs.NewWithPreviewContent(bridgeCatalogEntries[:1], func(context.Context, catalogfs.Entry) (*fusefs.ArtifactFuse, error) {
+		activations.Add(1)
+		return nil, syscall.EIO
+	}, nil, func(context.Context, catalogfs.Entry, string) (catalogfs.PreviewDirectory, error) {
+		return catalogfs.PreviewDirectory{Revision: "commit", Entries: []model.BaseNode{
+			{Path: "link", Type: "symlink", Mode: 0o120000, ObjectOID: "blob", SizeState: "known", SizeBytes: int64(len(target))},
+		}}, nil
+	}, func(_ context.Context, entry catalogfs.Entry, path, revision string) (*os.File, error) {
+		if entry.ID != "alice/project" || path != "link" || revision != "commit" {
+			t.Error("readlink lost immutable repository identity")
+		}
+		contentCalls.Add(1)
+		return os.Open(blob)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(fs.Destroy)
+	c, handler := directoryTestClient(t, fs)
+	root := c.repository(t, "alice")
+	link := c.call(t, map[string]any{"op": "lookup", "parent": root, "name": "link"}, 0).Node
+	if link.Attributes.Type != "symlink" || link.Attributes.Mode != 0o120644 || link.Attributes.SizeKnown != nil || link.Attributes.Size != uint64(len(target)) {
+		t.Fatalf("native lookup has inaccessible symlink attributes: %+v", link)
+	}
+	stat := c.call(t, map[string]any{"op": "getattr", "inode": link.Inode, "require_size": true}, 0).Node
+	if stat.Attributes.Mode != 0o120644 || stat.Attributes.Type != "symlink" {
+		t.Fatalf("native exact stat changed symlink permissions: %+v", stat)
+	}
+	directory := c.opendir(t, root)
+	listing := c.call(t, map[string]any{"op": "readdir", "inode": root, "handle": directory}, 0)
+	if len(listing.Entries) != 1 || listing.Entries[0].Node.Inode != link.Inode || listing.Entries[0].Node.Attributes.Mode != 0o120644 {
+		t.Fatal("native enumeration changed symlink permissions or identity")
+	}
+	if activations.Load() != 0 || contentCalls.Load() != 0 {
+		t.Fatal("symlink metadata activated checkout or fetched target")
+	}
+	readlink := c.call(t, map[string]any{"op": "readlink", "inode": link.Inode}, 0)
+	if readlink.Target != target || activations.Load() != 0 || contentCalls.Load() != 1 {
+		t.Fatal("native readlink changed target or activated writable checkout")
+	}
+	c.call(t, map[string]any{"op": "forget", "inode": link.Inode, "n": 2}, 0)
+	c.call(t, map[string]any{"op": "releasedir", "inode": root, "handle": directory}, 0)
+	c.call(t, map[string]any{"op": "getattr", "inode": link.Inode}, syscall.ESTALE)
+	if handler.lookups[link.Inode] != 0 {
+		t.Fatal("native symlink metadata leaked lookup references")
+	}
+}
 
 func TestNativePreviewLookupGetattrAndReaddirRemainMetadataOnly(t *testing.T) {
 	fixture := newBridgeCatalogFixtureWithSizeState(t, "alice/project", "unknown")

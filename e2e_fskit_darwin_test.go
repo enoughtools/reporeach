@@ -184,6 +184,26 @@ func TestFSKitMountedAcceptance(t *testing.T) {
 	fsKitAssertNativeXattrs(t, "body activation", metadata)
 	fsKitCleanGit(t, repo)
 
+	// Newly created overlay symlinks must expose readable native permissions,
+	// just as committed preview symlinks do. Remove this disposable link before
+	// subsequent Git mutations and Keep establish their exact fixture state.
+	createdLink := filepath.Join(repo, "native-created-link")
+	if err := os.Symlink("tracked.txt", createdLink); err != nil {
+		t.Fatalf("native symlink creation failed: %v", err)
+	}
+	if info, err := os.Lstat(createdLink); err != nil || info.Mode()&os.ModeSymlink == 0 || info.Mode().Perm()&0o400 == 0 {
+		t.Fatalf("new native symlink has inaccessible permissions: info=%v error=%v", info, err)
+	}
+	if target, err := os.Readlink(createdLink); err != nil || target != "tracked.txt" {
+		t.Fatalf("new native symlink target=%q error=%v", target, err)
+	}
+	fsKitReadEqual(t, createdLink, text)
+	if err := os.Remove(createdLink); err != nil {
+		t.Fatalf("new native symlink removal failed: %v", err)
+	}
+	waitDesktopCataloguePathMissing(t, createdLink)
+	fsKitCleanGit(t, repo)
+
 	// Native Git writes must remain coherent after warm reads and branch checkout.
 	committed := []byte("committed through native mount\n")
 	fsKitWrite(t, filepath.Join(repo, "tracked.txt"), committed, 0o644)

@@ -230,7 +230,23 @@ func TestPreviewReadlinkIsBoundedAndDoesNotActivate(t *testing.T) {
 	}
 	t.Cleanup(fs.Destroy)
 	root := repoRoot(t, fs, "alice")
-	op := &fuseops.ReadSymlinkOp{Inode: lookup(t, fs, root, "link")}
+	link := &fuseops.LookUpInodeOp{Parent: root, Name: "link"}
+	if known, err := fs.LookUpMetadata(ctx, link); err != nil || !known || link.Entry.Attributes.Mode&os.ModeSymlink == 0 || link.Entry.Attributes.Mode.Perm() != 0o644 {
+		t.Fatalf("native readlink would receive inaccessible symlink permissions: known=%t mode=%v err=%v", known, link.Entry.Attributes.Mode, err)
+	}
+	stat := &fuseops.GetInodeAttributesOp{Inode: link.Entry.Child}
+	if known, err := fs.GetMetadataAttributes(ctx, stat); err != nil || !known || stat.Attributes.Mode.Perm() != 0o644 {
+		t.Fatalf("symlink stat mode=%v err=%v", stat.Attributes.Mode, err)
+	}
+	listing, err := fs.ReadDirectoryEntries(ctx, openDir(t, fs, root), 0, 4096)
+	if err != nil || len(listing) != 2 || listing[1].Entry.Child != link.Entry.Child || listing[1].Entry.Attributes.Mode.Perm() != 0o644 {
+		t.Fatalf("symlink enumeration lost readable permissions or identity: %+v err=%v", listing, err)
+	}
+	node, err := fs.node(link.Entry.Child)
+	if err != nil || node.preview.Mode != 0o120000 {
+		t.Fatal("presentation changed raw immutable Git mode")
+	}
+	op := &fuseops.ReadSymlinkOp{Inode: link.Entry.Child}
 	if err := fs.ReadSymlink(ctx, op); err != nil || op.Target != target {
 		t.Fatalf("readlink changed target: %q %v", op.Target, err)
 	}

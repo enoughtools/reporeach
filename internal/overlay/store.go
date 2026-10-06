@@ -780,7 +780,13 @@ func (s *Store) SetMode(ctx context.Context, path string, mode uint32) error {
 	if !ok || e.IsDeleted() {
 		return os.ErrNotExist
 	}
-	e.Mode = e.Mode&^0o777 | mode&0o777
+	if e.NodeType() == "symlink" {
+		// Kind already carries the type. Keep explicit permissions separate
+		// from Git's raw 120000 default, especially for chmod 000.
+		e.Mode = mode & 0o777
+	} else {
+		e.Mode = e.Mode&^0o777 | mode&0o777
+	}
 	if e.BackingPath != "" {
 		if err := os.Chmod(e.BackingPath, os.FileMode(e.Mode)); err != nil {
 			return err
@@ -1013,7 +1019,18 @@ func backingMatchesBlobOID(path string, oid string) (bool, error) {
 }
 
 func overlayEntryMatchesBase(e model.OverlayEntry, base model.BaseNode) (bool, error) {
-	if base.Mode != 0 && e.Mode&0o777 != base.Mode&0o777 {
+	overlayMode, baseMode := e.Mode&0o777, base.Mode&0o777
+	if e.Kind == model.OverlayKindSymlink {
+		// Raw Git symlinks present as readable 0644. Explicit chmod 000
+		// stores mode 0 and must survive a matching-target reconciliation.
+		if e.Mode == 0o120000 {
+			overlayMode = 0o644
+		}
+		if base.Mode == 0o120000 {
+			baseMode = 0o644
+		}
+	}
+	if base.Mode != 0 && overlayMode != baseMode {
 		return false, nil
 	}
 	if e.Kind == model.OverlayKindSymlink {

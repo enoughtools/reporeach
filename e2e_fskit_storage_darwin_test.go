@@ -38,10 +38,10 @@ import (
 
 // This is a separate disposable fixture, intended to run after the primary
 // mounted sequence passes. Browsing first acquires only a shallow preview;
-// writable preparation and Keep are separate actions. Metadata-only browsing
-// must acquire no blobs; a readonly content preview may acquire only its one
-// selected blob and must not activate the writable engine. Symlink targets
-// remain unread before Keep.
+// writable preparation and Keep are separate actions. Names-only browsing
+// must acquire no blobs; a readonly content preview or exact-size request may
+// acquire only its selected blob and must not activate the writable engine.
+// Symlink targets remain unread before Keep.
 func TestFSKitMountedColdStorageAcceptance(t *testing.T) {
 	if os.Getenv("AFS_RUN_FSKIT_E2E_TESTS") != "1" {
 		t.Skip("set AFS_RUN_FSKIT_E2E_TESTS=1 for real mounted FSKit storage acceptance")
@@ -207,20 +207,25 @@ func TestFSKitMountedColdStorageAcceptance(t *testing.T) {
 		t.Fatalf("cold preview hydrated committed blobs: %v", err)
 	}
 	t.Logf("cold preview proof: entries=%d initial_preview_ms=%d cached_listing_ms=%d writable_engine_absent=true shallow_commits=1 missing_blobs=%d committed_Finder_names_visible=true", len(previewNames), time.Since(coldPreviewStarted).Milliseconds(), previewDuration.Milliseconds(), len(oids))
-	// A readonly native open is still metadata-only. Reading the nested file
-	// may then acquire its immutable blob, but must leave the repository virtual
-	// and acquire neither the other committed blobs nor a writable checkout.
+	// Native open may request an exact size, which this blobless native source
+	// cannot answer from its metadata. That request or the first read may acquire
+	// only this selected blob, and neither may activate a writable checkout.
+	selectedOID := strings.TrimSpace(string(fsKitStorageGit(t, source, nil, "rev-parse", "HEAD:nested/duplicate.txt")))
 	beforeContentRequests := transport.requests.Load()
 	transport.traceMu.Lock()
 	contentTraceStart := len(transport.trace)
 	transport.traceMu.Unlock()
+	openStarted := time.Now()
 	previewFile, err := os.Open(filepath.Join(nested, "duplicate.txt"))
+	openDuration := time.Since(openStarted)
 	if err != nil {
 		t.Fatalf("cold readonly native open failed: %v", err)
 	}
 	t.Cleanup(func() { _ = previewFile.Close() })
-	if transport.requests.Load() != beforeContentRequests {
-		t.Fatal("readonly native open acquired content before a read")
+	afterOpenRequests := transport.requests.Load()
+	if afterOpenRequests > beforeContentRequests {
+		openedPaths, _ := fsKitStoragePreviewContentPaths(t, h.state, head)
+		fsKitStorageCachedBlob(t, openedPaths.cache, selectedOID, text)
 	}
 	h.request(t, http.MethodGet, "/v1/status", nil, &status)
 	if entry := desktopAdoptedRepository(t, status, id); entry.State != "virtual" || entry.LocalPath != "" {
@@ -235,8 +240,12 @@ func TestFSKitMountedColdStorageAcceptance(t *testing.T) {
 		t.Fatalf("readonly native preview read: count=%d error=%v equal=%v", count, err, bytes.Equal(read, text))
 	}
 	contentDuration := time.Since(contentStarted)
-	if transport.requests.Load() <= beforeContentRequests {
+	afterReadRequests := transport.requests.Load()
+	if afterReadRequests <= beforeContentRequests {
 		t.Fatal("cold readonly content was not acquired from the source")
+	}
+	if afterOpenRequests > beforeContentRequests && afterReadRequests != afterOpenRequests {
+		t.Fatalf("readonly read reacquired content already fetched for native open's exact size: open_requests=%d read_requests=%d", afterOpenRequests-beforeContentRequests, afterReadRequests-afterOpenRequests)
 	}
 	h.request(t, http.MethodGet, "/v1/status", nil, &status)
 	if entry := desktopAdoptedRepository(t, status, id); entry.State != "virtual" || entry.LocalPath != "" {
@@ -245,7 +254,6 @@ func TestFSKitMountedColdStorageAcceptance(t *testing.T) {
 	if _, err := fsKitStorageRegistry(h.state, repo); !errors.Is(err, sql.ErrNoRows) {
 		t.Fatalf("readonly native content created writable engine storage: %v", err)
 	}
-	selectedOID := strings.TrimSpace(string(fsKitStorageGit(t, source, nil, "rev-parse", "HEAD:nested/duplicate.txt")))
 	transport.traceMu.Lock()
 	contentTrace := append([]fsKitStorageRequestTrace(nil), transport.trace[contentTraceStart:]...)
 	contentTraceCut := transport.traceCut
@@ -296,7 +304,7 @@ func TestFSKitMountedColdStorageAcceptance(t *testing.T) {
 	if err := fsKitStorageRequireMissing(fsKitStorageGitNoFetch(t, root, input, "--git-dir", previewGit, "cat-file", "--batch-check"), oids); err != nil {
 		t.Fatalf("readonly content hydrated the metadata-only preview Git: %v", err)
 	}
-	t.Logf("readonly native preview proof: duration_ms=%d writable_engine_absent=true repository_virtual=true selected_cached_blobs=1 selected_cached_bytes=%d unselected_missing_blobs=%d cached_read_source_requests=0 nested_directory_traversable=true", contentDuration.Milliseconds(), len(text), len(unselected))
+	t.Logf("readonly native preview proof: open_ms=%d first_read_ms=%d open_source_requests=%d first_read_source_requests=%d writable_engine_absent=true repository_virtual=true selected_cached_blobs=1 selected_cached_bytes=%d unselected_missing_blobs=%d cached_read_source_requests=0 nested_directory_traversable=true", openDuration.Milliseconds(), contentDuration.Milliseconds(), afterOpenRequests-beforeContentRequests, afterReadRequests-afterOpenRequests, len(text), len(unselected))
 	// Actual Git pointer bytes require the authoritative writable engine. The
 	// same retained preview item must promote safely without acquiring any
 	// additional blob or duplicating the selected canonical cache file.

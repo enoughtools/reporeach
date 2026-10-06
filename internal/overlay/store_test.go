@@ -95,6 +95,48 @@ func TestCreateSymlinkReconcilesAfterCommit(t *testing.T) {
 	}
 }
 
+func TestExplicitSymlinkChmodZeroSurvivesReopenAndReconcile(t *testing.T) {
+	s, repo := testStore(t)
+	ctx := context.Background()
+	const path, target = "link", "../README.md"
+	if _, err := s.CreateSymlink(ctx, path, target); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetMode(ctx, path, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s, err := New(ctx, repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	baseLookup := func(p string) (model.BaseNode, bool) {
+		return model.BaseNode{Path: p, Type: "symlink", Mode: 0o120000, ObjectOID: testBlobOID([]byte(target))}, true
+	}
+	if err := s.Reconcile(ctx, baseLookup); err != nil {
+		t.Fatal(err)
+	}
+	if entry, ok := s.Get(path); !ok || entry.Kind != model.OverlayKindSymlink || entry.Mode != 0 || entry.TargetPath != target {
+		t.Fatalf("explicit chmod000 was lost after reopen/reconcile: %+v found=%t", entry, ok)
+	}
+	const readable = "readable-link"
+	if _, err := s.CreateSymlink(ctx, readable, target); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetMode(ctx, readable, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Reconcile(ctx, baseLookup); err != nil {
+		t.Fatal(err)
+	}
+	if entry, ok := s.Get(readable); ok {
+		t.Fatalf("restored Git-default permissions did not reconcile: %+v", entry)
+	}
+}
+
 func TestSetModePreservesUncommittedModeAndReconcilesCommittedMode(t *testing.T) {
 	s, cfg := testStore(t)
 	ctx := context.Background()

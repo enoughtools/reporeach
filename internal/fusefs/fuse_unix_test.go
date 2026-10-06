@@ -197,8 +197,8 @@ func TestCreateAndReadOverlaySymlink(t *testing.T) {
 	if err := fs.CreateSymlink(context.Background(), create); err != nil {
 		t.Fatalf("CreateSymlink: %v", err)
 	}
-	if create.Entry.Attributes.Mode&os.ModeSymlink == 0 {
-		t.Fatalf("created mode = %#o, want symlink", create.Entry.Attributes.Mode)
+	if create.Entry.Attributes.Mode&os.ModeSymlink == 0 || create.Entry.Attributes.Mode.Perm() != 0o644 {
+		t.Fatalf("created mode = %#o, want readable symlink", create.Entry.Attributes.Mode)
 	}
 	read := &fuseops.ReadSymlinkOp{Inode: create.Entry.Child}
 	if err := fs.ReadSymlink(context.Background(), read); err != nil {
