@@ -2,6 +2,7 @@ import CryptoKit
 import Darwin
 import Foundation
 import FSKit
+import OSLog
 
 /// The resource is a private connection directory, never a repository checkout.
 /// FSKit transports its security-scoped URL into this sandboxed extension.
@@ -15,6 +16,7 @@ final class RepoReachFileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations 
     }
 
     private let lifecycleLock = NSLock()
+    private let logger = Logger(subsystem: "com.enoughtools.reporeach", category: "FSKitLifecycle")
     private var lifecycle: Lifecycle = .idle
 
     func probeResource(resource: FSResource, replyHandler: @escaping (FSProbeResult?, Error?) -> Void) {
@@ -88,7 +90,9 @@ final class RepoReachFileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations 
             replyHandler(nil, Self.posixError(error))
             return
         }
-        let readOnly = !pathResource.isWritable || options.taskOptions.contains("--rdonly")
+        let explicitlyReadOnly = options.taskOptions.contains("--rdonly")
+        let readOnly = !pathResource.isWritable || explicitlyReadOnly
+        logger.notice("Load policy resourceWritable=\(pathResource.isWritable, privacy: .public) explicitlyReadOnly=\(explicitlyReadOnly, privacy: .public) selectedReadOnly=\(readOnly, privacy: .public)")
         Task {
             do {
                 let response = try await client.request(FSBridgeRequest(op: "getattr", inode: 1))

@@ -74,7 +74,7 @@ A module-only automatic development-provisioning attempt using the existing busi
 The app-group correction at clean source `98a49f6` built as a complete ARM64 SDK 27 app, passed all 58 hostless native tests, and was signed as a new isolated validation copy using the same authenticated device-bound profile and certificate. The parent app’s headless Foundation resolver demonstrated real access to the entitled private container. After normal scoped registration, public discovery confirmed the exact new module as the sole enabled candidate without another approval. At 23:24 UTC, its exact executable launched as PIDs `88531` and `88532`; public dynamic signature validation and expected group/FSKit/sandbox claims passed. The kernel reported an attached `reporeach` volume owned by UID 501 at the disposable test folder. The reported source was the exact connection directory as a `file:` URL with a directory trailing slash. The strict ownership parser rejected that equivalent URL form, so the acceptance sequence stopped before repository reads or Git operations. The test helper was no longer running after the command returned; its exit cause is still being investigated; an ordinary, exact-volume unmount returned connection refused and the fixture was preserved. This proves native attachment and app-group connectivity, not a mounted acceptance pass. Source identity parsing and helper process-group isolation are corrected in source and covered by focused tests plus CLI build, vet and the complete Go suite. A plain-pipe runner comparison showed an inherited child disappearing while isolated children completed naturally; the original helper’s exact exit cause was not recorded. A separately reviewed private recovery utility restored the preserved capability on the actual production root/statfs handler after proving the old helper had exited and acquiring the original leases. The exact test volume then detached with ordinary `umount` at 00:52 UTC on October 6; cached global FSID/source absence, request drain and the utility’s normal exit were verified. Its descriptor and synthetic fixture were preserved in private evidence. This narrow cleanup utility is not a product resume API or a mounted acceptance pass. No forced detach or filesystem-daemon reset was performed.
 
 
-A second mounted attempt used helper source `c1818e5` with that unchanged `98a49f6` module. It passed source identification, lazy owner/repository browsing, committed text and binary reads, symlink target/read checks and executable mode checks. Direct execution of the tracked script then failed with `EBADF`; the exact module's read callback returned errno 9 before normal deactivation. The harness stopped before Git staging/commit/checkout checks. Normal detach, helper exit and fixture removal succeeded. Executable vnode-read handling is being corrected, and full mounted acceptance remains outstanding.
+A second mounted attempt used helper source `c1818e5` with that unchanged `98a49f6` module. It passed source identification, lazy owner/repository browsing, committed text and binary reads, symlink target/read checks and executable mode checks. Direct execution of the tracked script then failed with `EBADF`; the exact module's read callback returned errno 9 before normal deactivation. The harness stopped before Git staging/commit/checkout checks. Normal detach, helper exit and fixture removal succeeded. The executable vnode-read correction is described below; full mounted acceptance remains outstanding.
 
 The read correction permits a temporary read-only descriptor when a retained
 reader is absent. Apple's [executable loader](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/kern_exec.c)
@@ -82,8 +82,21 @@ reads a vnode's header before its open callback. Temporary reads preserve the
 item's retained descriptors and open modes, record handle ownership even when
 the caller is cancelled while opening, and await bounded release before the
 operation drains. Hostless failure-case tests and the real Go/Swift callback
-harness exercise the shared production read path; mounted execution remains
-the next runtime check.
+harness exercise the shared production read path. All nine focused tests and
+refreshed Go/Swift callback integration pass. The cancellation regression fails
+against the prior implementation, verifying that it detects lost ownership.
+
+The complete `5ed6cb4` app passed local SDK 27 compilation, independently verified
+development signing and all seven [CI jobs](https://github.com/enoughtools/reporeach/actions/runs/37398804775),
+including both SDK 26 read suites. Its exact new module remained enabled and
+executed the tracked script successfully on a real mounted path. Native Git HEAD
+and clean-status reads also passed. The first tracked-file write returned
+`EROFS`; PID `45308` returned errno 30 from its file-open callback at 01:30 UTC.
+This proves dispatch into the module, without proving which write-policy input
+caused the refusal. Normal cleanup, cached global attachment absence, helper
+exit and fixture removal were confirmed. A narrow diagnostic now records only
+resource-writability and read-only-policy Booleans plus static refusal text;
+policy and security checks remain unchanged while that cause is established.
 
 [CI run 37362001784](https://github.com/enoughtools/reporeach/actions/runs/37362001784), at source `6a62f2f`, passed all seven jobs, including complete Apple Silicon and Intel app/module builds with Xcode 26.6, bundle layout, native tests, and Go–Swift bridge tests. It did not activate or mount the extension and predates the activation-metadata correction. [CI run 37372960522](https://github.com/enoughtools/reporeach/actions/runs/37372960522), at `e453faf`, passed Linux mounted filesystem checks, both macOS management builds and both complete SDK 26 products with native and bridge tests. Engine and website jobs were cancelled before acquiring hosted runners; no implementation step ran in those jobs. An explicitly requested [local-validation export](../../scripts/README.md) remains available for a compatible host without a suitable local Xcode and keeps signing keys on the local Mac. A successful mounted test here would establish macOS 27 behavior; macOS 26 mounted evidence would still need to be recorded separately.
 
@@ -125,7 +138,7 @@ The private bridge currently refuses an existing socket rather than automaticall
 | Platform mechanism and chosen folder | Apple documents macOS 26 URL resources, user-space extensions, normal extension enablement, and a mount at a chosen home-directory path. |
 | RepoReach extension and Go bridge | Implemented and exercised through real local socket and FSVolume callback tests. No production mounted-backend claim. |
 | SDK compilation | Complete app/extension ARM64 and Intel compilation and layout checks passed in macOS 26/Xcode 26.6 CI; ARM64 also passes locally with Xcode 27/SDK 27. |
-| Local activation experiment | The group-enabled module attaches; lazy text/binary/symlink reads and executable modes pass. Source identity and test helper isolation are corrected; the first retained fixture detached through normal private recovery. Direct executable reads currently return EBADF. Git/cache/reconnect acceptance remains outstanding. |
+| Local activation experiment | The group-enabled module attaches; lazy text/binary/symlink reads, executable launch and Git HEAD/status reads pass. First mounted file write returns EROFS; its policy cause is being traced. Commit/cache/reconnect acceptance remains outstanding. Normal cleanup is confirmed. |
 | Distribution authorization | Matching FSKit-enabled Developer ID provisioning profile is still missing. |
 | Kernel cache coherence | Persistent working-tree and quiescent catalogue policies are implemented in source; actual macOS 26 mounted proof remains outstanding. |
 | Existing beta.3 proof | Historical Go/native/Linux FUSE evidence remains valid for that release and is not FSKit evidence. |

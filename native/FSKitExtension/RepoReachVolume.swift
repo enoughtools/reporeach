@@ -709,7 +709,10 @@ final class RepoReachVolume: FSVolume, FSVolume.Operations,
 
     func openItem(_ item: FSItem, modes: FSVolume.OpenModes, replyHandler: @escaping (Error?) -> Void) {
         perform(exclusive: true, reply: replyHandler) {
-            if modes.contains(.write) { try self.requireWritable() }
+            if modes.contains(.write) {
+                if self.readOnly { self.logger.notice("Write open refused by read-only volume policy") }
+                try self.requireWritable()
+            }
             let state = try self.state(for: item)
             guard state.attributes.type == .file else {
                 if state.attributes.type == .dir { return }
