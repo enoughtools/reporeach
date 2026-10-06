@@ -12,10 +12,10 @@ Repositories/
     shared-project/
 ```
 
-This guide describes native development source. The signed local9 build passed
-mounted storage fixtures on macOS 27.0.1 ARM64, and local10 Finder checks verified
-folder traversal without permission badges. Later read-only preview and Finder
-action fixes still need final combined local12 validation; see the
+This guide describes the signed local12 development build. Mounted storage and
+actual Finder checks passed on macOS 27.0.1 ARM64, including nested traversal,
+selected-file previews without writable preparation, and context-menu actions.
+Real-network cold Finder latency and release readiness remain unqualified; see the
 [acceptance record](fskit-acceptance.md). Historical beta.3 downloads retain their
 macFUSE installation, separate-clone adoption, and cache-based Keep behavior.
 Development changes do not alter those releases or establish release readiness.

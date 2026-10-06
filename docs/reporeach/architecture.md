@@ -59,8 +59,8 @@ The state root is normally `~/Library/Application Support/RepoReach`. `engine/`
 holds managed Git directories, tree metadata, overlays, and canonical blob caches
 shared with preview reads. `previews/` holds independent browsing metadata and
 manual metadata-acquisition Git state. Read-only content uses separate shallow
-sources under `engine/repos/<storage-name>/preview-git/`. The hidden catalogue mounts at
-`native-catalogue/volume` under the state root with `nobrowse`. The selected folder
+sources under `engine/repos/<storage-name>/preview-git/`. The hidden catalogue
+mounts at `native-catalogue/volume` under the state root with `nobrowse`. The selected folder
 is separate and is never covered by this mount. The standalone CLI similarly
 distinguishes `ARTIFACT_FS_ROOT` from `daemon --root`.
 
@@ -106,8 +106,8 @@ Object identity and available size metadata are verified before publication.
 Concurrent reads share acquisition, cached reads work offline, and unrelated
 blobs are not requested on a filter-capable source. This does not activate a
 writable runtime, create an overlay, or alter a source checkout's index. Symlink
-targets use the same immutable content
-path. Receipt generations record owned source/cache contents for safe reclamation.
+targets use the same immutable content path. Receipt generations record owned
+source/cache contents for safe reclamation.
 
 The preview includes a known-size synthetic `.git` entry. Metadata lookup does not
 prepare a clone; opening it prepares the real Git-directory pointer. Content
@@ -187,13 +187,16 @@ adopted and kept folders stay independent. Finder status is an atomic
 metadata-only cache, and action URLs are validated by the extension, app, and
 service. See [Finder extension details](../../native/FinderExtension/README.md).
 
-The installed signed local9 build at `7280ba1` passed primary and cold mounted
-fixtures on macOS 27.0.1 ARM64, including dirty Git state, Keep, app-off reads,
-safe Free refusal, full clean reclamation, and reacquisition. Local10 Finder
-checks verified ordinary-root and preview-directory traversal without permission
-badges. The complete `a6fc122` preview read path, Finder action corrections, and
-subsequent symlink mode fixes still require the combined local12 qualification.
-Fixture timings and UI capture duration do not establish Finder latency. See
+The installed signed local12 build at clean executable source `7d17d8` passed
+ordered Go validation and both mounted fixtures on macOS 27.0.1 ARM64. This
+includes read-only selected-blob acquisition without writable activation,
+dirty Git state, Keep, app-off reads, safe Free refusal, full clean reclamation,
+and reacquisition. Actual Finder checks verified ordinary-root and nested preview
+traversal without permission badges, selected-thumbnail hydration without writable
+preparation, and public/nested context actions. The tested repository metadata
+was already cached; fixture timings and UI capture duration do not establish
+real-network cold Finder latency or release readiness. macOS 26 and Intel runtime
+remain unqualified. See
 [the mounted record](fskit-acceptance.md),
 [the user guide](user-guide.md), and
 [Contributing](../../CONTRIBUTING.md) for visible behavior and engine invariants.

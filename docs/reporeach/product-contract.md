@@ -90,34 +90,41 @@ metadata. Ownership receipts and journals also protect that cleanup.
 
 ## Acceptance status
 
-The installed signed local9 build at `7280ba1` passed both disposable mounted
-sequences on macOS 27.0.1 ARM64: primary in 6.84 seconds and cold storage in
-6.43 seconds. It proved ordinary-folder placement, dirty adoption and native Git
-state preservation, Keep, app-off offline access, metadata-aware Free refusal,
-clean full cleanup, and reacquisition. Its initial preview took 226 ms, cached
-listing 3 ms, and prepared names-only listing 5 ms. Listing left all five fixture
-blobs missing with no source HTTP requests or blob-cache content. These fixture
-timings do not measure Finder navigation or real GitHub network latency.
+The installed signed `0.1.0-local.12` build uses clean executable source
+`7d17d837b5d2bfa9186abc855969cdc7e5f06e02`.
+Ordered CLI build, vet, and full Go tests passed. Both mounted fixture sequences
+passed on macOS 27.0.1 ARM64: primary in 7.78 seconds and cold storage in
+7.39 seconds. They verified ordinary-folder placement, dirty adoption and native
+Git state preservation, Keep, app-off offline access, metadata-aware Free refusal,
+full clean cleanup, and reacquisition.
 
-Actual Finder checks on local10 verified traversal of the ordinary root and
-GitHub preview directories without permission badges. Missing Finder actions
-were traced to status-cache location and resolved private-volume paths, with
-corrections in local11. The extended local11 mounted sequence found a symlink
-mode regression and clarified that native opens can request exact unknown sizes;
-those fixes and the full `a6fc122` read-only content path require local12
-qualification. No final Finder latency or release-readiness claim is made. See
-the [mounted acceptance record](fskit-acceptance.md) for tested scope.
+In the cold fixture, initial preview acquisition took 199 ms, cached listing 2 ms,
+and prepared names-only listing 5 ms. Listing made no source HTTP requests and
+left all five blobs missing with an empty content cache. A manual-source native
+open requiring an unknown exact size took 431 ms and five requests including
+metadata; it acquired only the selected 20-byte blob, leaving the other four
+absent and the writable engine unprepared. The first read then took 2 ms with
+zero requests. Keep verified five unique blobs totaling 107 bytes, and offline
+reads required zero requests. These are loopback fixture measurements, not Finder
+navigation or GitHub network timings.
 
-Source tests do not establish that Finder's cold experience is fixed. Validate the
-signed local build using disposable fixtures and record source requests, prepared
-repos, hydrated blobs, and elapsed time separately for root/org browsing, entering
-one repo, traversing subdirectories, and reading one file. Include real committed
-Finder metadata filenames and the synthetic `.git` entry so shortcuts cannot pass
-by hiding them.
+Actual Finder checks on local12 opened an ordinary root with 14 organization
+folders, a group of four repos, a 49-entry repository, and nested directories
+without permission alerts or red badges. The selected repository's tree metadata
+was already cached. Root/org navigation left its content cache empty; entering
+the repo caused thumbnails to acquire four selected image blobs totaling
+18,741 bytes. It remained virtual without preparing a writable checkout, and
+the total engine registrations stayed at 114 throughout. Keep and Refresh actions on its public catalogue path were enabled while Free was disabled with no cached content;
+after thumbnail downloads, nested context menus enabled Keep, Free, and Refresh.
+No conversion action was invoked on the user's repository.
 
-Further acceptance must verify Finder navigation and repeat the relevant storage,
-restart recovery, and busy-operation checks for the final combined build.
-Do not use the user's live checkout as a conversion experiment.
+These observations establish traversal, action availability, and selected-thumbnail
+hydration on the tested Mac. UI capture duration is not filesystem latency, and a
+real-network cold GitHub Finder benchmark remains unqualified. macOS 26 and Intel
+runtime are also unqualified. See the [mounted acceptance record](fskit-acceptance.md)
+for precise scope. Further release qualification must cover remaining recovery,
+failure, and cache-coherence gates using disposable fixtures; do not convert the
+user's live checkout as an experiment.
 
 Historical beta.3 downloads retain their macFUSE transport, separate-clone
 adoption, and cache-based Keep behavior. Native development changes do not alter
