@@ -292,26 +292,400 @@ final class FSVolumeReadTests: XCTestCase {
         XCTAssertTrue(fixture.failures.isEmpty)
     }
 
-    private func prepare(_ fixture: VolumeReadFixture) async throws -> (RepoReachVolume, FSItem) {
+    func testNonWritableDescriptorResourceSelectsWritableRepositoryAccess() async throws {
+        guard #available(macOS 26.0, *) else { throw XCTSkip("Path resources require macOS 26") }
+        let fixture = try VolumeReadFixture(read: { _ in VolumeReadFixture.binary(Data([7])) })
+        defer { fixture.stop() }
+        let resource = FSPathURLResource(url: URL(fileURLWithPath: fixture.socketPath).deletingLastPathComponent(), writable: false)
+        XCTAssertFalse(resource.isWritable)
+        let selected = RepoReachFileSystem.readOnlyPolicy(for: resource, taskOptions: [])
+        XCTAssertFalse(selected)
+        let (volume, item) = try await prepare(fixture, readOnly: selected)
+        let openError = try await open(volume, item: item, modes: .write)
+        XCTAssertNil(openError)
+        let bytes = Data([0, 255, 128, 0, 13, 10])
+
+        let result = try await write(volume, item: item, offset: 4, data: bytes)
+
+        XCTAssertNil(result.error)
+        XCTAssertEqual(result.count, bytes.count)
+        let request = try XCTUnwrap(fixture.requests.first { $0.operation == "write" })
+        XCTAssertEqual(request.body, bytes)
+        XCTAssertEqual(request.offset, 4)
+        XCTAssertEqual(request.handle, 101)
+        XCTAssertEqual(fixture.requests.filter { $0.operation == "open" }.map(\.access), [2])
+        let closeError = try await close(volume, item: item, modes: [])
+        XCTAssertNil(closeError)
+        try await shutdown(volume)
+        XCTAssertTrue(fixture.failures.isEmpty)
+    }
+
+    func testLoadReadOnlyRestrictionRequiresExactExplicitOption() throws {
+        guard #available(macOS 26.0, *) else { throw XCTSkip("Path resources require macOS 26") }
+        for writable in [false, true] {
+            let resource = FSPathURLResource(url: URL(fileURLWithPath: "/tmp/reporeach-test-connection"), writable: writable)
+            for options in [[], ["--rdonly=false"], ["--not-rdonly"], ["prefix--rdonly"], ["-o", "ro"]] {
+                XCTAssertFalse(RepoReachFileSystem.readOnlyPolicy(for: resource, taskOptions: options), "Unexpected load restriction: \(options)")
+            }
+            XCTAssertTrue(RepoReachFileSystem.readOnlyPolicy(for: resource, taskOptions: ["--rdonly"]))
+        }
+    }
+
+    func testHardLoadReadOnlyCannotBeOverriddenByWritableSessionOptions() async throws {
+        let fixture = try VolumeReadFixture(read: { _ in VolumeReadFixture.binary(Data([0, 255])) })
+        defer { fixture.stop() }
+        let (volume, item) = try await prepare(fixture, readOnly: true, taskOptions: ["-o", "rw"])
+        let mountError = try await mount(volume, taskOptions: ["-o", "rw"])
+        XCTAssertNil(mountError)
+        assertPOSIX(try await open(volume, item: item, modes: .write), EROFS)
+        let result = try await read(volume, item: item, length: 2)
+        XCTAssertNil(result.error)
+        XCTAssertEqual(result.count, 2)
+        XCTAssertEqual(fixture.requests.filter { $0.operation == "open" }.map(\.access), [1])
+        try await shutdown(volume)
+        XCTAssertTrue(fixture.failures.isEmpty)
+    }
+
+    func testActivationReadOnlyOptionsSurviveEmptyActivationAndMount() async throws {
+        for option in ["ro", "rdonly"] {
+            let fixture = try VolumeReadFixture(read: { _ in VolumeReadFixture.binary(Data([7])) })
+            defer { fixture.stop() }
+            let (volume, item) = try await prepare(fixture, taskOptions: ["-o", option])
+            let reactivation = try await activate(volume)
+            XCTAssertNil(reactivation.error)
+            let mountError = try await mount(volume)
+            XCTAssertNil(mountError)
+            assertPOSIX(try await open(volume, item: item, modes: .write), EROFS)
+            let result = try await read(volume, item: item, length: 1)
+            XCTAssertNil(result.error)
+            XCTAssertEqual(result.count, 1)
+            try await shutdown(volume)
+            XCTAssertTrue(fixture.failures.isEmpty)
+        }
+    }
+
+    func testFirstMountCanOverrideActivationPolicyInEitherDirection() async throws {
+        for initiallyReadOnly in [false, true] {
+            let fixture = try VolumeReadFixture(read: { _ in VolumeReadFixture.binary(Data()) })
+            defer { fixture.stop() }
+            let initial = initiallyReadOnly ? "ro" : "rw"
+            let opposite = initiallyReadOnly ? "rw" : "ro"
+            let (volume, item) = try await prepare(fixture, taskOptions: ["-o", initial])
+
+            let mountError = try await mount(volume, taskOptions: ["-o", opposite])
+
+            XCTAssertNil(mountError)
+            let requestCount = fixture.requests.count
+            let openError = try await open(volume, item: item, modes: .write)
+            let bytes = Data([0, 255, 128, 0])
+            let result = try await write(volume, item: item, data: bytes)
+            if initiallyReadOnly {
+                XCTAssertNil(openError)
+                XCTAssertNil(result.error)
+                XCTAssertEqual(result.count, bytes.count)
+                XCTAssertEqual(fixture.requests.filter { $0.operation == "write" }.map(\.body), [bytes])
+                let closeError = try await close(volume, item: item, modes: [])
+                XCTAssertNil(closeError)
+            } else {
+                assertPOSIX(openError, EROFS)
+                assertPOSIX(result.error, EROFS)
+                XCTAssertEqual(result.count, 0)
+                XCTAssertEqual(fixture.requests.count, requestCount)
+            }
+            try await shutdown(volume)
+            XCTAssertTrue(fixture.failures.isEmpty)
+        }
+    }
+
+    func testOrderedMountOptionsUseExactNamesAndReadOnlyPriorityWithinOneValue() async throws {
+        let cases: [([String], Bool)] = [
+            (["-o", "ro", "-o", "rw"], false),
+            (["-o", "rw", "-o", "ro"], true),
+            (["-o", "rw,ro"], true),
+            (["-o", "ro,rw"], true),
+            (["-o", "rdonly,rw"], true),
+            (["-o", "rw,noexec"], false),
+            (["-o", "arrow,read-only,rdonlyish"], false),
+            (["-o", "RO"], false),
+            (["-oro"], false),
+            (["-o", "ro", "-o", "unknown"], true),
+            (["-o", "rw", "--", "-o", "ro"], false),
+            (["-o", "ro", "--", "-o", "rw"], true)
+        ]
+        for (options, expectedReadOnly) in cases {
+            let fixture = try VolumeReadFixture(read: { _ in VolumeReadFixture.binary(Data()) })
+            defer { fixture.stop() }
+            let (volume, item) = try await prepare(fixture, taskOptions: options)
+            let error = try await open(volume, item: item, modes: .write)
+            if expectedReadOnly { assertPOSIX(error, EROFS) }
+            else {
+                XCTAssertNil(error, "Writable options rejected: \(options)")
+                let closeError = try await close(volume, item: item, modes: [])
+                XCTAssertNil(closeError)
+            }
+            try await shutdown(volume)
+            XCTAssertTrue(fixture.failures.isEmpty)
+        }
+    }
+
+    func testReadOnlyRejectsMutationCallbacksWithoutSendingMutationRequests() async throws {
+        let fixture = try VolumeReadFixture(read: { _ in VolumeReadFixture.binary(Data([0, 255])) })
+        defer { fixture.stop() }
+        let (volume, item) = try await prepare(fixture, taskOptions: ["-o", "ro"])
+        let activation = try await activate(volume)
+        XCTAssertNil(activation.error)
+        let root = try XCTUnwrap(activation.item)
+        let requestCount = fixture.requests.count
+        assertPOSIX(try await open(volume, item: item, modes: .write), EROFS)
+        let createError = try await create(volume, root: root)
+        assertPOSIX(createError, EROFS)
+        let attributes = FSItem.SetAttributesRequest()
+        attributes.size = 0
+        let setattrError = try await setAttributes(volume, item: item, attributes: attributes)
+        assertPOSIX(setattrError, EROFS)
+        let result = try await write(volume, item: item, data: Data([1]))
+        XCTAssertEqual(result.count, 0)
+        assertPOSIX(result.error, EROFS)
+        XCTAssertEqual(fixture.requests.count, requestCount)
+        XCTAssertFalse(attributes.wasAttributeConsumed(.size))
+
+        let readResult = try await read(volume, item: item, length: 2)
+
+        XCTAssertNil(readResult.error)
+        XCTAssertEqual(readResult.count, 2)
+        XCTAssertEqual(fixture.requests.filter { $0.operation == "open" }.map(\.access), [1])
+        XCTAssertTrue(fixture.requests.filter { ["create", "setattr", "write"].contains($0.operation) }.isEmpty)
+        try await shutdown(volume)
+        XCTAssertTrue(fixture.failures.isEmpty)
+    }
+
+    func testMountedPolicyCannotChangeButSamePolicyCallbacksRemainValid() async throws {
+        for initiallyReadOnly in [false, true] {
+            let fixture = try VolumeReadFixture(read: { _ in VolumeReadFixture.binary(Data()) })
+            defer { fixture.stop() }
+            let initial = initiallyReadOnly ? "ro" : "rw"
+            let opposite = initiallyReadOnly ? "rw" : "ro"
+            let (volume, item) = try await prepare(fixture, taskOptions: ["-o", initial])
+            let firstMountError = try await mount(volume)
+            XCTAssertNil(firstMountError)
+            let requestCount = fixture.requests.count
+            assertPOSIX(try await mount(volume, taskOptions: ["-o", opposite]), EBUSY)
+            let activation = try await activate(volume, taskOptions: ["-o", opposite])
+            assertPOSIX(activation.error, EBUSY)
+            XCTAssertEqual(fixture.requests.count, requestCount)
+            try await assertWritePolicy(volume, item: item, readOnly: initiallyReadOnly)
+            let samePolicy = try await activate(volume, taskOptions: ["-o", initial])
+            XCTAssertNil(samePolicy.error)
+            let sameMountError = try await mount(volume, taskOptions: ["-o", initial])
+            XCTAssertNil(sameMountError)
+            try await assertWritePolicy(volume, item: item, readOnly: initiallyReadOnly)
+            try await shutdown(volume)
+            XCTAssertTrue(fixture.failures.isEmpty)
+        }
+    }
+
+    func testRetainedReadHandlePreventsPolicyChangesUntilClosed() async throws {
+        let fixture = try VolumeReadFixture(read: { _ in VolumeReadFixture.binary(Data()) })
+        defer { fixture.stop() }
+        let (volume, item) = try await prepare(fixture)
+        let openError = try await open(volume, item: item, modes: .read)
+        XCTAssertNil(openError)
+        let requestCount = fixture.requests.count
+        assertPOSIX(try await mount(volume, taskOptions: ["-o", "ro"]), EBUSY)
+        let activation = try await activate(volume, taskOptions: ["-o", "ro"])
+        assertPOSIX(activation.error, EBUSY)
+        XCTAssertEqual(fixture.requests.count, requestCount)
+        let samePolicy = try await activate(volume, taskOptions: ["-o", "rw"])
+        XCTAssertNil(samePolicy.error)
+        let closeError = try await close(volume, item: item, modes: [])
+        XCTAssertNil(closeError)
+        let changed = try await activate(volume, taskOptions: ["-o", "ro"])
+        XCTAssertNil(changed.error)
+        assertPOSIX(try await open(volume, item: item, modes: .write), EROFS)
+        try await shutdown(volume)
+        XCTAssertTrue(fixture.failures.isEmpty)
+    }
+
+    func testPendingFailedReleasePreventsPolicyChangeBeforeDrain() async throws {
+        let fixture = try VolumeReadFixture(read: { _ in VolumeReadFixture.binary(Data([7])) },
+                                            release: { attempt in attempt == 1 ? EIO : 0 })
+        defer { fixture.stop() }
+        let (volume, item) = try await prepare(fixture)
+        let result = try await read(volume, item: item, length: 1)
+        assertPOSIX(result.error, EIO)
+        let requestCount = fixture.requests.count
+        let activation = try await activate(volume, taskOptions: ["-o", "ro"])
+        assertPOSIX(activation.error, EBUSY)
+        assertPOSIX(try await mount(volume, taskOptions: ["-o", "ro"]), EBUSY)
+        XCTAssertEqual(fixture.requests.count, requestCount)
+        try await shutdown(volume)
+        XCTAssertEqual(fixture.requests.filter { $0.operation == "release" }.map(\.handle), [101, 101])
+        XCTAssertTrue(fixture.failures.isEmpty)
+    }
+
+    func testFailedActivationAndMountDoNotPublishProposedReadOnlyPolicy() async throws {
+        for initiallyReadOnly in [false, true] {
+            let fixture = try VolumeReadFixture(read: { _ in VolumeReadFixture.binary(Data()) }, metadataFailure: { request, attempt in
+                (request.operation == "statfs" && attempt == 2) || (request.operation == "getattr" && attempt == 3) ? EIO : 0
+            })
+            defer { fixture.stop() }
+            let initial = initiallyReadOnly ? "ro" : "rw"
+            let opposite = initiallyReadOnly ? "rw" : "ro"
+            let (volume, item) = try await prepare(fixture, taskOptions: ["-o", initial])
+            let activation = try await activate(volume, taskOptions: ["-o", opposite])
+            assertPOSIX(activation.error, EIO)
+            try await assertWritePolicy(volume, item: item, readOnly: initiallyReadOnly)
+            assertPOSIX(try await mount(volume, taskOptions: ["-o", opposite]), EIO)
+            try await assertWritePolicy(volume, item: item, readOnly: initiallyReadOnly)
+            let changed = try await activate(volume, taskOptions: ["-o", opposite])
+            XCTAssertNil(changed.error)
+            try await assertWritePolicy(volume, item: item, readOnly: !initiallyReadOnly)
+            try await shutdown(volume)
+            XCTAssertTrue(fixture.failures.isEmpty)
+        }
+    }
+
+    func testDanglingMountOptionFailsWithoutChangingCurrentPolicyOrSendingRequests() async throws {
+        let fixture = try VolumeReadFixture(read: { _ in VolumeReadFixture.binary(Data()) })
+        defer { fixture.stop() }
+        let (volume, item) = try await prepare(fixture, taskOptions: ["-o", "ro"])
+        let requestCount = fixture.requests.count
+        let activation = try await activate(volume, taskOptions: ["-o"])
+        assertPOSIX(activation.error, EINVAL)
+        assertPOSIX(try await mount(volume, taskOptions: ["-o"]), EINVAL)
+        XCTAssertEqual(fixture.requests.count, requestCount)
+        assertPOSIX(try await open(volume, item: item, modes: .write), EROFS)
+        let changed = try await activate(volume, taskOptions: ["-o", "rw"])
+        XCTAssertNil(changed.error)
+        let openError = try await open(volume, item: item, modes: .write)
+        XCTAssertNil(openError)
+        let closeError = try await close(volume, item: item, modes: [])
+        XCTAssertNil(closeError)
+        try await shutdown(volume)
+        XCTAssertTrue(fixture.failures.isEmpty)
+    }
+
+    func testUnmountAndDeactivatePreserveReadOnlyUntilExplicitWritableActivation() async throws {
+        let fixture = try VolumeReadFixture(read: { _ in VolumeReadFixture.binary(Data()) })
+        defer { fixture.stop() }
+        let (volume, _) = try await prepare(fixture, taskOptions: ["-o", "ro"])
+        let mountError = try await mount(volume)
+        XCTAssertNil(mountError)
+        try await unmount(volume)
+        let deactivateError = try await deactivate(volume)
+        XCTAssertNil(deactivateError)
+        let activation = try await activate(volume)
+        XCTAssertNil(activation.error)
+        let root = try XCTUnwrap(activation.item)
+        let item = try await lookup(volume, root: root)
+        assertPOSIX(try await open(volume, item: item, modes: .write), EROFS)
+        let changed = try await activate(volume, taskOptions: ["-o", "rw"])
+        XCTAssertNil(changed.error)
+        let openError = try await open(volume, item: item, modes: .write)
+        XCTAssertNil(openError)
+        let closeError = try await close(volume, item: item, modes: [])
+        XCTAssertNil(closeError)
+        try await shutdown(volume)
+        XCTAssertTrue(fixture.failures.isEmpty)
+    }
+
+    private func prepare(_ fixture: VolumeReadFixture, readOnly: Bool = false,
+                         taskOptions: [String] = []) async throws -> (RepoReachVolume, FSItem) {
         let client = FSBridgeClient(configuration: try FSBridgeConfiguration(socketPath: fixture.socketPath, token: VolumeReadFixture.token))
-        let volume = RepoReachVolume(client: client, identifier: UUID(), readOnly: false)
+        let volume = RepoReachVolume(client: client, identifier: UUID(), readOnly: readOnly)
+        let root = try await activate(volume, taskOptions: taskOptions)
+        if let error = root.error { throw error }
+        let item = try await lookup(volume, root: try XCTUnwrap(root.item))
+        return (volume, item)
+    }
+
+    private func activate(_ volume: RepoReachVolume, taskOptions: [String] = []) async throws -> ItemReply.Value {
         let activated = expectation(description: "Production volume activated")
         let rootReply = ItemReply()
-        volume.activate { item, error in rootReply.store(item: item, error: error); activated.fulfill() }
+        volume.activate(taskOptions: taskOptions) { item, error in rootReply.store(item: item, error: error); activated.fulfill() }
         await fulfillment(of: [activated], timeout: 3)
-        let root = try XCTUnwrap(rootReply.value)
-        if let error = root.error { throw error }
-        let rootItem = try XCTUnwrap(root.item)
+        return try XCTUnwrap(rootReply.value)
+    }
+
+    private func lookup(_ volume: RepoReachVolume, root: FSItem) async throws -> FSItem {
         let lookedUp = expectation(description: "Production file item looked up")
         let itemReply = ItemReply()
-        volume.lookupItem(named: FSFileName(string: "binary"), inDirectory: rootItem) { item, _, error in
+        volume.lookupItem(named: FSFileName(string: "binary"), inDirectory: root) { item, _, error in
             itemReply.store(item: item, error: error)
             lookedUp.fulfill()
         }
         await fulfillment(of: [lookedUp], timeout: 3)
         let file = try XCTUnwrap(itemReply.value)
         if let error = file.error { throw error }
-        return (volume, try XCTUnwrap(file.item))
+        return try XCTUnwrap(file.item)
+    }
+
+    private func mount(_ volume: RepoReachVolume, taskOptions: [String] = []) async throws -> Error? {
+        let finished = expectation(description: "Production mount callback")
+        let reply = ReadReply()
+        volume.mount(taskOptions: taskOptions) { error in reply.store(count: 0, error: error); finished.fulfill() }
+        await fulfillment(of: [finished], timeout: 3)
+        return try XCTUnwrap(reply.value).error
+    }
+
+    private func unmount(_ volume: RepoReachVolume) async throws {
+        let finished = expectation(description: "Production unmount drained")
+        let completed = CompletionFlag()
+        volume.unmount { completed.complete(); finished.fulfill() }
+        await fulfillment(of: [finished], timeout: 3)
+        guard completed.value else { throw FSBridgeError.timedOut }
+    }
+
+    private func deactivate(_ volume: RepoReachVolume) async throws -> Error? {
+        let finished = expectation(description: "Production deactivate callback")
+        let reply = ReadReply()
+        volume.deactivate(options: []) { error in reply.store(count: 0, error: error); finished.fulfill() }
+        await fulfillment(of: [finished], timeout: 3)
+        return try XCTUnwrap(reply.value).error
+    }
+
+    private func create(_ volume: RepoReachVolume, root: FSItem) async throws -> Error? {
+        let finished = expectation(description: "Production create callback")
+        let reply = ItemReply()
+        volume.createItem(named: FSFileName(string: "new-file"), type: .file, inDirectory: root,
+                          attributes: FSItem.SetAttributesRequest()) { item, _, error in
+            reply.store(item: item, error: error); finished.fulfill()
+        }
+        await fulfillment(of: [finished], timeout: 3)
+        let result = try XCTUnwrap(reply.value)
+        XCTAssertNil(result.item)
+        return result.error
+    }
+
+    private func setAttributes(_ volume: RepoReachVolume, item: FSItem,
+                               attributes: FSItem.SetAttributesRequest) async throws -> Error? {
+        let finished = expectation(description: "Production setattr callback")
+        let reply = ReadReply()
+        volume.setAttributes(attributes, on: item) { result, error in
+            XCTAssertNil(result); reply.store(count: 0, error: error); finished.fulfill()
+        }
+        await fulfillment(of: [finished], timeout: 3)
+        return try XCTUnwrap(reply.value).error
+    }
+
+    private func write(_ volume: RepoReachVolume, item: FSItem, offset: off_t = 0, data: Data) async throws -> ReadReply.Value {
+        let finished = expectation(description: "Production write callback")
+        let reply = ReadReply()
+        volume.write(contents: data, to: item, at: offset) { count, error in
+            reply.store(count: count, error: error); finished.fulfill()
+        }
+        await fulfillment(of: [finished], timeout: 3)
+        return try XCTUnwrap(reply.value)
+    }
+
+    private func assertWritePolicy(_ volume: RepoReachVolume, item: FSItem, readOnly: Bool) async throws {
+        let error = try await open(volume, item: item, modes: .write)
+        if readOnly { assertPOSIX(error, EROFS) }
+        else {
+            XCTAssertNil(error)
+            let closeError = try await close(volume, item: item, modes: [])
+            XCTAssertNil(closeError)
+        }
     }
 
     private func read(_ volume: RepoReachVolume, item: FSItem, offset: off_t = 0, length: Int,
@@ -400,6 +774,7 @@ private final class VolumeReadFixture: @unchecked Sendable {
         let access: UInt32?
         let offset: UInt64?
         let size: Int?
+        let body: Data
     }
     static let token = String(repeating: "a", count: 64)
     let socketPath: String
@@ -414,20 +789,24 @@ private final class VolumeReadFixture: @unchecked Sendable {
     private var stopped = false
     private var handle: UInt64 = 100
     private var releases = 0
+    private var metadataAttempts: [String: Int] = [:]
     private let readResponse: (Request) -> Data?
     private let releaseResponse: (Int) -> Int32
     private let onOpen: (UInt64) -> Void
+    private let metadataFailure: (Request, Int) -> Int32
     var requests: [Request] { locked { recorded } }
     var failures: [String] { locked { recordedFailures } }
 
     init(read: @escaping (Request) -> Data?, release: @escaping (Int) -> Int32 = { _ in 0 },
-         onOpen: @escaping (UInt64) -> Void = { _ in }) throws {
+         onOpen: @escaping (UInt64) -> Void = { _ in },
+         metadataFailure: @escaping (Request, Int) -> Int32 = { _, _ in 0 }) throws {
         directory = URL(fileURLWithPath: "/tmp/rr-fsv-" + UUID().uuidString.prefix(8), isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
         socketPath = directory.appendingPathComponent("socket").path
         readResponse = read
         releaseResponse = release
         self.onOpen = onOpen
+        self.metadataFailure = metadataFailure
         listener = Darwin.socket(AF_UNIX, SOCK_STREAM, 0)
         guard listener >= 0 else {
             let code = Darwin.errno
@@ -495,9 +874,18 @@ private final class VolumeReadFixture: @unchecked Sendable {
         do {
             let request = try Self.request(fd)
             locked { recorded.append(request) }
+            if request.operation != "read" && request.operation != "write" {
+                let attempt = locked { () -> Int in
+                    metadataAttempts[request.operation, default: 0] += 1
+                    return metadataAttempts[request.operation]!
+                }
+                let failure = metadataFailure(request, attempt)
+                if failure != 0 { Self.send(Self.error(failure), to: fd); return }
+            }
             let response: Data?
             switch request.operation {
             case "read": response = readResponse(request)
+            case "write": response = try Self.metadata(["written": request.body.count])
             case "getattr": response = try Self.metadata(["node": Self.node(inode: 1, type: "dir")])
             case "lookup": response = try Self.metadata(["node": Self.node(inode: 7, type: "file")])
             case "statfs": response = try Self.metadata([:])
@@ -569,21 +957,23 @@ private final class VolumeReadFixture: @unchecked Sendable {
             headers[line[..<colon].lowercased()] = line[line.index(after: colon)...].trimmingCharacters(in: .whitespaces)
         }
         guard headers["authorization"] == "Bearer " + token, let rawLength = headers["content-length"],
-              let length = Int(rawLength), length >= 0, length <= 65_536 else { throw FSBridgeError.invalidRequest }
+              let length = Int(rawLength), length >= 0, length <= FSBridgeClient.maximumChunkSize else { throw FSBridgeError.invalidRequest }
         var body = Data(bytes[ending.upperBound...])
         while body.count < length { try receive(fd, into: &body) }
         guard body.count == length else { throw FSBridgeError.invalidRequest }
-        if first[0] == "GET", let url = URLComponents(string: String(first[1])), url.path == "/v1/fs/read" {
+        if let url = URLComponents(string: String(first[1])),
+           (first[0] == "GET" && url.path == "/v1/fs/read") || (first[0] == "PUT" && url.path == "/v1/fs/write") {
             let fields = Dictionary(uniqueKeysWithValues: (url.queryItems ?? []).map { ($0.name, $0.value ?? "") })
-            return Request(operation: "read", inode: fields["inode"].flatMap(UInt64.init), handle: fields["handle"].flatMap(UInt64.init),
-                           access: nil, offset: fields["offset"].flatMap(UInt64.init), size: fields["size"].flatMap(Int.init))
+            return Request(operation: first[0] == "GET" ? "read" : "write", inode: fields["inode"].flatMap(UInt64.init),
+                           handle: fields["handle"].flatMap(UInt64.init), access: nil, offset: fields["offset"].flatMap(UInt64.init),
+                           size: first[0] == "GET" ? fields["size"].flatMap(Int.init) : body.count, body: body)
         }
         guard first[0] == "POST", first[1] == "/v1/fs",
               let fields = try JSONSerialization.jsonObject(with: body) as? [String: Any],
               let op = fields["op"] as? String else { throw FSBridgeError.invalidRequest }
         return Request(operation: op, inode: (fields["inode"] as? NSNumber)?.uint64Value,
                        handle: (fields["handle"] as? NSNumber)?.uint64Value, access: (fields["access"] as? NSNumber)?.uint32Value,
-                       offset: nil, size: nil)
+                       offset: nil, size: nil, body: body)
     }
     private static func receive(_ fd: Int32, into bytes: inout Data) throws {
         var buffer = [UInt8](repeating: 0, count: 8192)

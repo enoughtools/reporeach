@@ -1,5 +1,5 @@
 #!/bin/bash
-# Run production FSVolume read lifecycle tests without an app or system mount.
+# Run production filesystem policy and read lifecycle tests without an app or system mount.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
@@ -14,7 +14,7 @@ test "$SWIFT_MAJOR" -ge 6 || { echo "FSKit read tests require Swift 6 or later."
 PACKAGE_DIR="$(mktemp -d /tmp/rr-volume-reads.XXXXXX)"
 trap 'rm -rf -- "$PACKAGE_DIR"' EXIT
 mkdir -p "$PACKAGE_DIR/Sources/NativeFilesystem" "$PACKAGE_DIR/Tests/NativeFilesystemTests"
-for source in BridgeModels BridgeConfiguration BridgeClient BridgeTransport RepoReachVolume; do
+for source in BridgeModels BridgeConfiguration BridgeClient BridgeTransport RepoReachVolume RepoReachFileSystem; do
   cp "$ROOT/native/FSKitExtension/$source.swift" "$PACKAGE_DIR/Sources/NativeFilesystem/"
 done
 cp "$ROOT/native/Shared/FSBridgeContainer.swift" "$PACKAGE_DIR/Sources/NativeFilesystem/"

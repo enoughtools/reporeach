@@ -166,7 +166,9 @@ final class RepoReachVolume: FSVolume, FSVolume.Operations,
     private struct IOResult { let count: Int; let error: Error? }
 
     private var client: FSBridgeClient
-    private let readOnly: Bool
+    private let loadReadOnly: Bool
+    private var sessionReadOnly = false
+    private var readOnly: Bool { locked { loadReadOnly || sessionReadOnly } }
     private let gate = VolumeOperationGate()
     private let lock = NSLock()
     private let logger = Logger(subsystem: "com.enoughtools.reporeach", category: "FSKitVolume")
@@ -189,7 +191,7 @@ final class RepoReachVolume: FSVolume, FSVolume.Operations,
 
     init(client: FSBridgeClient, identifier: UUID, readOnly: Bool) {
         self.client = client
-        self.readOnly = readOnly
+        self.loadReadOnly = readOnly
         super.init(volumeID: FSVolume.Identifier(uuid: identifier),
                    volumeName: FSFileName(string: "RepoReach"))
     }
@@ -239,35 +241,82 @@ final class RepoReachVolume: FSVolume, FSVolume.Operations,
 
     func activate(options: FSTaskOptions,
                   replyHandler: @escaping (FSItem?, Error?) -> Void) {
-        activate(replyHandler: replyHandler)
+        activate(taskOptions: options.taskOptions, replyHandler: replyHandler)
     }
 
-    /// Activation has no volume-specific options. Keeping this entry point free
-    /// of framework-created task options also permits host-side bridge validation.
+    /// The host-side entry point uses the same option policy as FSKit without
+    /// constructing framework-owned task options.
     func activate(replyHandler: @escaping (FSItem?, Error?) -> Void) {
+        activate(taskOptions: [], replyHandler: replyHandler)
+    }
+
+    func activate(taskOptions: [String], replyHandler: @escaping (FSItem?, Error?) -> Void) {
         perform(exclusive: true, reply: replyHandler) {
+            let policy = try self.nextSessionReadOnly(taskOptions)
             try await self.ensureConnection()
             let root = try self.requireNode(try await self.client.request(FSBridgeRequest(op: "getattr", inode: 1)))
             guard root.inode == 1, root.attributes.type == .dir else { throw POSIXError(.EIO) }
             let item = try self.retain(root, parent: 1, grantsReference: false)
             let response = try await self.client.request(FSBridgeRequest(op: "statfs"))
-            self.locked { self.statistics = response.stat; self.isActive = true }
+            self.locked {
+                self.statistics = response.stat
+                self.sessionReadOnly = policy
+                self.isActive = true
+            }
             return item
         }
     }
 
     func mount(options: FSTaskOptions, replyHandler: @escaping (Error?) -> Void) {
-        mount(replyHandler: replyHandler)
+        mount(taskOptions: options.taskOptions, replyHandler: replyHandler)
     }
 
     func mount(replyHandler: @escaping (Error?) -> Void) {
+        mount(taskOptions: [], replyHandler: replyHandler)
+    }
+
+    func mount(taskOptions: [String], replyHandler: @escaping (Error?) -> Void) {
         perform(exclusive: true, reply: replyHandler) {
             guard self.locked({ self.isActive }) else { throw POSIXError(.ENXIO) }
+            let policy = try self.nextSessionReadOnly(taskOptions)
             try await self.ensureConnection()
             let root = try self.requireNode(try await self.client.request(FSBridgeRequest(op: "getattr", inode: 1)))
             guard root.inode == 1, root.attributes.type == .dir else { throw POSIXError(.EIO) }
             _ = try self.retain(root, parent: 1, grantsReference: false)
-            self.locked { self.isMounted = true }
+            self.locked { self.sessionReadOnly = policy; self.isMounted = true }
+        }
+    }
+
+    /// Apple mount(8) forwards mount options as ordered `-o`, value pairs.
+    /// Each value can contain comma-separated options; ro/rdonly takes priority
+    /// within that value, and a later value can override an earlier one.
+    private static func readOnlyOption(_ options: [String]) throws -> Bool? {
+        var selected: Bool?
+        var index = 0
+        while index < options.count {
+            guard options[index] != "--" else { break }
+            guard options[index] == "-o" else { index += 1; continue }
+            guard index + 1 < options.count else { throw POSIXError(.EINVAL) }
+            let values = Set(options[index + 1].split(separator: ",").map(String.init))
+            if values.contains("ro") || values.contains("rdonly") { selected = true }
+            else if values.contains("rw") { selected = false }
+            index += 2
+        }
+        return selected
+    }
+
+    /// The exclusive operation permit holds this proposal stable until a
+    /// successful activation/mount publishes it. Retained descriptors and an
+    /// attached mount forbid changing effective access, even after deactivation.
+    private func nextSessionReadOnly(_ options: [String]) throws -> Bool {
+        let requested = try Self.readOnlyOption(options)
+        return try locked {
+            let selected = requested ?? sessionReadOnly
+            let changesAccess = (loadReadOnly || selected) != (loadReadOnly || sessionReadOnly)
+            let hasHandles = items.values.contains { !$0.handles.isEmpty } || !directories.isEmpty ||
+                !pendingHandles.isEmpty || pendingOpenCount > 0
+            guard !changesAccess || (!isMounted && !hasHandles) else { throw POSIXError(.EBUSY) }
+            return selected
         }
     }
 

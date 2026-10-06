@@ -96,7 +96,27 @@ This proves dispatch into the module, without proving which write-policy input
 caused the refusal. Normal cleanup, cached global attachment absence, helper
 exit and fixture removal were confirmed. A narrow diagnostic now records only
 resource-writability and read-only-policy Booleans plus static refusal text;
-policy and security checks remain unchanged while that cause is established.
+the diagnostic build preserved the existing policy and security checks.
+The complete `7b98a2b` diagnostic copy reproduced the failure. Its exact volume
+PID `52133` recorded `resourceWritable=false`, `explicitlyReadOnly=false` and
+`selectedReadOnly=true` at 01:43 UTC, then logged the local write-open policy
+refusal alongside errno 30. The connection URL describes the private descriptor
+folder; repository data is written through the separately authorized app-group
+bridge. Its resource flag therefore incorrectly made an otherwise writable
+virtual tree read-only. Normal cleanup completed again.
+
+The policy correction derives load access from the explicit `--rdonly` option.
+Activation and mount callbacks honor ordered `-o` options, preserving read-only
+access when later callbacks carry no access option. A hard load restriction
+cannot be cleared, and changing effective access while mounted or holding
+handles fails before any lifecycle request. Policy changes publish only after a
+successful callback. The descriptor and app-group authorization checks remain
+unchanged. All 22 focused production-volume tests pass, including binary
+writes with a nonwritable descriptor resource, read-only mutation refusal,
+option precedence, mounted and retained-handle restrictions, and failed-callback
+rollback. The old resource-derived policy fails the binary-write regression.
+The actual Go/Swift callback integration also passes; the complete corrected
+app still requires mounted acceptance.
 
 [CI run 37362001784](https://github.com/enoughtools/reporeach/actions/runs/37362001784), at source `6a62f2f`, passed all seven jobs, including complete Apple Silicon and Intel app/module builds with Xcode 26.6, bundle layout, native tests, and Go–Swift bridge tests. It did not activate or mount the extension and predates the activation-metadata correction. [CI run 37372960522](https://github.com/enoughtools/reporeach/actions/runs/37372960522), at `e453faf`, passed Linux mounted filesystem checks, both macOS management builds and both complete SDK 26 products with native and bridge tests. Engine and website jobs were cancelled before acquiring hosted runners; no implementation step ran in those jobs. An explicitly requested [local-validation export](../../scripts/README.md) remains available for a compatible host without a suitable local Xcode and keeps signing keys on the local Mac. A successful mounted test here would establish macOS 27 behavior; macOS 26 mounted evidence would still need to be recorded separately.
 
@@ -138,7 +158,7 @@ The private bridge currently refuses an existing socket rather than automaticall
 | Platform mechanism and chosen folder | Apple documents macOS 26 URL resources, user-space extensions, normal extension enablement, and a mount at a chosen home-directory path. |
 | RepoReach extension and Go bridge | Implemented and exercised through real local socket and FSVolume callback tests. No production mounted-backend claim. |
 | SDK compilation | Complete app/extension ARM64 and Intel compilation and layout checks passed in macOS 26/Xcode 26.6 CI; ARM64 also passes locally with Xcode 27/SDK 27. |
-| Local activation experiment | The group-enabled module attaches; lazy text/binary/symlink reads, executable launch and Git HEAD/status reads pass. First mounted file write returns EROFS; its policy cause is being traced. Commit/cache/reconnect acceptance remains outstanding. Normal cleanup is confirmed. |
+| Local activation experiment | The group-enabled module attaches; lazy text/binary/symlink reads, executable launch and Git HEAD/status reads pass. Diagnostic proof identifies descriptor-resource writability as the incorrect read-only policy input. The correction and commit/cache/reconnect acceptance remain outstanding. Normal cleanup is confirmed. |
 | Distribution authorization | Matching FSKit-enabled Developer ID provisioning profile is still missing. |
 | Kernel cache coherence | Persistent working-tree and quiescent catalogue policies are implemented in source; actual macOS 26 mounted proof remains outstanding. |
 | Existing beta.3 proof | Historical Go/native/Linux FUSE evidence remains valid for that release and is not FSKit evidence. |

@@ -91,7 +91,7 @@ final class RepoReachFileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations 
             return
         }
         let explicitlyReadOnly = options.taskOptions.contains("--rdonly")
-        let readOnly = !pathResource.isWritable || explicitlyReadOnly
+        let readOnly = Self.readOnlyPolicy(for: pathResource, taskOptions: options.taskOptions)
         logger.notice("Load policy resourceWritable=\(pathResource.isWritable, privacy: .public) explicitlyReadOnly=\(explicitlyReadOnly, privacy: .public) selectedReadOnly=\(readOnly, privacy: .public)")
         Task {
             do {
@@ -109,6 +109,13 @@ final class RepoReachFileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations 
                 replyHandler(nil, Self.posixError(error))
             }
         }
+    }
+
+    /// The path resource contains connection metadata. Repository writes use
+    /// the authenticated bridge, so its directory write capability is unrelated
+    /// to dataset access. FSKit's explicit load restriction still applies.
+    static func readOnlyPolicy(for _: FSPathURLResource, taskOptions: [String]) -> Bool {
+        taskOptions.contains("--rdonly")
     }
 
     func unloadResource(resource: FSResource, options: FSTaskOptions,
