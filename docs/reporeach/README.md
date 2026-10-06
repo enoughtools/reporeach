@@ -4,6 +4,7 @@ RepoReach is an [Enough Tools](https://enoughtools.com) macOS app built on [Clou
 
 This documentation describes the current beta source. A packaged release's download manifest and release notes are the authority for its version, architecture, signing, and notarization status.
 
+- [Product contract and current gaps](product-contract.md): cold browsing first, chosen-folder behavior, adoption of existing checkouts, and ordinary local storage requirements for the native development build.
 - [Using the beta](user-guide.md): setup, virtual folders, Git work, offline downloads, and freeing space.
 - [Platform setup](platform-setup.md): macFUSE's kernel backend, signing, security approval, and Finder extension settings.
 - [Architecture](architecture.md): the native app, local service, catalogue filesystem, and ArtifactFS storage.

@@ -1,5 +1,11 @@
 # RepoReach architecture
 
+The [product contract](product-contract.md) defines the target behavior and the
+current native development gaps. The architecture below describes the existing
+implementation; its separate managed adoption and cache-based Keep Downloaded
+operations do not yet satisfy in-place adoption or ordinary local checkout
+requirements. Cold Finder browsing is the first acceptance priority.
+
 RepoReach combines a macOS management app with a Git-backed filesystem. Enough Tools owns the desktop product in this repository; the underlying engine comes from Cloudflare ArtifactFS and retains its Go module path, `github.com/cloudflare/artifact-fs`.
 
 The transport described below is the published beta.3 FUSE architecture. A bundled native FSKit backend for macOS 26 is under development; its design and unresolved acceptance requirements are recorded in [Native FSKit](native-fskit.md). Historical beta.3 validation does not establish a mounted FSKit backend.
