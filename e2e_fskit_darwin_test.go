@@ -78,6 +78,8 @@ func TestFSKitMountedAcceptance(t *testing.T) {
 	binary := []byte{0, 255, 128, '\n', 0, 254, 1, 2}
 	fsKitWrite(t, filepath.Join(source, "tracked.txt"), text, 0o644)
 	fsKitWrite(t, filepath.Join(source, "binary.dat"), binary, 0o644)
+	stableText := []byte("unchanged metadata identity\n")
+	fsKitWrite(t, filepath.Join(source, "metadata-stable.txt"), stableText, 0o644)
 	fsKitWrite(t, filepath.Join(source, "executable"), []byte("#!/bin/sh\nprintf '%s\\n' fixture-executable\n"), 0o755)
 	if err := os.Symlink("tracked.txt", filepath.Join(source, "link")); err != nil {
 		t.Fatal(err)
@@ -108,11 +110,22 @@ func TestFSKitMountedAcceptance(t *testing.T) {
 	h.identity(t)
 	waitDesktopCatalogueNames(t, h.mount, []string{owner})
 	waitDesktopCatalogueNames(t, filepath.Join(h.mount, owner), []string{"project"})
-	h.request(t, http.MethodGet, "/v1/status", nil, &status)
-	if desktopAdoptedRepository(t, status, repoID).State != "virtual" {
-		t.Fatal("listing catalogue placeholders acquired the Git checkout")
-	}
 	repo := filepath.Join(h.mount, owner, "project")
+	// Native metadata calls on synthetic directories must stay lazy, including
+	// mutations. Each identity keeps distinct bytes under the same names.
+	metadata := []fsKitXattrExpectation{
+		fsKitProbeNativeXattrs(t, fsKitXattrTarget{path: h.mount}, "catalogue root"),
+		fsKitProbeNativeXattrs(t, fsKitXattrTarget{path: filepath.Join(h.mount, owner)}, "owner placeholder"),
+		fsKitProbeNativeXattrs(t, fsKitXattrTarget{path: repo}, "repository placeholder"),
+	}
+	fsKitAssertNativeXattrs(t, "placeholder metadata", metadata)
+	h.request(t, http.MethodGet, "/v1/status", nil, &status)
+	if status.Account != nil || desktopAdoptedRepository(t, status, repoID).State != "virtual" {
+		t.Fatal("listing or metadata calls on catalogue placeholders acquired the Git checkout or account")
+	}
+	if _, err := os.Stat(ghSentinel); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("placeholder metadata invoked GitHub CLI: %v", err)
+	}
 	fsKitReadEqual(t, filepath.Join(repo, "tracked.txt"), text)
 	fsKitReadEqual(t, filepath.Join(repo, "binary.dat"), binary)
 	fsKitReadEqual(t, filepath.Join(repo, "link"), text)
@@ -129,6 +142,29 @@ func TestFSKitMountedAcceptance(t *testing.T) {
 	if head := strings.TrimSpace(fsKitGit(t, repo, "rev-parse", "HEAD")); head != initialHead {
 		t.Fatalf("adoption HEAD=%s want %s", head, initialHead)
 	}
+	fsKitCleanGit(t, repo)
+
+	// These go through Darwin's installed filesystem API, rather than the bridge
+	// endpoint. A committed file that Git never changes is the persistence probe.
+	stableFile := filepath.Join(repo, "metadata-stable.txt")
+	fsKitReadEqual(t, stableFile, stableText)
+	metadata = append(metadata, fsKitProbeNativeXattrs(t, fsKitXattrTarget{path: stableFile}, "unchanged committed file"))
+	symlinkMetadata := fsKitProbeNativeXattrs(t, fsKitXattrTarget{path: filepath.Join(repo, "link"), noFollow: true}, "symlink without following")
+	fsKitAssertNativeXattrsMissing(t, fsKitXattrTarget{path: filepath.Join(repo, "tracked.txt")}, symlinkMetadata.names())
+	if target, err := os.Readlink(filepath.Join(repo, "link")); err != nil || target != "tracked.txt" {
+		t.Fatalf("native symlink metadata changed its target: %q, %v", target, err)
+	}
+	actualGitDir := strings.TrimSpace(fsKitGit(t, repo, "rev-parse", "--absolute-git-dir"))
+	physicalGitDir, err := filepath.EvalSymlinks(actualGitDir)
+	if err != nil || physicalGitDir != actualGitDir || !strings.HasPrefix(actualGitDir, filepath.Join(h.state, "engine")+string(os.PathSeparator)) {
+		t.Fatalf("virtual .git did not identify private fixture Git storage: %v", err)
+	}
+	actualGitMetadata := fsKitSnapshotNativeXattrs(t, fsKitXattrTarget{path: actualGitDir})
+	fsKitProbeNativeXattrs(t, fsKitXattrTarget{path: filepath.Join(repo, ".git")}, "virtual gitfile")
+	if after := fsKitSnapshotNativeXattrs(t, fsKitXattrTarget{path: actualGitDir}); !reflect.DeepEqual(actualGitMetadata, after) {
+		t.Fatal("virtual .git metadata mutated actual GitDir attributes")
+	}
+	fsKitAssertNativeXattrs(t, "body activation", metadata)
 	fsKitCleanGit(t, repo)
 
 	// Native Git writes must remain coherent after warm reads and branch checkout.
@@ -154,6 +190,7 @@ func TestFSKitMountedAcceptance(t *testing.T) {
 	fsKitReadEqual(t, filepath.Join(repo, "branch-only.txt"), []byte("branch-only\n"))
 	fsKitCleanGit(t, repo)
 	fsKitRetainedFile(t, repo)
+	fsKitAssertNativeXattrs(t, "branch changes", metadata)
 
 	// A cwd and open file are retained during a normal detach attempt. No saved
 	// visibility, pin, operation or source state may change when it is refused.
@@ -229,6 +266,7 @@ func TestFSKitMountedAcceptance(t *testing.T) {
 	reconnect("/v1/repositories/visibility", map[string]any{"id": repoID, "enabled": true})
 	waitDesktopCataloguePathPresent(t, repo)
 	fsKitReadEqual(t, filepath.Join(repo, "tracked.txt"), branchText)
+	fsKitAssertNativeXattrs(t, "repository hide/show", metadata)
 	reconnect("/v1/organizations/settings", map[string]any{"owner": owner, "enabled": false})
 	waitDesktopCataloguePathMissing(t, filepath.Join(h.mount, owner))
 	reconnect("/v1/repositories/visibility", map[string]any{"id": repoID, "enabled": false})
@@ -236,6 +274,7 @@ func TestFSKitMountedAcceptance(t *testing.T) {
 	waitDesktopCataloguePathMissing(t, repo)
 	reconnect("/v1/repositories/visibility", map[string]any{"id": repoID, "enabled": true})
 	fsKitReadEqual(t, filepath.Join(repo, "tracked.txt"), branchText)
+	fsKitAssertNativeXattrs(t, "organization hide/show", metadata)
 
 	previous := h.session(t)
 	h.request(t, http.MethodPost, "/v1/unmount", nil, &status)
@@ -247,6 +286,7 @@ func TestFSKitMountedAcceptance(t *testing.T) {
 	if h.session(t) == previous {
 		t.Fatal("explicit remount reused the old bridge capability")
 	}
+	fsKitAssertNativeXattrs(t, "explicit unmount/remount", metadata)
 	previous = h.session(t)
 	if !h.stop(t) {
 		t.Fatal("normal prepare-quit could not safely stop the private daemon")
@@ -263,6 +303,8 @@ func TestFSKitMountedAcceptance(t *testing.T) {
 	fsKitReadEqual(t, filepath.Join(repo, "tracked.txt"), branchText)
 	fsKitReadEqual(t, filepath.Join(repo, "binary.dat"), binary)
 	fsKitReadEqual(t, filepath.Join(repo, "branch-only.txt"), []byte("branch-only\n"))
+	fsKitReadEqual(t, stableFile, stableText)
+	fsKitAssertNativeXattrs(t, "orderly helper restart", metadata)
 	if branch := strings.TrimSpace(fsKitGit(t, repo, "branch", "--show-current")); branch != "acceptance" {
 		t.Fatalf("restart branch=%q", branch)
 	}

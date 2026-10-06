@@ -25,9 +25,10 @@ import (
 )
 
 const (
-	fsKitMountTimeout     = 28 * time.Second
-	fsKitStderrLimit      = 8 << 10
-	fsKitCommandWaitDelay = 2 * time.Second
+	fsKitMountTimeout       = 28 * time.Second
+	fsKitUnmountRetryWindow = 2 * time.Second
+	fsKitStderrLimit        = 8 << 10
+	fsKitCommandWaitDelay   = 2 * time.Second
 )
 
 var errFSKitMountOwnership = errors.New("the repository mount could not be safely identified; keep RepoReach running and unmount that folder before retrying")
@@ -49,14 +50,15 @@ type fsKitMountIdentity struct {
 }
 
 type fsKitMountOperations struct {
-	ready       func() bool
-	start       func(context.Context, string, string, *catalogfs.FileSystem) (platformBridge, error)
-	command     func(context.Context, string, ...string) error
-	rootFSID    func(string) ([2]int32, error)
-	mounts      func() ([]fsKitMountIdentity, error)
-	poll        time.Duration
-	timeout     time.Duration
-	verifyDelay time.Duration
+	ready              func() bool
+	start              func(context.Context, string, string, *catalogfs.FileSystem) (platformBridge, error)
+	command            func(context.Context, string, ...string) error
+	rootFSID           func(string) ([2]int32, error)
+	mounts             func() ([]fsKitMountIdentity, error)
+	poll               time.Duration
+	timeout            time.Duration
+	verifyDelay        time.Duration
+	unmountRetryWindow time.Duration
 }
 
 func nativeFSKitOperations(logger *slog.Logger) fsKitMountOperations {
@@ -77,7 +79,8 @@ func nativeFSKitOperations(logger *slog.Logger) fsKitMountOperations {
 		},
 		mounts: cachedDarwinMounts,
 		poll:   500 * time.Millisecond, timeout: fsKitMountTimeout,
-		verifyDelay: 2 * time.Second,
+		verifyDelay:        2 * time.Second,
+		unmountRetryWindow: fsKitUnmountRetryWindow,
 	}
 }
 
@@ -435,6 +438,10 @@ func (m *nativeFSKitMount) finishUnmount(ctx context.Context) error {
 func (m *nativeFSKitMount) Unmount() error {
 	ctx, cancel := context.WithTimeout(context.Background(), m.ops.timeout)
 	defer cancel()
+	return m.unmount(ctx)
+}
+
+func (m *nativeFSKitMount) unmount(ctx context.Context) error {
 	m.mu.Lock()
 	if m.unmountGate == nil {
 		m.unmountGate = make(chan struct{}, 1)
@@ -446,6 +453,9 @@ func (m *nativeFSKitMount) Unmount() error {
 		defer func() { <-gate }()
 	case <-ctx.Done():
 		return ctx.Err()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	mounts, err := m.ops.mounts()
 	if err != nil {
@@ -459,26 +469,84 @@ func (m *nativeFSKitMount) Unmount() error {
 	if !verified || !exists || current != identity {
 		return errFSKitMountOwnership
 	}
+	inspect := func() (bool, error) {
+		mounts, err := m.ops.mounts()
+		if err != nil {
+			return false, errFSKitMountOwnership
+		}
+		if !m.sessionPresent(mounts) {
+			return true, nil
+		}
+		current, exists := mountAtRoot(mounts, m.root)
+		if !exists || current != identity {
+			return false, errFSKitMountOwnership
+		}
+		return false, nil
+	}
+	stillMounted := func() error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		return errors.New("the repository folder is still mounted; close files using it and retry unmounting in RepoReach")
+	}
 	// Normal unmount only. An identity mismatch is refused above; never force
 	// detachment or close the bridge based on the command's exit status alone.
 	// The system command is path-based, so an external replacement between this
 	// identity check and the kernel unmount remains a platform limitation.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	commandErr := m.ops.command(ctx, "/sbin/umount", m.root)
+	var retryCtx context.Context
 	for {
-		mounts, err = m.ops.mounts()
+		detached, err := inspect()
 		if err != nil {
-			return errFSKitMountOwnership
+			return err
 		}
-		if !m.sessionPresent(mounts) {
+		if detached {
 			return m.finishUnmount(ctx)
 		}
-		current, exists = mountAtRoot(mounts, m.root)
-		if !exists || current != identity {
-			return errFSKitMountOwnership
+		if err := ctx.Err(); err != nil {
+			return err
 		}
-		if commandErr != nil || !waitMountPoll(ctx, m.ops.poll) {
-			return errors.New("the repository folder is still mounted; close files using it and retry unmounting in RepoReach")
+		if errors.Is(commandErr, context.Canceled) || errors.Is(commandErr, context.DeadlineExceeded) {
+			return commandErr
 		}
+		if commandErr == nil {
+			// A successful normal unmount can finish asynchronously. Observe it
+			// with the original deadline rather than issuing another command.
+			if !waitMountPoll(ctx, m.ops.poll) {
+				return stillMounted()
+			}
+			continue
+		}
+		if m.ops.unmountRetryWindow <= 0 {
+			return stillMounted()
+		}
+		if retryCtx == nil {
+			// Closing a file can precede the kernel's final FSKit release. Give
+			// only this same captured session a short settlement window; the
+			// bridge and its stores remain owned throughout genuine busy cases.
+			var retryCancel context.CancelFunc
+			retryCtx, retryCancel = context.WithTimeout(ctx, m.ops.unmountRetryWindow)
+			defer retryCancel()
+		}
+		if !waitMountPoll(retryCtx, m.ops.poll) {
+			return stillMounted()
+		}
+		// Reread cached mount information immediately before every retry. A
+		// root reused by another volume never authorizes another unmount.
+		detached, err = inspect()
+		if err != nil {
+			return err
+		}
+		if detached {
+			return m.finishUnmount(ctx)
+		}
+		if retryCtx.Err() != nil {
+			return stillMounted()
+		}
+		commandErr = m.ops.command(retryCtx, "/sbin/umount", m.root)
 	}
 }
 

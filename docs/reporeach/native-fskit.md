@@ -162,8 +162,24 @@ per value, 128 attributes and 32 MiB per object, and 256 MiB per store. The focu
 native suite passes 59 tests with warnings treated as errors, including binary
 and empty values, policy errors, read-only refusal, and retained identities.
 Real Go-to-SDK callback integration also passes. Installed-module attribute
-delivery and elimination of the observed AppleDouble fallback still require
-mounted acceptance.
+delivery and persistence still require direct kernel tests.
+
+The complete signed `db18bd8` app passed all seven
+[CI jobs](https://github.com/enoughtools/reporeach/actions/runs/37405201777) and
+independent local SDK 27 payload, profile and signing review. Fresh public
+discovery selected its exact module as the sole enabled candidate, preserving
+the owner's approval. Actual mounted staging, commits and warm branch checkout
+now pass with strict Git status and no AppleDouble sidecar. Retained-file
+behavior and refusal to hide a repository while its files and cwd are held also
+pass. The first visibility reconnect immediately after releasing those files
+still returned busy, so the full reconnect/restart sequence remains unproved.
+Bounded normal quit retry subsequently detached the fixture; complete cached
+inspection found no RepoReach volume or fixture resource, the helper exited,
+and the fixture was removed. Production reconnect now has a two-second normal
+unmount retry window, checking the captured identity before every attempt and
+retaining the bridge on busy or uncertain results. Focused cancellation,
+deadline, replacement and drain tests pass; the changed app still requires a
+fresh mounted run. No forced detach is used.
 
 ## Cache coherence is a release gate
 
@@ -194,7 +210,7 @@ The private bridge currently refuses an existing socket rather than automaticall
 | Platform mechanism and chosen folder | Apple documents macOS 26 URL resources, user-space extensions, normal extension enablement, and a mount at a chosen home-directory path. |
 | RepoReach extension and Go bridge | Implemented and exercised through real local socket and FSVolume callback tests. No production mounted-backend claim. |
 | SDK compilation | Complete app/extension ARM64 and Intel compilation and layout checks passed in macOS 26/Xcode 26.6 CI; ARM64 also passes locally with Xcode 27/SDK 27. |
-| Local activation experiment | The group-enabled module attaches; lazy text/binary/symlink reads, executable launch and Git HEAD/status reads pass. Descriptor write-policy correction passes actual file writes and Git staging. An unexpected AppleDouble sidecar now fails strict staged status; commit/cache/reconnect acceptance remains outstanding. Normal detach and helper exit are confirmed. |
+| Local activation experiment | The group-enabled module attaches; lazy text/binary/symlink reads, executable launch, writes, staging, commits and warm branch checkout pass. Native metadata removes the observed AppleDouble sidecar. Immediate post-close visibility reconnect still returns busy; complete reconnect/restart and direct kernel metadata persistence remain outstanding. Normal detach and helper exit are confirmed. |
 | Distribution authorization | Matching FSKit-enabled Developer ID provisioning profile is still missing. |
 | Kernel cache coherence | Persistent working-tree and quiescent catalogue policies are implemented in source; actual macOS 26 mounted proof remains outstanding. |
 | Existing beta.3 proof | Historical Go/native/Linux FUSE evidence remains valid for that release and is not FSKit evidence. |
@@ -207,6 +223,6 @@ Before publishing a native FSKit release, use disposable repositories and record
 4. Warm kernel caches, then switch branches, refresh, restart, and change repo/owner visibility. Assert exact contents, attributes, names, and Git status. Check fresh lookups after a completed reconnect, and clear refusal with preserved state/handles when readers make detachment busy. Establish the macOS 26 policy rather than infer it from bridge responses.
 5. Exercise pinning, conservative Free Up Space refusal, reconnect/relocation, busy unmount, cancellation, extension/service failure, restart, and recovery without dropping staged or uncommitted work.
 
-The [opt-in mounted acceptance harness](fskit-acceptance.md) prepares disposable local fixtures and covers the core Finder/Git/reconnect sequence once a matching installed module is available. Its previous skip on macOS 15 is not evidence of a mounted pass. The updated macOS 27 host has attached its authorized development module and passed reads, executable launch, writes, and staging; the metadata sidecar prevents the complete sequence from passing. Complete mounted acceptance remains outstanding.
+The [opt-in mounted acceptance harness](fskit-acceptance.md) prepares disposable local fixtures and covers the core Finder/Git/reconnect sequence once a matching installed module is available. Its previous skip on macOS 15 is not evidence of a mounted pass. The updated macOS 27 host has attached its authorized development module and passed reads, executable launch, writes, staging, commits and warm branch checkout. Immediate post-close reconnect prevents the complete sequence from passing. Complete mounted acceptance remains outstanding.
 
 Record results by source revision, macOS/Xcode versions, architecture, signing/profile state, and actual mounted environment. Update this status only from that evidence; keep previous release tags, manifests, artifacts, and validation records unchanged.
