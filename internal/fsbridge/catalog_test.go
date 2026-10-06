@@ -66,6 +66,10 @@ func (h *bridgeCatalogHydrator) ReadBlob(context.Context, model.RepoConfig, mode
 }
 
 func newBridgeCatalogFixture(t *testing.T, id string) bridgeCatalogFixture {
+	return newBridgeCatalogFixtureWithSizeState(t, id, "known")
+}
+
+func newBridgeCatalogFixtureWithSizeState(t *testing.T, id, sizeState string) bridgeCatalogFixture {
 	t.Helper()
 	root := t.TempDir()
 	ctx := context.Background()
@@ -85,9 +89,13 @@ func newBridgeCatalogFixture(t *testing.T, id string) bridgeCatalogFixture {
 	}
 	t.Cleanup(func() { _ = ov.Close() })
 	content := append([]byte(id), 0, 0xff, 0x01, 0xfe)
+	sizeBytes := int64(0)
+	if sizeState == "known" {
+		sizeBytes = int64(len(content))
+	}
 	gen, err := snap.PublishGeneration(ctx, "commit", "main", []model.BaseNode{
 		{RepoID: cfg.ID, Path: ".", Type: "dir", Mode: 0o755, SizeState: "known", SizeBytes: 4096},
-		{RepoID: cfg.ID, Path: "README.md", Type: "file", Mode: 0o644, ObjectOID: "blob", SizeState: "known", SizeBytes: int64(len(content))},
+		{RepoID: cfg.ID, Path: "README.md", Type: "file", Mode: 0o644, ObjectOID: "blob", SizeState: sizeState, SizeBytes: sizeBytes},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -109,11 +117,12 @@ type bridgeCatalogNode struct {
 	Inode      uint64 `json:"inode"`
 	Generation uint64 `json:"generation"`
 	Attributes struct {
-		Size    uint64 `json:"size"`
-		Nlink   uint32 `json:"nlink"`
-		Mode    uint32 `json:"mode"`
-		MtimeNS int64  `json:"mtime_ns"`
-		Type    string `json:"type"`
+		Size      uint64 `json:"size"`
+		SizeKnown *bool  `json:"size_known"`
+		Nlink     uint32 `json:"nlink"`
+		Mode      uint32 `json:"mode"`
+		MtimeNS   int64  `json:"mtime_ns"`
+		Type      string `json:"type"`
 	} `json:"attributes"`
 }
 

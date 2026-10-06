@@ -21,9 +21,10 @@ struct FSBridgeRequest: Encodable, Sendable {
     var target: String?
     var n: UInt64?
     var attributes: FSBridgeAttributeChanges?
+    var forgets: [FSBridgeForget]?
 
     enum CodingKeys: String, CodingKey {
-        case version, op, inode, parent, name, handle, offset, size, mode, access, target, n, attributes
+        case version, op, inode, parent, name, handle, offset, size, mode, access, target, n, attributes, forgets
         case oldParent = "old_parent", oldName = "old_name"
         case newParent = "new_parent", newName = "new_name"
     }
@@ -32,7 +33,7 @@ struct FSBridgeRequest: Encodable, Sendable {
          handle: UInt64? = nil, offset: UInt64? = nil, size: Int64? = nil, mode: UInt32? = nil, access: UInt32? = nil,
          oldParent: UInt64? = nil, oldName: String? = nil, newParent: UInt64? = nil,
          newName: String? = nil, target: String? = nil, n: UInt64? = nil,
-         attributes: FSBridgeAttributeChanges? = nil) {
+         attributes: FSBridgeAttributeChanges? = nil, forgets: [FSBridgeForget]? = nil) {
         self.op = op
         self.inode = inode
         self.parent = parent
@@ -49,7 +50,15 @@ struct FSBridgeRequest: Encodable, Sendable {
         self.target = target
         self.n = n
         self.attributes = attributes
+        self.forgets = forgets
     }
+}
+
+struct FSBridgeForget: Codable, Equatable, Sendable {
+    // Worst-case UInt64 pairs remain below the bridge's 64 KiB request limit.
+    static let maximumBatchCount = 1_024
+    let inode: UInt64
+    let n: UInt64
 }
 
 struct FSBridgeAttributeChanges: Codable, Equatable, Sendable {
@@ -112,11 +121,14 @@ struct FSBridgeAttributes: Codable, Equatable, Sendable {
     let mtimeNS: Int64
     let ctimeNS: Int64
     let birthtimeNS: Int64
+    // Older peers omit this field; only an explicit false means unresolved.
+    var sizeKnown: Bool?
 
     enum CodingKeys: String, CodingKey {
         case size, nlink, mode, type, uid, gid
         case atimeNS = "atime_ns", mtimeNS = "mtime_ns"
         case ctimeNS = "ctime_ns", birthtimeNS = "birthtime_ns"
+        case sizeKnown = "size_known"
     }
 }
 

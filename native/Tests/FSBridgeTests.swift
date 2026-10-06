@@ -95,6 +95,58 @@ final class FSBridgeTests: XCTestCase {
         XCTAssertEqual(response.node?.attributes.atimeNS, -1)
     }
 
+    func testSizeKnowledgePreservesUnknownAndExplicitKnownWireValues() throws {
+        let fields = #""size":4096,"nlink":1,"mode":33188,"type":"file","uid":501,"gid":20,"atime_ns":0,"mtime_ns":0,"ctime_ns":0,"birthtime_ns":0"#
+        let expectedKeys: Set<String> = ["size", "nlink", "mode", "type", "uid", "gid",
+                                         "atime_ns", "mtime_ns", "ctime_ns", "birthtime_ns", "size_known"]
+        for known in [false, true] {
+            let body = Data("{\(fields),\"size_known\":\(known)}".utf8)
+            let attributes = try JSONDecoder().decode(FSBridgeAttributes.self, from: body)
+            XCTAssertEqual(attributes.sizeKnown, known)
+            XCTAssertEqual(attributes.size, 4096)
+            let object = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(attributes)) as? [String: Any])
+            XCTAssertEqual(Set(object.keys), expectedKeys)
+            XCTAssertEqual(object["size_known"] as? Bool, known)
+        }
+    }
+
+    func testLegacyAttributesOmitSizeKnowledgeRatherThanEncodeNull() throws {
+        let body = Data(#"{"size":4096,"nlink":1,"mode":33188,"type":"file","uid":501,"gid":20,"atime_ns":0,"mtime_ns":0,"ctime_ns":0,"birthtime_ns":0}"#.utf8)
+        let attributes = try JSONDecoder().decode(FSBridgeAttributes.self, from: body)
+        XCTAssertNil(attributes.sizeKnown)
+        XCTAssertEqual(attributes.size, 4096)
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(attributes)) as? [String: Any])
+        XCTAssertEqual(Set(object.keys), ["size", "nlink", "mode", "type", "uid", "gid",
+                                         "atime_ns", "mtime_ns", "ctime_ns", "birthtime_ns"])
+        XCTAssertNil(object["size_known"])
+    }
+
+    func testBatchForgetEncodesOnlyNumericInodeAndReferencePairs() throws {
+        let request = FSBridgeRequest(op: "batchforget", forgets: [
+            FSBridgeForget(inode: 7, n: 2), FSBridgeForget(inode: UInt64.max, n: UInt64.max)
+        ])
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(request)) as? [String: Any])
+        XCTAssertEqual(Set(object.keys), ["version", "op", "forgets"])
+        XCTAssertEqual(object["version"] as? Int, 1)
+        XCTAssertEqual(object["op"] as? String, "batchforget")
+        let pairs = try XCTUnwrap(object["forgets"] as? [[String: Any]])
+        XCTAssertEqual(pairs.count, 2)
+        for pair in pairs { XCTAssertEqual(Set(pair.keys), ["inode", "n"]) }
+        XCTAssertEqual(pairs[0]["inode"] as? UInt64, 7)
+        XCTAssertEqual(pairs[0]["n"] as? UInt64, 2)
+        XCTAssertEqual(pairs[1]["inode"] as? UInt64, UInt64.max)
+        XCTAssertEqual(pairs[1]["n"] as? UInt64, UInt64.max)
+    }
+
+    func testLegacyForgetOmitsOptionalBatchRatherThanEncodeNull() throws {
+        let request = FSBridgeRequest(op: "forget", inode: 7, n: 2)
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(request)) as? [String: Any])
+        XCTAssertEqual(Set(object.keys), ["version", "op", "inode", "n"])
+        XCTAssertEqual(object["inode"] as? UInt64, 7)
+        XCTAssertEqual(object["n"] as? UInt64, 2)
+        XCTAssertNil(object["forgets"])
+    }
+
     func testOpenAccessIsAnOptionalNumericWireField() throws {
         for access: UInt32 in [1, 2, 3] {
             let request = FSBridgeRequest(op: "open", inode: 7, access: access)

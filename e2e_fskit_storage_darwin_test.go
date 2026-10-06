@@ -37,7 +37,8 @@ import (
 
 // This is a separate disposable fixture, intended to run after the primary
 // mounted sequence passes. Preparation acquires a clone; Keep must acquire its
-// still-missing blobs. There are no mounted repository lookups before that proof.
+// still-missing blobs. Before Keep, only directory enumeration is permitted;
+// no file contents, symlink targets or entry attributes are read.
 func TestFSKitMountedColdStorageAcceptance(t *testing.T) {
 	if os.Getenv("AFS_RUN_FSKIT_E2E_TESTS") != "1" {
 		t.Skip("set AFS_RUN_FSKIT_E2E_TESTS=1 for real mounted FSKit storage acceptance")
@@ -144,7 +145,36 @@ func TestFSKitMountedColdStorageAcceptance(t *testing.T) {
 	if err := fsKitStorageRequireMissing(output, oids); err != nil {
 		t.Fatalf("cold prerequisite failed: %v", err)
 	}
-	t.Logf("cold proof: %d missing Git blobs and empty cache; no mounted repository reads before Keep", len(oids))
+	// Exercise the actual kernel directory path while the clone is still truly
+	// blobless. Names alone must not hydrate files to manufacture entry sizes.
+	// In particular, never call DirEntry.Info or stat the returned entries here.
+	beforeListingRequests := transport.requests.Load()
+	listingStarted := time.Now()
+	mountedEntries, err := os.ReadDir(repo)
+	listingDuration := time.Since(listingStarted)
+	if err != nil {
+		t.Fatalf("cold mounted directory enumeration failed: %v", err)
+	}
+	names := make([]string, 0, len(mountedEntries))
+	for _, entry := range mountedEntries {
+		names = append(names, entry.Name())
+	}
+	wantNames := []string{".git", "binary.dat", "duplicate.dat", "link", "tracked.txt"}
+	if !reflect.DeepEqual(names, wantNames) {
+		t.Fatalf("cold directory names=%v want %v", names, wantNames)
+	}
+	if after := transport.requests.Load(); after != beforeListingRequests {
+		t.Fatalf("cold directory enumeration contacted source: before=%d after=%d duration=%s", beforeListingRequests, after, listingDuration)
+	}
+	entries, err = os.ReadDir(paths.cache)
+	if err != nil && !errors.Is(err, os.ErrNotExist) || len(entries) != 0 {
+		t.Fatalf("cold directory enumeration populated blob cache: count=%d error=%v", len(entries), err)
+	}
+	output = fsKitStorageGitNoFetch(t, root, input, "--git-dir", paths.git, "cat-file", "--batch-check")
+	if err := fsKitStorageRequireMissing(output, oids); err != nil {
+		t.Fatalf("cold directory enumeration acquired Git blobs: %v", err)
+	}
+	t.Logf("cold listing proof: entries=%d duration_ms=%d source_requests=0 missing_blobs=%d cache_empty=true; directory enumeration only, no file content reads before Keep", len(names), listingDuration.Milliseconds(), len(oids))
 
 	operation := fsKitStorageAction(t, h, id, "keep")
 	wantBytes := int64(0)

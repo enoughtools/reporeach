@@ -13,6 +13,7 @@ const (
 	MaxChunkSize             = 1 << 20
 	MaxMetadataSize          = 64 << 10
 	DirectoryPageSize        = 64 << 10
+	MaxBatchForgets          = 1024 // worst-case UInt64 pairs fit MaxMetadataSize
 	MaxXattrNameSize         = model.MaxXattrNameBytes
 	MaxXattrValueSize        = model.MaxXattrValueBytes
 	MaxXattrListSize         = model.MaxXattrsPerObject * (model.MaxXattrNameBytes + 1)
@@ -42,7 +43,13 @@ type Request struct {
 	NewName    string         `json:"new_name,omitempty"`
 	Target     string         `json:"target,omitempty"`
 	N          uint64         `json:"n,omitempty"`
+	Forgets    []Forget       `json:"forgets,omitempty"`
 	Attributes *SetAttributes `json:"attributes,omitempty"`
+}
+
+type Forget struct {
+	Inode uint64 `json:"inode"`
+	N     uint64 `json:"n"`
 }
 
 // SetAttributes includes only fields represented by the wire protocol. The
@@ -59,6 +66,7 @@ type SetAttributes struct {
 
 type Attributes struct {
 	Size        uint64 `json:"size"`
+	SizeKnown   *bool  `json:"size_known,omitempty"` // absent means authoritative
 	Nlink       uint32 `json:"nlink"`
 	Mode        uint32 `json:"mode"` // POSIX st_mode, including S_IFMT
 	Type        string `json:"type"`

@@ -437,6 +437,8 @@ func (h *Handler) dispatch(ctx context.Context, r Request) (Response, error) {
 		}
 		h.mu.Unlock()
 		return response, h.filesystem.ForgetInode(ctx, &fuseops.ForgetInodeOp{Inode: inode, N: r.N})
+	case "batchforget":
+		return response, h.batchForget(ctx, r.Forgets)
 	case "statfs":
 		op := &fuseops.StatFSOp{}
 		if err := h.filesystem.StatFS(ctx, op); err != nil {
@@ -474,7 +476,8 @@ func attributes(a fuseops.InodeAttributes) Attributes {
 	if a.Mode&os.ModeSticky != 0 {
 		mode |= syscall.S_ISVTX
 	}
-	return Attributes{a.Size, a.Nlink, mode, typ, a.Uid, a.Gid, timestamp(a.Atime), timestamp(a.Mtime), timestamp(a.Ctime), timestamp(a.Crtime)}
+	return Attributes{Size: a.Size, Nlink: a.Nlink, Mode: mode, Type: typ, UID: a.Uid, GID: a.Gid,
+		AtimeNS: timestamp(a.Atime), MtimeNS: timestamp(a.Mtime), CtimeNS: timestamp(a.Ctime), BirthtimeNS: timestamp(a.Crtime)}
 }
 
 func timestamp(t time.Time) int64 {
@@ -494,6 +497,52 @@ func (h *Handler) readdir(ctx context.Context, r Request) (Response, error) {
 		return response, err
 	}
 	defer state.mu.RUnlock()
+	// The concrete adapters expose captured directory metadata and inode
+	// lifetime rules without ordinary lookup's unknown-size blob hydration.
+	var entries []fusefs.DirectoryEntry
+	switch fs := h.filesystem.(type) {
+	case *catalogfs.FileSystem:
+		entries, err = fs.ReadDirectoryEntries(ctx, fuseops.HandleID(r.Handle), fuseops.DirOffset(r.Offset), DirectoryPageSize)
+	case *fusefs.ArtifactFuse:
+		entries, err = fs.ReadDirectoryEntries(ctx, fuseops.HandleID(r.Handle), fuseops.DirOffset(r.Offset), DirectoryPageSize)
+	default:
+		return h.readdirByLookup(ctx, r)
+	}
+	if err != nil {
+		return response, err
+	}
+	failed := true
+	defer func() {
+		if failed {
+			for _, entry := range entries {
+				_ = h.filesystem.ForgetInode(context.Background(), &fuseops.ForgetInodeOp{Inode: entry.Entry.Child, N: 1})
+			}
+		}
+	}()
+	response.EOF = len(entries) == 0
+	for _, entry := range entries {
+		if !validName(entry.Name) || entry.Entry.Child == 0 || uint64(entry.Offset) <= response.NextOffset || uint64(entry.Offset) > math.MaxInt64 {
+			return response, syscall.EILSEQ
+		}
+		node := nodeFromEntry(entry.Entry)
+		if !entry.SizeKnown {
+			known := false
+			node.Attributes.SizeKnown = &known
+		}
+		response.Entries = append(response.Entries, DirectoryEntry{Name: entry.Name, Offset: uint64(entry.Offset), Node: node})
+		response.NextOffset = uint64(entry.Offset)
+	}
+	for _, entry := range response.Entries {
+		h.remember(entry.Node)
+	}
+	failed = false
+	return response, nil
+}
+
+// Keep the general fuseutil.FileSystem protocol adapter for other filesystems;
+// RepoReach's concrete catalogue and repository adapters use typed enumeration.
+func (h *Handler) readdirByLookup(ctx context.Context, r Request) (Response, error) {
+	response := Response{Version: Version, NextOffset: r.Offset, Entries: make([]DirectoryEntry, 0)}
 	op := &fuseops.ReadDirOp{Inode: fuseops.InodeID(r.Inode), Handle: fuseops.HandleID(r.Handle), Offset: fuseops.DirOffset(r.Offset), Dst: make([]byte, DirectoryPageSize)}
 	if err := h.filesystem.ReadDir(ctx, op); err != nil {
 		return response, err

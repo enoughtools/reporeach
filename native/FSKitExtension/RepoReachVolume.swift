@@ -158,6 +158,15 @@ final class RepoReachVolume: FSVolume, FSVolume.Operations,
         let includesDotEntries: Bool
         var lastUsed: Date
         var eofOffset: UInt64?
+        var page: DirectoryPage?
+    }
+    private struct DirectoryPage {
+        let startOffset: UInt64
+        let entries: [FSBridgeDirectoryEntry]
+        let nextOffset: UInt64
+        let eof: Bool
+        var pendingForgets: [FSBridgeForget]
+        var cleanupFailed = false
     }
     private struct RunningOperation {
         let task: Task<Void, Never>
@@ -687,6 +696,19 @@ final class RepoReachVolume: FSVolume, FSVolume.Operations,
                             verifier: FSDirectoryVerifier, attributes: FSItem.GetAttributesRequest?,
                             packer: FSDirectoryEntryPacker,
                             replyHandler: @escaping (FSDirectoryVerifier, Error?) -> Void) {
+        enumerateDirectory(directory, startingAt: cookie, verifier: verifier, attributes: attributes,
+            packEntry: { name, type, id, nextCookie, attributes in
+                packer.packEntry(name: name, itemType: type, itemID: id, nextCookie: nextCookie, attributes: attributes)
+            }, replyHandler: replyHandler)
+    }
+
+    /// FSKit owns its packer constructors. This shared path lets host-side tests
+    /// exercise buffer-full replies and cookie continuation with real items.
+    func enumerateDirectory(_ directory: FSItem, startingAt cookie: FSDirectoryCookie,
+                            verifier: FSDirectoryVerifier, attributes: FSItem.GetAttributesRequest?,
+                            packEntry: @escaping (FSFileName, FSItem.ItemType, FSItem.Identifier,
+                                                  FSDirectoryCookie, FSItem.Attributes?) -> Bool,
+                            replyHandler: @escaping (FSDirectoryVerifier, Error?) -> Void) {
         perform(exclusive: true, reply: replyHandler) {
             let state = try self.directoryState(directory)
             let sessionID: UInt64
@@ -696,7 +718,7 @@ final class RepoReachVolume: FSVolume, FSVolume.Operations,
                 let response = try await self.client.request(FSBridgeRequest(op: "opendir", inode: state.item.inode))
                 guard let handle = response.handle, handle > 0 else { throw POSIXError(.EIO) }
                 session = DirectorySession(inode: state.item.inode, handle: handle, includesDotEntries: attributes == nil,
-                    lastUsed: Date(), eofOffset: nil)
+                    lastUsed: Date(), eofOffset: nil, page: nil)
                 sessionID = self.locked {
                     repeat {
                         self.verifierCounter = self.verifierCounter == UInt64.max ? 1 : self.verifierCounter + 1
@@ -718,15 +740,15 @@ final class RepoReachVolume: FSVolume, FSVolume.Operations,
             var packedCount = 0
             if session.includesDotEntries && position < 2 {
                 if position == 0 {
-                    guard packer.packEntry(name: FSFileName(string: "."), itemType: .directory,
-                        itemID: try self.identifier(state.item.inode), nextCookie: FSDirectoryCookie(1), attributes: nil) else {
+                    guard packEntry(FSFileName(string: "."), .directory,
+                        try self.identifier(state.item.inode), FSDirectoryCookie(1), nil) else {
                         return FSDirectoryVerifier(sessionID)
                     }
                     position = 1
                     packedCount += 1
                 }
-                guard packer.packEntry(name: FSFileName(string: ".."), itemType: .directory,
-                    itemID: try self.identifier(state.parent), nextCookie: FSDirectoryCookie(2), attributes: nil) else {
+                guard packEntry(FSFileName(string: ".."), .directory,
+                    try self.identifier(state.parent), FSDirectoryCookie(2), nil) else {
                     return FSDirectoryVerifier(sessionID)
                 }
                 position = 2
@@ -741,44 +763,23 @@ final class RepoReachVolume: FSVolume, FSVolume.Operations,
                 return FSDirectoryVerifier(sessionID)
             }
             while true {
-                let response: FSBridgeResponse
-                do {
-                    response = try await self.client.request(FSBridgeRequest(op: "readdir", inode: session.inode,
-                        handle: session.handle, offset: offset))
-                } catch {
-                    if self.posix(error).code == Int(EINVAL) { throw FSError(.invalidDirectoryCookie) }
-                    throw error
+                let page = try await self.directoryPage(sessionID: sessionID, session: session, offset: offset, bias: bias)
+                for entry in page.entries where entry.offset > offset {
+                    let name = try self.component(FSFileName(string: entry.name))
+                    let packedAttributes = try attributes.map {
+                        try self.makeAttributes(entry.node.attributes, inode: entry.node.inode, parent: session.inode, desired: $0, removed: false)
+                    }
+                    if !packEntry(FSFileName(string: name), self.itemType(entry.node.attributes.type),
+                        try self.identifier(entry.node.inode), FSDirectoryCookie(entry.offset + bias), packedAttributes) {
+                        // Keep this bounded page for continuation or replay. Its
+                        // directory handle retains IDs after the batch forget.
+                        return FSDirectoryVerifier(sessionID)
+                    }
+                    offset = entry.offset
+                    packedCount += 1
                 }
-                let entries = response.entries ?? []
-                let eof = response.eof ?? false
-                let nextOffset = response.nextOffset ?? 0
-                for entry in entries { self.noteTransientReference(entry.node.inode) }
-                var packedAll = true
-                var packingError: Error?
-                for entry in entries {
-                    do {
-                        guard entry.offset > offset, entry.offset <= UInt64.max - bias else { throw POSIXError(.EIO) }
-                        let name = try self.component(FSFileName(string: entry.name))
-                        let packedAttributes = try attributes.map {
-                            try self.makeAttributes(entry.node.attributes, inode: entry.node.inode, parent: session.inode, desired: $0, removed: false)
-                        }
-                        if !packer.packEntry(name: FSFileName(string: name), itemType: self.itemType(entry.node.attributes.type),
-                            itemID: try self.identifier(entry.node.inode), nextCookie: FSDirectoryCookie(entry.offset + bias), attributes: packedAttributes) {
-                            packedAll = false
-                            break
-                        }
-                        offset = entry.offset
-                        packedCount += 1
-                    } catch { packingError = error; break }
-                }
-                // Readdir-plus grants one lookup reference per returned node.
-                // The retained directory handle independently keeps these IDs live.
-                for entry in entries {
-                    try await self.forgetTransientReference(entry.node.inode)
-                }
-                if let packingError { throw packingError }
-                if !packedAll { return FSDirectoryVerifier(sessionID) }
-                if eof {
+                self.locked { self.directories[sessionID]?.page = nil }
+                if page.eof {
                     self.locked { self.directories[sessionID]?.eofOffset = offset }
                     if packedCount == 0 {
                         _ = try await self.client.request(FSBridgeRequest(op: "releasedir", inode: session.inode, handle: session.handle))
@@ -788,8 +789,8 @@ final class RepoReachVolume: FSVolume, FSVolume.Operations,
                 }
                 // An entry removed after opendir can leave an empty page with a
                 // valid advancing cookie; it is not necessarily end-of-directory.
-                guard nextOffset >= offset, nextOffset > position - bias else { throw POSIXError(.EIO) }
-                offset = nextOffset
+                guard page.nextOffset >= offset, page.nextOffset > position - bias else { throw POSIXError(.EIO) }
+                offset = page.nextOffset
                 position = offset + bias
                 try Task.checkCancellation()
             }
@@ -1094,6 +1095,82 @@ final class RepoReachVolume: FSVolume, FSVolume.Operations,
         guard locked({ directories.count < 128 }) else { throw POSIXError(.EMFILE) }
     }
 
+    private func directoryPage(sessionID: UInt64, session: DirectorySession,
+                               offset: UInt64, bias: UInt64) async throws -> DirectoryPage {
+        if let cached = locked({ directories[sessionID]?.page }) {
+            try await forgetDirectoryPageReferences(sessionID: sessionID)
+            if (offset != cached.nextOffset || cached.eof),
+               offset == cached.startOffset || cached.entries.contains(where: { $0.offset == offset }) {
+                try validateDirectoryPage(cached, bias: bias)
+                return try currentDirectoryPage(sessionID)
+            }
+            locked { directories[sessionID]?.page = nil }
+        }
+        let response: FSBridgeResponse
+        do {
+            response = try await client.request(FSBridgeRequest(op: "readdir", inode: session.inode,
+                handle: session.handle, offset: offset))
+        } catch {
+            if posix(error).code == Int(EINVAL) { throw FSError(.invalidDirectoryCookie) }
+            throw error
+        }
+        let entries = response.entries ?? []
+        // A 64 KiB page of the engine's aligned dirents has at most 2048 entries.
+        // Keep at most one such page in each of the 128 bounded sessions.
+        guard entries.count <= 2_048 else { throw POSIXError(.EIO) }
+        var counts: [UInt64: UInt64] = [:]
+        for entry in entries {
+            noteTransientReference(entry.node.inode)
+            counts[entry.node.inode, default: 0] += 1
+        }
+        let page = DirectoryPage(startOffset: offset, entries: entries,
+            nextOffset: response.nextOffset ?? 0, eof: response.eof ?? false,
+            pendingForgets: counts.keys.sorted().map { FSBridgeForget(inode: $0, n: counts[$0]!) })
+        // Persist ownership before the cancellable cleanup request. An error
+        // leaves unacknowledged counts available to session drain.
+        locked { directories[sessionID]?.page = page }
+        try await forgetDirectoryPageReferences(sessionID: sessionID)
+        try validateDirectoryPage(page, bias: bias)
+        return try currentDirectoryPage(sessionID)
+    }
+
+    private func currentDirectoryPage(_ sessionID: UInt64) throws -> DirectoryPage {
+        try locked {
+            guard let page = directories[sessionID]?.page else { throw POSIXError(.EIO) }
+            return page
+        }
+    }
+
+    private func validateDirectoryPage(_ page: DirectoryPage, bias: UInt64) throws {
+        var previous = page.startOffset
+        for entry in page.entries {
+            guard entry.offset > previous, entry.offset <= UInt64.max - bias else { throw POSIXError(.EIO) }
+            previous = entry.offset
+        }
+        guard page.nextOffset >= previous, page.nextOffset <= UInt64.max - bias else { throw POSIXError(.EIO) }
+    }
+
+    private func forgetDirectoryPageReferences(sessionID: UInt64) async throws {
+        while let page = locked({ directories[sessionID]?.page }) {
+            // A failed response may have followed a successful server mutation.
+            // Never replay it against references acquired by a later lookup.
+            guard !page.cleanupFailed else { throw POSIXError(.EIO) }
+            let pending = page.pendingForgets
+            if pending.isEmpty { return }
+            let batch = Array(pending.prefix(FSBridgeForget.maximumBatchCount))
+            do {
+                _ = try await client.request(FSBridgeRequest(op: "batchforget", forgets: batch), timeout: 10)
+            } catch {
+                locked { directories[sessionID]?.page?.cleanupFailed = true }
+                throw error
+            }
+            locked {
+                for pair in batch { consumeTransientReferences(pair.inode, count: pair.n) }
+                directories[sessionID]?.page?.pendingForgets.removeFirst(batch.count)
+            }
+        }
+    }
+
     private func retainCreated(_ node: FSBridgeNode, parent: UInt64, handle: UInt64?) async throws -> RepoReachItem {
         noteTransientReference(node.inode)
         if let handle { locked { pendingHandles[handle] = node.inode } }
@@ -1245,7 +1322,7 @@ final class RepoReachVolume: FSVolume, FSVolume.Operations,
         if wanted(.gid) { result.gid = value.gid }
         if wanted(.flags) { result.flags = 0 }
         if wanted(.linkCount) { result.linkCount = removed ? 0 : (value.type == .dir ? max(2, value.nlink) : 1) }
-        if wanted(.size) { result.size = value.size }
+        if wanted(.size), value.sizeKnown != false { result.size = value.size }
         if wanted(.fileID) { result.fileID = try identifier(inode) }
         if wanted(.parentID) { result.parentID = inode == 1 ? .parentOfRoot : try identifier(parent) }
         if wanted(.accessTime) { result.accessTime = timespecFromNanoseconds(value.atimeNS) }
@@ -1270,11 +1347,14 @@ final class RepoReachVolume: FSVolume, FSVolume.Operations,
     }
 
     private func consumeTransientReference(_ inode: UInt64) {
-        locked {
-            guard let count = transientReferences[inode] else { return }
-            if count == 1 { transientReferences.removeValue(forKey: inode) }
-            else { transientReferences[inode] = count - 1 }
-        }
+        locked { consumeTransientReferences(inode, count: 1) }
+    }
+
+    /// The caller holds the item-state lock and has acknowledged these counts.
+    private func consumeTransientReferences(_ inode: UInt64, count: UInt64) {
+        guard let held = transientReferences[inode] else { return }
+        if held <= count { transientReferences.removeValue(forKey: inode) }
+        else { transientReferences[inode] = held - count }
     }
 
     private func forgetTransientReference(_ inode: UInt64) async throws {
@@ -1289,7 +1369,7 @@ final class RepoReachVolume: FSVolume, FSVolume.Operations,
             let now = Int64(Date().timeIntervalSince1970 * 1_000_000_000)
             items[inode]?.attributes = FSBridgeAttributes(size: max(value.size, end), nlink: value.nlink,
                 mode: value.mode, type: value.type, uid: value.uid, gid: value.gid, atimeNS: value.atimeNS,
-                mtimeNS: now, ctimeNS: now, birthtimeNS: value.birthtimeNS)
+                mtimeNS: now, ctimeNS: now, birthtimeNS: value.birthtimeNS, sizeKnown: value.sizeKnown)
         }
     }
 

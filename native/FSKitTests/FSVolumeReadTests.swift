@@ -589,6 +589,233 @@ final class FSVolumeReadTests: XCTestCase {
         XCTAssertTrue(fixture.failures.isEmpty)
     }
 
+    func testDirectoryPageContinuesAndReplaysWithoutRepeatedFetchOrForget() async throws {
+        let fixture = try directoryFixture(entries: (0..<3).map { directoryEntry($0) }, eof: false)
+        defer { fixture.stop() }
+        let (volume, root) = try await prepareDirectory(fixture)
+
+        let first = try await enumerate(volume, root: root, capacity: 1)
+        XCTAssertNil(first.error)
+        XCTAssertEqual(first.entries.map(\.name), ["file0"])
+        XCTAssertEqual(first.entries.map(\.cookie), [1])
+        let replay = try await enumerate(volume, root: root, verifier: first.verifier, capacity: 1)
+        XCTAssertNil(replay.error)
+        XCTAssertEqual(replay.entries.map(\.name), ["file0"])
+        let second = try await enumerate(volume, root: root, cookie: 1, verifier: first.verifier, capacity: 1)
+        XCTAssertNil(second.error)
+        XCTAssertEqual(second.entries.map(\.name), ["file1"])
+        XCTAssertEqual(fixture.requests.filter { $0.operation == "readdir" }.map(\.offset), [0])
+        XCTAssertEqual(fixture.requests.filter { $0.operation == "batchforget" }.count, 1)
+        XCTAssertTrue(fixture.requests.filter { $0.operation == "forget" }.isEmpty)
+
+        let third = try await enumerate(volume, root: root, cookie: 2, verifier: first.verifier, capacity: 1)
+        XCTAssertNil(third.error)
+        XCTAssertEqual(third.entries.map(\.name), ["file2"])
+        XCTAssertEqual(fixture.requests.filter { $0.operation == "readdir" }.map(\.offset), [0, 3])
+        XCTAssertEqual(fixture.requests.filter { $0.operation == "batchforget" }.count, 1)
+        let end = try await enumerate(volume, root: root, cookie: 3, verifier: first.verifier, capacity: 1)
+        XCTAssertNil(end.error)
+        XCTAssertTrue(end.entries.isEmpty)
+        XCTAssertEqual(fixture.requests.filter { $0.operation == "releasedir" }.count, 1)
+        try await shutdown(volume)
+        XCTAssertTrue(fixture.requests.filter { $0.operation == "forget" }.isEmpty)
+        XCTAssertTrue(fixture.failures.isEmpty)
+    }
+
+    func testUnknownDirectorySizeIsInvalidUntilGetAttributesResolvesIt() async throws {
+        let unresolved = VolumeReadFixture.node(inode: 7, type: "file", size: 0, sizeKnown: false)
+        let entry: [String: Any] = ["name": "binary", "offset": 1, "node": unresolved]
+        let fixture = try directoryFixture(entries: [entry], lookupNode: unresolved)
+        defer { fixture.stop() }
+        let (volume, root) = try await prepareDirectory(fixture)
+
+        let listing = try await enumerate(volume, root: root, capacity: 1)
+        XCTAssertNil(listing.error)
+        let listed = try XCTUnwrap(listing.entries.first?.attributes)
+        XCTAssertTrue(listed.isValid(.type))
+        XCTAssertFalse(listed.isValid(.size))
+        XCTAssertFalse(listed.isValid(.allocSize))
+
+        let item = try await lookup(volume, root: root)
+        let desired = directoryAttributes()
+        let resolved: FSItem.Attributes = try await withCheckedThrowingContinuation { continuation in
+            volume.getAttributes(desired, of: item) { result, error in
+                if let error { continuation.resume(throwing: error) }
+                else if let result { continuation.resume(returning: result) }
+                else { continuation.resume(throwing: POSIXError(.EIO)) }
+            }
+        }
+        XCTAssertTrue(resolved.isValid(.size))
+        XCTAssertEqual(resolved.size, 3_145_728)
+        XCTAssertEqual(fixture.requests.filter { $0.operation == "getattr" }.map(\.inode), [1, 7])
+        try await shutdown(volume)
+        XCTAssertTrue(fixture.failures.isEmpty)
+    }
+
+    func testLegacyDirectorySizeRemainsValidWithoutSizeKnownField() async throws {
+        let fixture = try directoryFixture(entries: [directoryEntry(0)])
+        defer { fixture.stop() }
+        let (volume, root) = try await prepareDirectory(fixture)
+        let listing = try await enumerate(volume, root: root, capacity: 1)
+        XCTAssertNil(listing.error)
+        let attributes = try XCTUnwrap(listing.entries.first?.attributes)
+        XCTAssertTrue(attributes.isValid(.size))
+        XCTAssertEqual(attributes.size, 3_145_728)
+        try await shutdown(volume)
+        XCTAssertTrue(fixture.failures.isEmpty)
+    }
+
+    func testDirectoryBatchForgetAggregatesReferencesForRepeatedInode() async throws {
+        let fixture = try directoryFixture(entries: (0..<3).map { directoryEntry($0, inode: 7) })
+        defer { fixture.stop() }
+        let (volume, root) = try await prepareDirectory(fixture)
+        let listing = try await enumerate(volume, root: root, capacity: 3)
+        XCTAssertNil(listing.error)
+        let batch = try XCTUnwrap(fixture.requests.first { $0.operation == "batchforget" })
+        XCTAssertEqual(try forgetPairs(batch), [FSBridgeForget(inode: 7, n: 3)])
+        try await shutdown(volume)
+        XCTAssertTrue(fixture.requests.filter { $0.operation == "forget" }.isEmpty)
+        XCTAssertTrue(fixture.failures.isEmpty)
+    }
+
+    func testDirectoryBatchFailureKeepsReferencesForSessionDrain() async throws {
+        let fixture = try directoryFixture(entries: (0..<3).map { directoryEntry($0) },
+            metadataFailure: { request, _ in request.operation == "batchforget" ? EBUSY : 0 })
+        defer { fixture.stop() }
+        let (volume, root) = try await prepareDirectory(fixture)
+        let listing = try await enumerate(volume, root: root, capacity: 3)
+        assertPOSIX(listing.error, EBUSY)
+        XCTAssertTrue(listing.entries.isEmpty)
+        try await shutdown(volume)
+        XCTAssertEqual(fixture.requests.filter { $0.operation == "forget" }.compactMap(\.inode).sorted(), [7, 8, 9])
+        XCTAssertEqual(fixture.requests.filter { $0.operation == "releasedir" }.count, 1)
+        XCTAssertTrue(fixture.failures.isEmpty)
+    }
+
+    func testMalformedDirectoryPageBalancesReferencesBeforeReplyingError() async throws {
+        var second = directoryEntry(1)
+        second["offset"] = 1
+        let fixture = try directoryFixture(entries: [directoryEntry(0), second])
+        defer { fixture.stop() }
+        let (volume, root) = try await prepareDirectory(fixture)
+        let listing = try await enumerate(volume, root: root, capacity: 3)
+        assertPOSIX(listing.error, EIO)
+        XCTAssertTrue(listing.entries.isEmpty)
+        XCTAssertEqual(fixture.requests.filter { $0.operation == "batchforget" }.count, 1)
+        try await shutdown(volume)
+        XCTAssertTrue(fixture.requests.filter { $0.operation == "forget" }.isEmpty)
+        XCTAssertEqual(fixture.requests.filter { $0.operation == "releasedir" }.count, 1)
+        XCTAssertTrue(fixture.failures.isEmpty)
+    }
+
+    func testFailedDirectoryBatchIsNotReplayedAgainstLaterLookupReferences() async throws {
+        let entries = (0..<3).map { directoryEntry($0) }
+        let fixture = try VolumeReadFixture(read: { _ in VolumeReadFixture.binary(Data()) },
+            metadataFailure: { request, attempt in request.operation == "batchforget" && attempt == 2 ? EBUSY : 0 },
+            metadata: { request in
+                switch request.operation {
+                case "getattr": return try VolumeReadFixture.metadata(["node": VolumeReadFixture.node(inode: 1, type: "dir")])
+                case "statfs", "batchforget", "forget", "releasedir": return try VolumeReadFixture.metadata([:])
+                case "opendir": return try VolumeReadFixture.metadata(["handle": 101])
+                case "readdir": return try VolumeReadFixture.metadata([
+                    "entries": request.offset == 0 ? Array(entries.prefix(2)) : Array(entries.suffix(1)),
+                    "next_offset": request.offset == 0 ? 2 : 3, "eof": request.offset != 0])
+                default: return VolumeReadFixture.error(EOPNOTSUPP)
+                }
+            })
+        defer { fixture.stop() }
+        let (volume, root) = try await prepareDirectory(fixture)
+        let first = try await enumerate(volume, root: root, capacity: 1)
+        XCTAssertNil(first.error)
+        let failed = try await enumerate(volume, root: root, cookie: 1, verifier: first.verifier, capacity: 1)
+        assertPOSIX(failed.error, EBUSY)
+        XCTAssertEqual(failed.entries.map(\.name), ["file1"])
+        let retried = try await enumerate(volume, root: root, cookie: 2, verifier: first.verifier, capacity: 1)
+        assertPOSIX(retried.error, EIO)
+        XCTAssertTrue(retried.entries.isEmpty)
+        XCTAssertEqual(fixture.requests.filter { $0.operation == "batchforget" }.count, 2)
+        XCTAssertEqual(fixture.requests.filter { $0.operation == "readdir" }.map(\.offset), [0, 2])
+        try await shutdown(volume)
+        XCTAssertEqual(fixture.requests.filter { $0.operation == "forget" }.compactMap(\.inode), [9])
+        XCTAssertTrue(fixture.failures.isEmpty)
+    }
+
+    func testMaximumDirectoryPageUsesBoundedBatchRequests() async throws {
+        let fixture = try directoryFixture(entries: (0..<2_048).map { directoryEntry($0, inode: UInt64.max - UInt64($0) - 1) })
+        defer { fixture.stop() }
+        let (volume, root) = try await prepareDirectory(fixture)
+        let listing = try await enumerate(volume, root: root, capacity: 0)
+        XCTAssertNil(listing.error)
+        XCTAssertTrue(listing.entries.isEmpty)
+        let batches = fixture.requests.filter { $0.operation == "batchforget" }
+        XCTAssertEqual(batches.count, 2)
+        for batch in batches {
+            XCTAssertEqual(try forgetPairs(batch).count, FSBridgeForget.maximumBatchCount)
+            XCTAssertLessThanOrEqual(batch.body.count, 65_536)
+        }
+        try await shutdown(volume)
+        XCTAssertTrue(fixture.requests.filter { $0.operation == "forget" }.isEmpty)
+        XCTAssertTrue(fixture.failures.isEmpty)
+    }
+
+    private func directoryEntry(_ index: Int, inode: UInt64? = nil) -> [String: Any] {
+        ["name": "file\(index)", "offset": index + 1,
+         "node": VolumeReadFixture.node(inode: inode ?? UInt64(index + 7), type: "file")]
+    }
+
+    private func directoryFixture(entries: [[String: Any]], eof: Bool = true, lookupNode: [String: Any]? = nil,
+                                  metadataFailure: @escaping (VolumeReadFixture.Request, Int) -> Int32 = { _, _ in 0 }) throws -> VolumeReadFixture {
+        try VolumeReadFixture(read: { _ in VolumeReadFixture.binary(Data()) }, metadataFailure: metadataFailure,
+            metadata: { request in
+                switch request.operation {
+                case "getattr":
+                    return try VolumeReadFixture.metadata(["node": VolumeReadFixture.node(inode: request.inode ?? 1,
+                        type: request.inode == 1 ? "dir" : "file")])
+                case "lookup": return try VolumeReadFixture.metadata(["node": lookupNode ?? VolumeReadFixture.node(inode: 7, type: "file")])
+                case "statfs", "batchforget", "forget", "releasedir": return try VolumeReadFixture.metadata([:])
+                case "opendir": return try VolumeReadFixture.metadata(["handle": 101])
+                case "readdir": return try VolumeReadFixture.metadata(["entries": request.offset == 0 ? entries : [],
+                    "next_offset": entries.count, "eof": request.offset == 0 ? eof : true])
+                default: return VolumeReadFixture.error(EOPNOTSUPP)
+                }
+            })
+    }
+
+    private func prepareDirectory(_ fixture: VolumeReadFixture) async throws -> (RepoReachVolume, FSItem) {
+        let client = FSBridgeClient(configuration: try FSBridgeConfiguration(socketPath: fixture.socketPath, token: VolumeReadFixture.token))
+        let volume = RepoReachVolume(client: client, identifier: UUID(), readOnly: false)
+        let root = try await activate(volume)
+        if let error = root.error { throw error }
+        return (volume, try XCTUnwrap(root.item))
+    }
+
+    private func directoryAttributes() -> FSItem.GetAttributesRequest {
+        let request = FSItem.GetAttributesRequest()
+        request.wantedAttributes = [.type, .size, .allocSize, .fileID, .parentID]
+        return request
+    }
+
+    private func enumerate(_ volume: RepoReachVolume, root: FSItem, cookie: UInt64 = 0,
+                           verifier: FSDirectoryVerifier = FSDirectoryVerifier(0), capacity: Int) async throws -> DirectoryCapture.Value {
+        let finished = expectation(description: "Production directory callback")
+        let capture = DirectoryCapture(capacity: capacity)
+        volume.enumerateDirectory(root, startingAt: FSDirectoryCookie(cookie), verifier: verifier, attributes: directoryAttributes(),
+            packEntry: { name, _, _, nextCookie, attributes in
+                capture.pack(name: name.string ?? "", cookie: nextCookie.rawValue, attributes: attributes)
+            }) { verifier, error in
+                capture.finish(verifier: verifier, error: error)
+                finished.fulfill()
+            }
+        await fulfillment(of: [finished], timeout: 3)
+        return try XCTUnwrap(capture.value)
+    }
+
+    private func forgetPairs(_ request: VolumeReadFixture.Request) throws -> [FSBridgeForget] {
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: request.body) as? [String: Any])
+        let pairs = try XCTUnwrap(object["forgets"])
+        return try JSONDecoder().decode([FSBridgeForget].self, from: JSONSerialization.data(withJSONObject: pairs))
+    }
+
     private func prepare(_ fixture: VolumeReadFixture, readOnly: Bool = false,
                          taskOptions: [String] = []) async throws -> (RepoReachVolume, FSItem) {
         let client = FSBridgeClient(configuration: try FSBridgeConfiguration(socketPath: fixture.socketPath, token: VolumeReadFixture.token))
@@ -732,6 +959,27 @@ final class FSVolumeReadTests: XCTestCase {
     }
 }
 
+private final class DirectoryCapture: @unchecked Sendable {
+    struct Entry { let name: String; let cookie: UInt64; let attributes: FSItem.Attributes? }
+    struct Value { let verifier: FSDirectoryVerifier; let error: Error?; let entries: [Entry] }
+    private let lock = NSLock()
+    private let capacity: Int
+    private var entries: [Entry] = []
+    private var stored: Value?
+    init(capacity: Int) { self.capacity = capacity }
+    var value: Value? { lock.lock(); defer { lock.unlock() }; return stored }
+    func pack(name: String, cookie: UInt64, attributes: FSItem.Attributes?) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard entries.count < capacity else { return false }
+        entries.append(Entry(name: name, cookie: cookie, attributes: attributes))
+        return true
+    }
+    func finish(verifier: FSDirectoryVerifier, error: Error?) {
+        lock.lock(); defer { lock.unlock() }
+        stored = Value(verifier: verifier, error: error, entries: entries)
+    }
+}
+
 private final class ReadReply: @unchecked Sendable {
     struct Value { let count: Int; let error: Error? }
     private let lock = NSLock()
@@ -794,12 +1042,14 @@ private final class VolumeReadFixture: @unchecked Sendable {
     private let releaseResponse: (Int) -> Int32
     private let onOpen: (UInt64) -> Void
     private let metadataFailure: (Request, Int) -> Int32
+    private let metadataResponse: ((Request) throws -> Data?)?
     var requests: [Request] { locked { recorded } }
     var failures: [String] { locked { recordedFailures } }
 
     init(read: @escaping (Request) -> Data?, release: @escaping (Int) -> Int32 = { _ in 0 },
          onOpen: @escaping (UInt64) -> Void = { _ in },
-         metadataFailure: @escaping (Request, Int) -> Int32 = { _, _ in 0 }) throws {
+         metadataFailure: @escaping (Request, Int) -> Int32 = { _, _ in 0 },
+         metadata: ((Request) throws -> Data?)? = nil) throws {
         directory = URL(fileURLWithPath: "/tmp/rr-fsv-" + UUID().uuidString.prefix(8), isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
         socketPath = directory.appendingPathComponent("socket").path
@@ -807,6 +1057,7 @@ private final class VolumeReadFixture: @unchecked Sendable {
         releaseResponse = release
         self.onOpen = onOpen
         self.metadataFailure = metadataFailure
+        metadataResponse = metadata
         listener = Darwin.socket(AF_UNIX, SOCK_STREAM, 0)
         guard listener >= 0 else {
             let code = Darwin.errno
@@ -883,22 +1134,26 @@ private final class VolumeReadFixture: @unchecked Sendable {
                 if failure != 0 { Self.send(Self.error(failure), to: fd); return }
             }
             let response: Data?
-            switch request.operation {
-            case "read": response = readResponse(request)
-            case "write": response = try Self.metadata(["written": request.body.count])
-            case "getattr": response = try Self.metadata(["node": Self.node(inode: 1, type: "dir")])
-            case "lookup": response = try Self.metadata(["node": Self.node(inode: 7, type: "file")])
-            case "statfs": response = try Self.metadata([:])
-            case "open":
-                let value = locked { () -> UInt64 in handle += 1; return handle }
-                onOpen(value)
-                response = try Self.metadata(["handle": value])
-            case "release":
-                let attempt = locked { () -> Int in releases += 1; return releases }
-                let code = releaseResponse(attempt)
-                response = code == 0 ? try Self.metadata([:]) : Self.error(code)
-            case "forget", "flush", "fsync": response = try Self.metadata([:])
-            default: response = Self.error(EOPNOTSUPP)
+            if let metadataResponse, request.operation != "read" && request.operation != "write" {
+                response = try metadataResponse(request)
+            } else {
+                switch request.operation {
+                case "read": response = readResponse(request)
+                case "write": response = try Self.metadata(["written": request.body.count])
+                case "getattr": response = try Self.metadata(["node": Self.node(inode: 1, type: "dir")])
+                case "lookup": response = try Self.metadata(["node": Self.node(inode: 7, type: "file")])
+                case "statfs": response = try Self.metadata([:])
+                case "open":
+                    let value = locked { () -> UInt64 in handle += 1; return handle }
+                    onOpen(value)
+                    response = try Self.metadata(["handle": value])
+                case "release":
+                    let attempt = locked { () -> Int in releases += 1; return releases }
+                    let code = releaseResponse(attempt)
+                    response = code == 0 ? try Self.metadata([:]) : Self.error(code)
+                case "forget", "flush", "fsync": response = try Self.metadata([:])
+                default: response = Self.error(EOPNOTSUPP)
+                }
             }
             if let response { Self.send(response, to: fd) }
             else {
@@ -914,16 +1169,18 @@ private final class VolumeReadFixture: @unchecked Sendable {
     static func error(_ code: Int32) -> Data {
         http(body: Data("{\"version\":1,\"errno\":\(code)}".utf8), contentType: "application/json", errno: code, status: 500)
     }
-    private static func metadata(_ fields: [String: Any]) throws -> Data {
+    static func metadata(_ fields: [String: Any]) throws -> Data {
         var body = fields
         body["version"] = 1
         body["errno"] = 0
         return http(body: try JSONSerialization.data(withJSONObject: body), contentType: "application/json", errno: 0, status: 200)
     }
-    private static func node(inode: UInt64, type: String) -> [String: Any] {
-        ["inode": inode, "generation": 1, "attributes": ["size": 3_145_728, "nlink": 1,
+    static func node(inode: UInt64, type: String, size: UInt64 = 3_145_728, sizeKnown: Bool? = nil) -> [String: Any] {
+        var attributes: [String: Any] = ["size": size, "nlink": 1,
           "mode": type == "dir" ? 0o40755 : 0o100644, "type": type, "uid": getuid(), "gid": getgid(),
-          "atime_ns": 0, "mtime_ns": 0, "ctime_ns": 0, "birthtime_ns": 0]]
+          "atime_ns": 0, "mtime_ns": 0, "ctime_ns": 0, "birthtime_ns": 0]
+        if let sizeKnown { attributes["size_known"] = sizeKnown }
+        return ["inode": inode, "generation": 1, "attributes": attributes]
     }
     private static func http(body: Data, contentType: String, errno: Int32, status: Int) -> Data {
         var response = Data("HTTP/1.1 \(status) Response\r\nContent-Type: \(contentType)\r\nContent-Length: \(body.count)\r\nX-RepoReach-Errno: \(errno)\r\nConnection: close\r\n\r\n".utf8)
@@ -973,7 +1230,7 @@ private final class VolumeReadFixture: @unchecked Sendable {
               let op = fields["op"] as? String else { throw FSBridgeError.invalidRequest }
         return Request(operation: op, inode: (fields["inode"] as? NSNumber)?.uint64Value,
                        handle: (fields["handle"] as? NSNumber)?.uint64Value, access: (fields["access"] as? NSNumber)?.uint32Value,
-                       offset: nil, size: nil, body: body)
+                       offset: (fields["offset"] as? NSNumber)?.uint64Value, size: nil, body: body)
     }
     private static func receive(_ fd: Int32, into bytes: inout Data) throws {
         var buffer = [UInt8](repeating: 0, count: 8192)
