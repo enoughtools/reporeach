@@ -59,6 +59,7 @@ type fsKitMountOperations struct {
 	timeout            time.Duration
 	verifyDelay        time.Duration
 	unmountRetryWindow time.Duration
+	verifyRoot         func(string, *nativeMountRootReceipt) error
 }
 
 func nativeFSKitOperations(logger *slog.Logger) fsKitMountOperations {
@@ -81,6 +82,7 @@ func nativeFSKitOperations(logger *slog.Logger) fsKitMountOperations {
 		poll:   500 * time.Millisecond, timeout: fsKitMountTimeout,
 		verifyDelay:        2 * time.Second,
 		unmountRetryWindow: fsKitUnmountRetryWindow,
+		verifyRoot:         verifyNativeMountRoot,
 	}
 }
 
@@ -241,6 +243,10 @@ func (s *Service) mountNativeFSKit(ctx context.Context, root string, fs *catalog
 	if err != nil {
 		return nil, errors.New("the repository mount folder is unavailable")
 	}
+	preparedRoot, err := s.prepareNativeMountRoot(canonicalRoot)
+	if err != nil {
+		return nil, err
+	}
 	source := filepath.Join(s.opts.StateDir, "FSKit")
 	if err := privateDirectory(source, true); err != nil {
 		return nil, errors.New("the private File System Extension folder is unavailable")
@@ -267,6 +273,12 @@ func (s *Service) mountNativeFSKit(ctx context.Context, root string, fs *catalog
 		}
 		return nil, err
 	}
+	if err := s.recheckNativeMountRoot(canonicalRoot, preparedRoot); err != nil {
+		if drainErr := mounted.drainWithTimeout(); drainErr != nil {
+			return mounted, errors.Join(err, drainErr)
+		}
+		return nil, err
+	}
 	commandCtx, cancel := context.WithTimeout(ctx, ops.timeout)
 	commandErr := ops.command(commandCtx, "/sbin/mount", "-F", "-t", "reporeach", mounted.source, canonicalRoot)
 	mounted.pendingAttachment = commandCtx.Err() != nil || errors.Is(commandErr, context.Canceled) || errors.Is(commandErr, context.DeadlineExceeded)
@@ -288,6 +300,15 @@ func (s *Service) mountNativeFSKit(ctx context.Context, root string, fs *catalog
 				mounted.verified, mounted.pendingAttachment = true, false
 				if commandErr != nil {
 					return mounted, errors.New("the repository folder attached, but mount setup did not finish; retry unmounting in RepoReach")
+				}
+				verifyRoot := ops.verifyRoot
+				if verifyRoot == nil {
+					verifyRoot = verifyNativeMountRoot
+				}
+				if err := verifyRoot(s.opts.StateDir, preparedRoot); err != nil {
+					// Keep the verified live owner. Failing to persist mount
+					// history must never orphan a kernel mount or its bridge.
+					return mounted, errors.New("the repository folder attached, but its mount history could not be saved; retry unmounting in RepoReach")
 				}
 				return mounted, nil
 			}

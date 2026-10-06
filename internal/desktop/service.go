@@ -410,7 +410,7 @@ func (s *Service) mountLocked(ctx context.Context) error {
 	if s.opts.FSKitSocketDir != "" && pathsOverlap(root, s.opts.FSKitSocketDir) {
 		return errors.New("mount folder and File System Extension connection folder must be separate")
 	}
-	if err := safeMountDirectory(root); err != nil {
+	if err := s.checkMountDirectory(root); err != nil {
 		return err
 	}
 	// A previous session may be detached but retain its store after a close
@@ -652,7 +652,7 @@ func (s *Service) Settings(ctx context.Context, root string) error {
 			return err
 		}
 	}
-	if err := safeMountDirectory(root); err != nil {
+	if err := s.checkMountDirectory(root); err != nil {
 		return err
 	}
 	if err := s.detachLocked(); err != nil {
