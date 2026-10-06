@@ -188,12 +188,18 @@ func stageLocalCheckout(ctx context.Context, cfg model.RepoConfig, visibleRoot, 
 		return nil, err
 	}
 	viewAfter, err := checkoutTreeManifestWithValidator(ctx, visibleRoot, true, viewValidator)
-	if err != nil || !reflect.DeepEqual(viewBefore, viewAfter) {
-		return nil, errors.New("the working tree changed while it was being kept locally; try again after Git and editors finish")
+	if err != nil {
+		return nil, fmt.Errorf("cannot recheck the working tree while keeping it locally: %w", checkoutInventoryFailure(err))
+	}
+	if !reflect.DeepEqual(viewBefore, viewAfter) {
+		return nil, fmt.Errorf("the working tree changed while it was being kept locally; try again after Git and editors finish: %s", checkoutExactManifestDifference(viewBefore, viewAfter))
 	}
 	gitAfter, err := checkoutTreeManifest(ctx, cfg.GitDir, false)
-	if err != nil || !reflect.DeepEqual(gitBefore, gitAfter) {
-		return nil, errors.New("Git metadata changed while the checkout was being kept locally; try again after Git finishes")
+	if err != nil {
+		return nil, fmt.Errorf("cannot recheck Git metadata while keeping the checkout locally: %w", checkoutInventoryFailure(err))
+	}
+	if !reflect.DeepEqual(gitBefore, gitAfter) {
+		return nil, fmt.Errorf("Git metadata changed while the checkout was being kept locally; try again after Git finishes: %s", checkoutExactManifestDifference(gitBefore, gitAfter))
 	}
 	stagedView, err := checkoutTreeManifest(ctx, stage.Path, true)
 	if err != nil {
@@ -238,8 +244,11 @@ func (s *StagedLocalCheckout) VerifySource(ctx context.Context) error {
 		return err
 	}
 	viewManifest, err := checkoutTreeManifestWithValidator(ctx, s.sourceView, true, s.viewMetadataValidator)
-	if err != nil || !reflect.DeepEqual(s.viewManifest, viewManifest) {
-		return errors.New("working files changed after the local copy was staged; they have been retained")
+	if err != nil {
+		return fmt.Errorf("cannot recheck working files after staging the local copy: %w", checkoutInventoryFailure(err))
+	}
+	if !reflect.DeepEqual(s.viewManifest, viewManifest) {
+		return fmt.Errorf("working files changed after the local copy was staged; they have been retained: %s", checkoutExactManifestDifference(s.viewManifest, viewManifest))
 	}
 	return nil
 }
@@ -252,8 +261,11 @@ func (s *StagedLocalCheckout) VerifyPrivateGit(ctx context.Context) error {
 		return errors.New("the local checkout stage is no longer available")
 	}
 	manifest, err := checkoutTreeManifest(ctx, s.sourceGit, false)
-	if err != nil || !reflect.DeepEqual(s.gitManifest, manifest) {
-		return errors.New("Git metadata changed after the local copy was staged; it has been retained")
+	if err != nil {
+		return fmt.Errorf("cannot recheck Git metadata after staging the local copy: %w", checkoutInventoryFailure(err))
+	}
+	if !reflect.DeepEqual(s.gitManifest, manifest) {
+		return fmt.Errorf("Git metadata changed after the local copy was staged; it has been retained: %s", checkoutExactManifestDifference(s.gitManifest, manifest))
 	}
 	return nil
 }
@@ -629,6 +641,23 @@ func checkoutManifestContentEqual(left, right map[string]checkoutFileRecord) boo
 // and file content/xattr bytes, content digests and Git configuration are never
 // included in an API error or log.
 func checkoutManifestDifference(left, right map[string]checkoutFileRecord) string {
+	return checkoutManifestDifferenceForComparison(left, right, false)
+}
+
+func checkoutExactManifestDifference(left, right map[string]checkoutFileRecord) string {
+	return checkoutManifestDifferenceForComparison(left, right, true)
+}
+
+func checkoutInventoryFailure(err error) error {
+	var pathError *os.PathError
+	if errors.As(err, &pathError) {
+		identity := sha256.Sum256([]byte(pathError.Path))
+		return fmt.Errorf("entry %x: %w", identity[:6], pathError.Err)
+	}
+	return err
+}
+
+func checkoutManifestDifferenceForComparison(left, right map[string]checkoutFileRecord, exact bool) string {
 	if len(left) != len(right) {
 		return fmt.Sprintf("entry count differs (source=%d copy=%d)", len(left), len(right))
 	}
@@ -645,7 +674,7 @@ func checkoutManifestDifference(left, right map[string]checkoutFileRecord) strin
 		if !exists {
 			return label + " is missing"
 		}
-		if checkoutManifestContentEqual(map[string]checkoutFileRecord{path: source}, map[string]checkoutFileRecord{path: copied}) {
+		if exact && reflect.DeepEqual(source, copied) || !exact && checkoutManifestContentEqual(map[string]checkoutFileRecord{path: source}, map[string]checkoutFileRecord{path: copied}) {
 			continue
 		}
 		if source.Mode != copied.Mode {
@@ -660,7 +689,7 @@ func checkoutManifestDifference(left, right map[string]checkoutFileRecord) strin
 		if source.Link != copied.Link {
 			return label + " symbolic link target differs"
 		}
-		if source.Mode.IsRegular() && source.Modified != copied.Modified {
+		if (exact || source.Mode.IsRegular()) && source.Modified != copied.Modified {
 			return fmt.Sprintf("%s modified time differs (source_ns=%d copy_ns=%d)", label, source.Modified.UnixNano(), copied.Modified.UnixNano())
 		}
 		if len(source.Xattrs) != len(copied.Xattrs) {

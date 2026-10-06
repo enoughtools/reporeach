@@ -777,12 +777,17 @@ func fsKitStorageActionOutcome(t *testing.T, h *fsKitAcceptanceHarness, id, acti
 		Operation desktop.Operation `json:"operation"`
 	}
 	h.request(t, http.MethodPost, "/v1/repositories/action", map[string]any{"id": id, "action": action}, &accepted)
+	return fsKitStorageWaitOperation(t, h, accepted.Operation.ID, action, expected)
+}
+
+func fsKitStorageWaitOperation(t *testing.T, h *fsKitAcceptanceHarness, operationID, action, expected string) desktop.Operation {
+	t.Helper()
 	deadline := time.Now().Add(90 * time.Second)
 	for time.Now().Before(deadline) {
 		var status desktop.Status
 		h.request(t, http.MethodGet, "/v1/status", nil, &status)
 		for _, operation := range status.Operations {
-			if operation.ID != accepted.Operation.ID {
+			if operation.ID != operationID {
 				continue
 			}
 			switch operation.Status {
@@ -804,7 +809,7 @@ func fsKitStorageActionOutcome(t *testing.T, h *fsKitAcceptanceHarness, id, acti
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	t.Fatalf("storage action %s operation %s did not complete; inspect %s", action, accepted.Operation.ID, h.server.logPath)
+	t.Fatalf("storage action %s operation %s did not complete; inspect %s", action, operationID, h.server.logPath)
 	return desktop.Operation{}
 }
 

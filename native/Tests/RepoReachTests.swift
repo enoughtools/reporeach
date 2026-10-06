@@ -36,6 +36,139 @@ final class FinderCacheTests: XCTestCase {
         FinderStatusSnapshot(mountRoot: root, repositories: [FinderRepositoryStatus(id: "owner/repo", state: "pinned", pinned: true)])
     }
 
+    func testAcceptedKeepPublishesBusyBeforeRepositoryStateChanges() throws {
+        let initial = try JSONDecoder().decode(EngineStatus.self, from: Data(#"{"mountRoot":"/Users/example/Repos","virtualRoot":"/Users/example/PrivateVolume","repositories":[{"id":"owner/repo","owner":"owner","name":"repo","state":"virtual","error":"previous attempt failed","downloadedBytes":37}]}"#.utf8))
+        let response = try JSONDecoder().decode(RepositoryActionResponse.self, from: Data(#"{"operation":{"id":"accepted","repositoryID":"owner/repo","action":"keep","status":"running"}}"#.utf8))
+        let accepted = initial.recording(response.operation)
+        let finder = try XCTUnwrap(accepted.finderSnapshot.repositories.first)
+
+        XCTAssertEqual(finder.state, "virtual")
+        XCTAssertEqual(accepted.virtualRoot, initial.virtualRoot)
+        XCTAssertTrue(finder.isWorking)
+        XCTAssertFalse(finder.canFreeStorage)
+        XCTAssertEqual(finder.badgeIdentifier, "downloading", "Accepted work takes precedence over a stale previous error")
+        XCTAssertEqual(finder.operation?.stageDescription, "Preparing download")
+        XCTAssertNil(finder.operation?.progress)
+        XCTAssertEqual(accepted.recording(response.operation).operations.count, 1)
+    }
+
+    func testOperationProgressAndFailureReachFinderWithoutRepositoryStateMutation() throws {
+        let initial = EngineStatus(mountRoot: "/Users/example/Repos", repositories: [
+            RepositoryRecord(id: "owner/repo", owner: "owner", name: "repo", description: "", state: "available")
+        ])
+        let running = try JSONDecoder().decode(EngineOperation.self, from: Data(#"{"id":"download","repositoryID":"owner/repo","action":"keep","status":"running","completedBlobs":3,"totalBlobs":10,"downloadedBytes":4096,"totalBytes":8192}"#.utf8))
+        let live = initial.recording(running)
+        let finder = try XCTUnwrap(live.finderSnapshot.repositories.first)
+        XCTAssertEqual(finder.badgeIdentifier, "downloading-3")
+        XCTAssertEqual(finder.operation?.progress, 0.3)
+        XCTAssertEqual(finder.operation?.stageDescription, "Downloading files")
+        XCTAssertTrue(finder.operation?.progressDescription?.hasPrefix("3 of 10 files · ") == true)
+        XCTAssertEqual(running.progressDescription, finder.operation?.progressDescription)
+
+        let failed = try JSONDecoder().decode(EngineOperation.self, from: Data(#"{"id":"download","repositoryID":"owner/repo","action":"keep","status":"failed","completedBlobs":10,"totalBlobs":10,"error":"Local work was retained"}"#.utf8))
+        let result = live.recording(failed)
+        let failure = try XCTUnwrap(result.finderSnapshot.repositories.first)
+        XCTAssertEqual(result.operations.count, 1)
+        XCTAssertEqual(failure.state, "available")
+        XCTAssertFalse(failure.isWorking)
+        XCTAssertEqual(failure.badgeIdentifier, "error")
+        XCTAssertEqual(failure.operation?.error, "Local work was retained")
+        XCTAssertEqual(try JSONDecoder().decode(FinderStatusSnapshot.self, from: JSONEncoder().encode(result.finderSnapshot)), result.finderSnapshot)
+    }
+
+    func testFinderOperationHistoryPrefersRunningWorkAndCompletionClearsBusy() throws {
+        let status = try JSONDecoder().decode(EngineStatus.self, from: Data(#"{"mountRoot":"/Users/example/Repos","repositories":[{"id":"owner/repo","owner":"owner","name":"repo","state":"available"}],"operations":[{"id":"current","repositoryID":"owner/repo","action":"keep","status":"running"},{"id":"old","repositoryID":"owner/repo","action":"free","status":"failed","error":"Old failure"}]}"#.utf8))
+        XCTAssertEqual(status.finderSnapshot.repositories.first?.badgeIdentifier, "downloading")
+        let complete = try JSONDecoder().decode(EngineOperation.self, from: Data(#"{"id":"current","repositoryID":"owner/repo","action":"keep","status":"complete"}"#.utf8))
+        let completed = status.recording(complete).finderSnapshot.repositories.first
+        XCTAssertFalse(try XCTUnwrap(completed).isWorking, "A completed operation must stop the busy badge")
+        XCTAssertNotEqual(completed?.badgeIdentifier, "error", "Completed retry supersedes the older failed operation")
+    }
+
+    func testLegacyFinderOperationMetadataIsOptionalAndProgressIsBounded() throws {
+        for payload in [
+            #"{"id":"owner/repo","state":"preparing","pinned":false}"#,
+            #"{"id":"owner/repo","state":"preparing","pinned":false,"operation":null}"#
+        ] {
+            let repository = try JSONDecoder().decode(FinderRepositoryStatus.self, from: Data(payload.utf8))
+            XCTAssertNil(repository.operation)
+            XCTAssertTrue(repository.isWorking)
+            XCTAssertEqual(repository.badgeIdentifier, "downloading")
+        }
+        for (completed, expected) in [(-1, 0.0), (11, 1.0)] {
+            let operation = FinderOperationStatus(action: "keep", status: "running", completedBlobs: Int64(completed), totalBlobs: 10,
+                                                  downloadedBytes: nil, totalBytes: nil, error: nil)
+            XCTAssertEqual(operation.progress, expected)
+            if expected == 1 { XCTAssertEqual(operation.stageDescription, "Creating local checkout") }
+        }
+    }
+
+    func testFinderProjectionKeepsOperationMetadataScopedToVisibleRepositories() throws {
+        let status = try JSONDecoder().decode(EngineStatus.self, from: Data(#"{"mountRoot":"/Users/example/Repos","repositories":[{"id":"owner/repo","owner":"owner","name":"repo"},{"id":"owner/hidden","owner":"owner","name":"hidden","disabled":true},{"id":"other/repo","owner":"other","name":"repo"}],"organizations":[{"name":"other","enabled":false}],"operations":[{"id":"hidden","repositoryID":"owner/hidden","action":"keep","status":"running"},{"id":"current","repositoryID":"owner/repo","action":"keep","status":"running","currentPath":"private/source.swift"}]}"#.utf8))
+        let snapshot = status.finderSnapshot
+        XCTAssertEqual(snapshot.repositories.map(\.id), ["owner/repo"])
+        XCTAssertTrue(try XCTUnwrap(snapshot.repositories.first).isWorking)
+        let encoded = String(decoding: try JSONEncoder().encode(snapshot), as: UTF8.self)
+        XCTAssertFalse(encoded.contains("private/source.swift"), "Finder progress needs counts, not filenames")
+        XCTAssertFalse(encoded.contains("owner/hidden"))
+        XCTAssertFalse(encoded.contains("other/repo"))
+    }
+
+    func testVisibleNestedChildBadgesRefreshWithoutReenumeratingRepositoryRoots() {
+        let status = FinderStatusSnapshot(mountRoot: "/not-present/Repos", repositories: [
+            FinderRepositoryStatus(id: "owner/repo", state: "virtual", pinned: false)
+        ], virtualRoot: "/not-present/PrivateVolume")
+        let directory = URL(fileURLWithPath: "/not-present/PrivateVolume/owner/repo/addons", isDirectory: true)
+        let child = directory.appendingPathComponent("Child", isDirectory: true)
+        let unrelated = URL(fileURLWithPath: "/not-present/PrivateVolume/owner/repo/addons-other/Child", isDirectory: true)
+        var tracking = FinderBadgeTracking()
+        tracking.beginObserving(directory)
+        tracking.recordBadgeRequest(child)
+        tracking.recordBadgeRequest(unrelated)
+        tracking.recordBadgeRequest(URL(string: "https://example.com/Child")!)
+
+        XCTAssertEqual(tracking.urlsToRebadge(in: status), [child])
+        XCTAssertEqual(FinderStatusCache.repositoryID(for: child, in: status), "owner/repo")
+        tracking.endObserving(directory)
+        XCTAssertTrue(tracking.urlsToRebadge(in: status).isEmpty)
+        XCTAssertTrue(tracking.requestedURLs.isEmpty)
+    }
+
+    func testEndingOverlappingObservationPreservesOtherVisibleBadgeRequests() {
+        let status = snapshot()
+        let parent = URL(fileURLWithPath: status.mountRoot, isDirectory: true)
+        let nested = parent.appendingPathComponent("owner/repo/Sources", isDirectory: true)
+        let child = nested.appendingPathComponent("main.swift")
+        var tracking = FinderBadgeTracking()
+        tracking.beginObserving(parent)
+        tracking.beginObserving(nested)
+        tracking.recordBadgeRequest(child)
+        tracking.endObserving(parent)
+        XCTAssertEqual(tracking.urlsToRebadge(in: status), [child])
+        tracking.endObserving(nested)
+        XCTAssertTrue(tracking.requestedURLs.isEmpty)
+    }
+
+    func testBadgeTrackingBoundsLargeDirectoriesAndReleasesClosedObservations() {
+        let directory = URL(fileURLWithPath: "/not-present/Repos/owner/repo/Files", isDirectory: true)
+        var tracking = FinderBadgeTracking()
+        tracking.beginObserving(directory)
+        for index in 0..<10_005 { tracking.recordBadgeRequest(directory.appendingPathComponent("file-\(index)")) }
+        XCTAssertEqual(tracking.requestedURLs.count, 10_000)
+        XCTAssertTrue(tracking.requestedURLs.contains(directory.appendingPathComponent("file-10004")), "Newly visible requests must replace older entries at the bound")
+        tracking.endObserving(directory)
+        XCTAssertTrue(tracking.requestedURLs.isEmpty)
+        XCTAssertTrue(tracking.observedDirectories.isEmpty)
+        for index in 0..<100 {
+            let next = directory.appendingPathComponent("directory-\(index)", isDirectory: true)
+            tracking.beginObserving(next)
+            tracking.recordBadgeRequest(next.appendingPathComponent("file"))
+            tracking.endObserving(next)
+        }
+        XCTAssertTrue(tracking.requestedURLs.isEmpty, "Browsing closed directories must not accumulate badge history")
+        XCTAssertTrue(tracking.observedDirectories.isEmpty)
+    }
+
     func testSelectionMapsOnlyContainedRegisteredRepository() {
         let status = snapshot()
         XCTAssertEqual(FinderStatusCache.repositoryID(for: URL(fileURLWithPath: "/Users/example/Repositories/owner/repo/Sources/main.swift"), in: status), "owner/repo")

@@ -1359,8 +1359,9 @@ func applyBatchCheckLine(nodes []model.BaseNode, index map[string][]int, line st
 }
 
 // BlobToCache fetches a git object and writes it to dstPath in a binary-safe manner.
-// Uses a persistent cat-file --batch process to amortize process spawn and
-// remote connection costs across multiple blob fetches.
+// Uses a persistent cat-file --batch process to amortize local process startup.
+// A missing promisor blob still needs its own network request; bulk downloads
+// call PrefetchBlobs first so extraction reads already available local objects.
 func (s *Store) BlobToCache(ctx context.Context, repo model.RepoConfig, objectOID string, dstPath string) (size int64, err error) {
 	if err := ctx.Err(); err != nil {
 		return 0, err
@@ -1629,8 +1630,8 @@ func (p *batchPool) setMaxSize(n int) {
 }
 
 // batchCatFile manages a persistent `git cat-file --batch` process. The
-// persistent process amortizes process startup and (on blobless clones)
-// remote connection costs across multiple blob fetches. Callers must ensure
+// persistent process amortizes process startup across blob reads, while
+// PrefetchBlobs batches remote transfer for full downloads. Callers must ensure
 // exclusive access (the batchPool handles this).
 type batchCatFile struct {
 	cmd        *exec.Cmd
@@ -1949,8 +1950,16 @@ func runGitDiscardOutputWithEnv(ctx context.Context, gitDir string, extraEnv []s
 }
 
 func runGitWithEnvCapture(ctx context.Context, gitDir string, extraEnv []string, captureOutput bool, args ...string) (string, error) {
+	return runGitWithInputEnvCapture(ctx, gitDir, extraEnv, nil, captureOutput, args...)
+}
+
+// runGitWithInputEnvCapture shares command isolation, cancellation, and secret
+// redaction with every other Git command. stdin is used only for validated
+// metadata such as bulk object IDs, never shell input or credentials.
+func runGitWithInputEnvCapture(ctx context.Context, gitDir string, extraEnv []string, input io.Reader, captureOutput bool, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, "git", args...)
 	configureCancelableCommand(cmd)
+	cmd.Stdin = input
 	env, err := gitCommandEnv(inheritedGitEnvironment(os.Environ()), extraEnv)
 	if err != nil {
 		return "", err

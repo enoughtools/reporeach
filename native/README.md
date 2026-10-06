@@ -28,7 +28,7 @@ A preview fixture is available only when explicitly launching with `--demo`. `--
 The native control smoke exercises the actual compiled Go service with synthetic GitHub CLI output and private temporary state, without signing in or accessing GitHub:
 
 ```sh
-swiftc -parse-as-library App/Models.swift App/EngineClient.swift Shared/ActionRoute.swift Tools/control-smoke.swift -o ../build/control-smoke
+swiftc -parse-as-library App/Models.swift App/EngineClient.swift Shared/ActionRoute.swift Shared/FinderStatusCache.swift Tools/control-smoke.swift -o ../build/control-smoke
 ../build/control-smoke /absolute/path/to/artifact-fs
 ```
 

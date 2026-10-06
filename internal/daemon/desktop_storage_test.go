@@ -135,6 +135,85 @@ func TestDownloadCurrentTreeRejectsDuplicateCheckoutFilterBlob(t *testing.T) {
 	}
 }
 
+// A preview cache and the writable engine use different Git object stores.
+// Keeping already verified bytes must work offline even if the engine clone
+// itself still lacks every selected blob.
+func TestDownloadCurrentTreeUsesCachedBlobsOfflineWithoutFetching(t *testing.T) {
+	svc, cfg, _ := storageFixture(t)
+	origin := strings.TrimPrefix(cfg.RemoteURL, "file://")
+	work := filepath.Join(filepath.Dir(origin), "work")
+	if err := os.WriteFile(filepath.Join(work, ".gitattributes"), []byte("*.bin -text\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runCmd(t, "git", "-C", work, "add", ".gitattributes")
+	runCmd(t, "git", "-C", work, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "attributes")
+	runCmd(t, "git", "-C", work, "push", "origin", "main")
+	if err := svc.git.FetchRefNonInteractive(context.Background(), cfg, "main"); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.git.PrepareFetchedBranch(context.Background(), cfg, "main"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.DownloadCurrentTree(context.Background(), cfg.Name, nil); err != nil {
+		t.Fatal(err)
+	}
+	replaceStorageFixtureWithBloblessClone(t, svc, cfg, origin)
+	if err := os.Rename(origin, origin+".offline"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := svc.DownloadCurrentTree(context.Background(), cfg.Name, nil)
+	if err != nil || !got.Complete || got.CompletedBlobs != 4 {
+		t.Fatalf("offline cached download = %+v, %v", got, err)
+	}
+}
+
+func TestDownloadCurrentTreeBulkFetchFailureDoesNotCompleteProgress(t *testing.T) {
+	svc, cfg, _ := storageFixture(t)
+	origin := strings.TrimPrefix(cfg.RemoteURL, "file://")
+	replaceStorageFixtureWithBloblessClone(t, svc, cfg, origin)
+	if err := os.Rename(origin, origin+".offline"); err != nil {
+		t.Fatal(err)
+	}
+	var events []DownloadProgress
+	got, err := svc.DownloadCurrentTree(context.Background(), cfg.Name, func(p DownloadProgress) { events = append(events, p) })
+	if err == nil || got.Complete || got.CompletedBlobs != 0 || len(events) != 1 || events[0].Complete {
+		t.Fatalf("failed bulk download = %+v, events=%+v, err=%v", got, events, err)
+	}
+	if err := os.Rename(origin+".offline", origin); err != nil {
+		t.Fatal(err)
+	}
+	got, err = svc.DownloadCurrentTree(context.Background(), cfg.Name, nil)
+	if err != nil || !got.Complete || got.CompletedBlobs != 3 {
+		t.Fatalf("resumed bulk download = %+v, %v", got, err)
+	}
+}
+
+func replaceStorageFixtureWithBloblessClone(t *testing.T, svc *Service, cfg model.RepoConfig, origin string) {
+	t.Helper()
+	svc.git.CloseRepository(cfg.GitDir)
+	if err := os.RemoveAll(cfg.GitDir); err != nil {
+		t.Fatal(err)
+	}
+	runCmd(t, "git", "--git-dir", origin, "config", "uploadpack.allowFilter", "true")
+	runCmd(t, "git", "--git-dir", origin, "config", "uploadpack.allowAnySHA1InWant", "true")
+	if err := svc.git.CloneBlobless(context.Background(), cfg); err != nil {
+		t.Fatal(err)
+	}
+	head, _, err := svc.git.ResolveHEAD(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nodes, err := svc.git.BuildTreeIndex(context.Background(), cfg, head)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, node := range nodes {
+		if node.Type == "file" && node.SizeState == "known" {
+			t.Fatal("fixture clone eagerly acquired a selected blob")
+		}
+	}
+}
+
 func TestFreeRepositorySpaceReclaimsRecoverableData(t *testing.T) {
 	svc, cfg, _ := storageFixture(t)
 	if _, err := svc.DownloadCurrentTree(context.Background(), cfg.Name, nil); err != nil {

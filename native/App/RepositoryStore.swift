@@ -22,6 +22,9 @@ final class RepositoryStore: ObservableObject {
     private var startupTask: Task<Void, Never>?
     private var busyCount = 0
     private var finderSnapshot: FinderStatusSnapshot?
+    private var repositoryActivity: NSObjectProtocol?
+    private var pendingRepositoryActions = 0
+    private var actionRevision = 0
     private var completingSignIn = false
     private var invalidated = false
 
@@ -94,10 +97,17 @@ final class RepositoryStore: ObservableObject {
     func refreshStatus() async {
         guard !demoMode else { return }
         if !serviceRunning { await start(); return }
+        let revision = actionRevision
         do {
             let loaded: EngineStatus = try await service.client.request("GET", path: "/v1/status", timeout: 6)
+            // An older poll must not erase an operation accepted while its
+            // response was in flight. The next poll sees the accepted work.
+            guard revision == actionRevision else { return }
             apply(loaded)
-        } catch { serviceRunning = false; show(error) }
+        } catch {
+            guard revision == actionRevision else { return }
+            serviceRunning = false; updateRepositoryActivity(); show(error)
+        }
     }
 
     private func startPolling() {
@@ -127,13 +137,11 @@ final class RepositoryStore: ObservableObject {
     private func apply(_ loaded: EngineStatus) {
         status = loaded
         serviceRunning = true
+        updateRepositoryActivity()
         if !service.isIsolated { UserDefaults.standard.set(loaded.mountRoot, forKey: "mountRoot") }
         if let selectedRepositoryID, !loaded.repositories.contains(where: { $0.id == selectedRepositoryID }) { self.selectedRepositoryID = nil }
         if let ownerFilter, !owners.contains(where: { $0.caseInsensitiveCompare(ownerFilter) == .orderedSame }) { self.ownerFilter = nil }
-        let snapshot = FinderStatusSnapshot(mountRoot: loaded.mountRoot, repositories: loaded.repositories.filter { $0.isEnabled(in: loaded.organizations) }.map {
-            FinderRepositoryStatus(id: $0.id, state: $0.state, pinned: $0.pinned, error: $0.error,
-                                   localPath: $0.localPath, localKind: $0.localKind, downloadedBytes: $0.downloadedBytes)
-        }, virtualRoot: loaded.virtualRoot)
+        let snapshot = loaded.finderSnapshot
         if snapshot != finderSnapshot {
             do {
                 let cache = service.isIsolated ? FinderStatusCache(fileURL: service.stateDirectory.appendingPathComponent("finder-status.json")) : FinderStatusCache()
@@ -208,8 +216,15 @@ final class RepositoryStore: ObservableObject {
 
     func action(_ repository: RepositoryRecord, _ action: RepositoryAction) async {
         guard !demoMode else { return }
+        pendingRepositoryActions += 1
+        updateRepositoryActivity()
+        defer { pendingRepositoryActions -= 1; updateRepositoryActivity() }
         await perform {
-            let _: EmptyResponse = try await self.service.client.request("POST", path: "/v1/repositories/action", body: ["id": repository.id, "action": action.rawValue])
+            let response: RepositoryActionResponse = try await self.service.client.request("POST", path: "/v1/repositories/action", body: ["id": repository.id, "action": action.rawValue])
+            self.actionRevision &+= 1
+            // Publish accepted work immediately, including time waiting for a
+            // repository lock or its preview before its state starts changing.
+            if let status = self.status { self.apply(status.recording(response.operation)) }
             await self.refreshStatus()
         }
     }
@@ -324,7 +339,27 @@ final class RepositoryStore: ObservableObject {
         }
     }
 
-    func stop() { invalidated = true; pollTask?.cancel(); pollTask = nil; startupTask?.cancel(); startupTask = nil; service.stop() }
+    func stop() {
+        invalidated = true
+        pollTask?.cancel(); pollTask = nil
+        startupTask?.cancel(); startupTask = nil
+        if let repositoryActivity { ProcessInfo.processInfo.endActivity(repositoryActivity); self.repositoryActivity = nil }
+        service.stop()
+    }
+
+    private func updateRepositoryActivity() {
+        // Keep background status/progress updates responsive while an accepted
+        // operation runs. Ordinary idle browsing remains eligible for App Nap.
+        let active = !invalidated && (pendingRepositoryActions > 0 ||
+            serviceRunning && status?.operations.contains(where: \.isRunning) == true)
+        if active, repositoryActivity == nil {
+            repositoryActivity = ProcessInfo.processInfo.beginActivity(options: .userInitiatedAllowingIdleSystemSleep,
+                                                                       reason: "Updating repository downloads")
+        } else if !active, let repositoryActivity {
+            ProcessInfo.processInfo.endActivity(repositoryActivity)
+            self.repositoryActivity = nil
+        }
+    }
 
     private func perform(_ work: () async throws -> Void) async {
         busyCount += 1; isBusy = true; errorMessage = nil

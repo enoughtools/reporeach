@@ -184,18 +184,18 @@ struct EngineOperation: Codable, Identifiable, Equatable {
     let currentPath: String?
     let error: String?
 
-    var isRunning: Bool { status == "running" }
-    var progress: Double? {
-        guard let total = totalBlobs, total > 0, let completed = completedBlobs else { return nil }
-        return min(1, max(0, Double(completed) / Double(total)))
+    var finderStatus: FinderOperationStatus {
+        FinderOperationStatus(action: action, status: status, completedBlobs: completedBlobs, totalBlobs: totalBlobs,
+                              downloadedBytes: downloadedBytes, totalBytes: totalBytes, error: error)
     }
-    var message: String? {
-        if let currentPath, !currentPath.isEmpty { return currentPath }
-        if let total = totalBlobs, let completed = completedBlobs, total > 0 {
-            return "\(completed) of \(total) files"
-        }
-        return nil
-    }
+    var isRunning: Bool { finderStatus.isRunning }
+    var progress: Double? { finderStatus.progress }
+    var message: String? { finderStatus.stageDescription }
+    var progressDescription: String? { finderStatus.progressDescription }
+}
+
+struct RepositoryActionResponse: Decodable {
+    let operation: EngineOperation
 }
 
 struct EngineStatus: Codable, Equatable {
@@ -232,6 +232,28 @@ struct EngineStatus: Codable, Equatable {
         operations = try value.decodeIfPresent([EngineOperation].self, forKey: .operations) ?? []
         organizations = try value.decodeIfPresent([OrganizationRecord].self, forKey: .organizations) ?? []
         message = try value.decodeIfPresent(String.self, forKey: .message)
+    }
+
+    var finderSnapshot: FinderStatusSnapshot {
+        var latestOperations: [String: EngineOperation] = [:]
+        for operation in operations {
+            guard let id = operation.repositoryID else { continue }
+            // A running operation takes precedence over completed history.
+            if latestOperations[id]?.isRunning != true || operation.isRunning { latestOperations[id] = operation }
+        }
+        return FinderStatusSnapshot(mountRoot: mountRoot, repositories: repositories.filter { $0.isEnabled(in: organizations) }.map {
+            FinderRepositoryStatus(id: $0.id, state: $0.state, pinned: $0.pinned, error: $0.error,
+                                   localPath: $0.localPath, localKind: $0.localKind, downloadedBytes: $0.downloadedBytes,
+                                   operation: latestOperations[$0.id]?.finderStatus)
+        }, virtualRoot: virtualRoot)
+    }
+
+    func recording(_ operation: EngineOperation) -> EngineStatus {
+        var updated = operations.filter { $0.id != operation.id }
+        updated.append(operation)
+        return EngineStatus(version: version, mountRoot: mountRoot, mounted: mounted, dependencyReady: dependencyReady,
+                            account: account, repositories: repositories, operations: updated, organizations: organizations,
+                            message: message, virtualRoot: virtualRoot)
     }
 }
 

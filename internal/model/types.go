@@ -232,6 +232,7 @@ type GitStore interface {
 	ResolveHEAD(ctx context.Context, repo RepoConfig) (oid string, ref string, err error)
 	PinWorkingTreeBaseline(ctx context.Context, repo RepoConfig, oid string) error
 	BuildTreeIndex(ctx context.Context, repo RepoConfig, headOID string) ([]BaseNode, error)
+	PrefetchBlobs(ctx context.Context, repo RepoConfig, objectOIDs []string) error
 	BlobToCache(ctx context.Context, repo RepoConfig, objectOID string, dstPath string) (size int64, err error)
 	ReadBlob(ctx context.Context, repo RepoConfig, objectOID string, maxBytes int64) ([]byte, error)
 	ComputeAheadBehind(ctx context.Context, repo RepoConfig) (ahead int, behind int, diverged bool, err error)

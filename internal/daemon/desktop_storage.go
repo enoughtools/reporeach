@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -89,15 +90,6 @@ func (s *Service) DownloadCurrentTree(ctx context.Context, name string, progress
 			if (node.Type != "file" && node.Type != "symlink") || node.ObjectOID == "" {
 				continue
 			}
-			if filepath.Base(node.Path) == ".gitattributes" {
-				attributes, err := s.git.ReadBlob(ctx, cfg, node.ObjectOID, 1<<20)
-				if err != nil {
-					return fmt.Errorf("cannot verify checkout attributes: %w", err)
-				}
-				if bytes.Contains(attributes, []byte("filter=")) {
-					return errors.New("keeping repositories with Git checkout filters or LFS offline is not supported yet")
-				}
-			}
 			if seen[node.ObjectOID] {
 				continue
 			}
@@ -117,27 +109,75 @@ func (s *Service) DownloadCurrentTree(ctx context.Context, name string, progress
 		if progress != nil {
 			progress(result)
 		}
+		// Preview reads and earlier interrupted downloads share this cache.
+		// Keep valid cached objects offline rather than fetching another copy
+		// merely because the engine's separate promisor clone lacks the blob.
+		cachedSizes := make(map[string]int64, len(unique))
+		missing := make([]string, 0, len(unique))
+		missingAttributes := make([]string, 0)
+		for _, node := range unique {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			cachePath := filepath.Join(cfg.BlobCacheDir, node.ObjectOID)
+			if info, statErr := os.Lstat(cachePath); statErr == nil {
+				if !info.Mode().IsRegular() {
+					return errors.New("blob cache contains an unexpected nonregular file")
+				}
+				valid, err := s.git.VerifyBlob(ctx, cfg, node.ObjectOID, cachePath)
+				if err != nil {
+					return err
+				}
+				if valid {
+					cachedSizes[node.ObjectOID] = info.Size()
+					continue
+				}
+			} else if !errors.Is(statErr, os.ErrNotExist) {
+				return statErr
+			}
+			missing = append(missing, node.ObjectOID)
+		}
+		// Attribute paths must be inspected even when their OID was already
+		// deduplicated under a different filename (for example a.txt).
+		attributesSeen := make(map[string]bool)
+		for _, node := range nodes {
+			if (node.Type == "file" || node.Type == "symlink") && node.ObjectOID != "" && filepath.Base(node.Path) == ".gitattributes" && !attributesSeen[node.ObjectOID] {
+				attributesSeen[node.ObjectOID] = true
+				if _, cached := cachedSizes[node.ObjectOID]; !cached {
+					missingAttributes = append(missingAttributes, node.ObjectOID)
+				}
+			}
+		}
+		if err := s.git.PrefetchBlobs(ctx, cfg, missingAttributes); err != nil {
+			return err
+		}
+		for oid := range attributesSeen {
+			var attributes []byte
+			if _, cached := cachedSizes[oid]; cached {
+				attributes, err = readCachedCheckoutAttributes(filepath.Join(cfg.BlobCacheDir, oid))
+			} else {
+				attributes, err = s.git.ReadBlob(ctx, cfg, oid, 1<<20)
+			}
+			if err != nil {
+				return fmt.Errorf("cannot verify checkout attributes: %w", err)
+			}
+			if bytes.Contains(attributes, []byte("filter=")) {
+				return errors.New("keeping repositories with Git checkout filters or LFS offline is not supported yet")
+			}
+		}
+		// cat-file lazily fetching each missing OID is a connection per file.
+		// Acquire selected current-tree blobs as packs before local extraction.
+		if err := s.git.PrefetchBlobs(ctx, cfg, missing); err != nil {
+			return err
+		}
 		for _, node := range unique {
 			if err := ctx.Err(); err != nil {
 				return err
 			}
 			result.CurrentPath = node.Path
-			cachePath := filepath.Join(cfg.BlobCacheDir, node.ObjectOID)
-			size := int64(0)
-			valid := false
-			if info, statErr := os.Lstat(cachePath); statErr == nil {
-				if !info.Mode().IsRegular() {
-					return errors.New("blob cache contains an unexpected nonregular file")
-				}
-				valid, err = s.git.VerifyBlob(ctx, cfg, node.ObjectOID, cachePath)
-				if err != nil {
-					return err
-				}
-				size = info.Size()
-			} else if !errors.Is(statErr, os.ErrNotExist) {
-				return statErr
-			}
+			size, valid := cachedSizes[node.ObjectOID]
 			if !valid {
+				cachePath := filepath.Join(cfg.BlobCacheDir, node.ObjectOID)
 				size, err = s.git.BlobToCache(ctx, cfg, node.ObjectOID, cachePath)
 				if err != nil {
 					return err
@@ -172,6 +212,31 @@ func (s *Service) DownloadCurrentTree(ctx context.Context, name string, progress
 		return nil
 	})
 	return result, err
+}
+
+// Bound cached attribute reads just as ReadBlob bounds uncached ones. The
+// verified cache contains bytes, not a UTF-8 string or Git-filtered worktree.
+func readCachedCheckoutAttributes(path string) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, errors.New("blob cache contains an unexpected nonregular file")
+	}
+	data, err := io.ReadAll(io.LimitReader(f, (1<<20)+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > 1<<20 {
+		return nil, model.ErrBlobTooLarge
+	}
+	return data, nil
 }
 
 // FreeRepositorySpace removes only engine-owned, remotely recoverable data.

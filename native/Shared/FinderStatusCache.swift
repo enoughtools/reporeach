@@ -1,6 +1,44 @@
 import Foundation
 import Darwin
 
+struct FinderOperationStatus: Codable, Equatable {
+    let action: String
+    let status: String
+    let completedBlobs: Int64?
+    let totalBlobs: Int64?
+    let downloadedBytes: Int64?
+    let totalBytes: Int64?
+    let error: String?
+
+    var isRunning: Bool { status == "running" }
+    var progress: Double? {
+        guard let totalBlobs, totalBlobs > 0, let completedBlobs else { return nil }
+        return min(1, max(0, Double(completedBlobs) / Double(totalBlobs)))
+    }
+    var stageDescription: String {
+        switch action {
+        case "keep":
+            guard let progress else { return "Preparing download" }
+            return progress >= 1 ? "Creating local checkout" : "Downloading files"
+        case "free": return "Freeing space"
+        case "refresh": return "Refreshing repository"
+        default: return "Preparing repository"
+        }
+    }
+    var progressDescription: String? {
+        var parts: [String] = []
+        if let totalBlobs, totalBlobs > 0, let completedBlobs {
+            parts.append("\(max(0, completedBlobs)) of \(totalBlobs) files")
+        }
+        if let downloadedBytes, downloadedBytes >= 0, let totalBytes, totalBytes > 0 {
+            let downloaded = ByteCountFormatter.string(fromByteCount: downloadedBytes, countStyle: .file)
+            let total = ByteCountFormatter.string(fromByteCount: totalBytes, countStyle: .file)
+            parts.append("\(downloaded) of \(total)")
+        }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    }
+}
+
 struct FinderRepositoryStatus: Codable, Equatable {
     let id: String
     let state: String
@@ -9,11 +47,12 @@ struct FinderRepositoryStatus: Codable, Equatable {
     let localPath: String?
     let localKind: String?
     let downloadedBytes: Int64
+    let operation: FinderOperationStatus?
 
-    enum CodingKeys: String, CodingKey { case id, state, pinned, error, localPath, localKind, downloadedBytes }
+    enum CodingKeys: String, CodingKey { case id, state, pinned, error, localPath, localKind, downloadedBytes, operation }
 
     init(id: String, state: String, pinned: Bool, error: String? = nil, localPath: String? = nil, localKind: String? = nil,
-         downloadedBytes: Int64 = 0) {
+         downloadedBytes: Int64 = 0, operation: FinderOperationStatus? = nil) {
         self.id = id
         self.state = state
         self.pinned = pinned
@@ -21,6 +60,7 @@ struct FinderRepositoryStatus: Codable, Equatable {
         self.localPath = localPath
         self.localKind = localKind
         self.downloadedBytes = downloadedBytes
+        self.operation = operation
     }
 
     init(from decoder: Decoder) throws {
@@ -32,11 +72,27 @@ struct FinderRepositoryStatus: Codable, Equatable {
         localPath = try value.decodeIfPresent(String.self, forKey: .localPath)
         localKind = try value.decodeIfPresent(String.self, forKey: .localKind)
         downloadedBytes = try value.decodeIfPresent(Int64.self, forKey: .downloadedBytes) ?? 0
+        operation = try value.decodeIfPresent(FinderOperationStatus.self, forKey: .operation)
     }
 
     var isAdopted: Bool { localKind == "adopted" && localURL != nil }
     var isVirtual: Bool { localPath == nil && localKind == nil }
-    var isWorking: Bool { ["preparing", "downloading", "hydrating", "pinning"].contains(state) }
+    var isWorking: Bool {
+        operation?.isRunning == true || ["preparing", "downloading", "hydrating", "pinning"].contains(state)
+    }
+    var badgeIdentifier: String {
+        if isWorking {
+            if operation?.action == "keep", let progress = operation?.progress {
+                return "downloading-\(Int(progress * 10))"
+            }
+            return "downloading"
+        }
+        if error?.isEmpty == false || operation?.error?.isEmpty == false || ["error", "failed"].contains(state) { return "error" }
+        if pinned { return "pinned" }
+        if localURL != nil { return "local" }
+        if ["available", "ready", "mounted", "cached", "downloaded"].contains(state) { return "ready" }
+        return "virtual"
+    }
     var canFreeStorage: Bool {
         localKind != "adopted" && !isWorking &&
             (localURL != nil || pinned || downloadedBytes > 0 || ["available", "ready", "pinned"].contains(state))
@@ -56,6 +112,47 @@ struct FinderStatusSnapshot: Codable, Equatable {
         self.mountRoot = mountRoot
         self.repositories = repositories
         self.virtualRoot = virtualRoot
+    }
+}
+
+/// Remember URLs Finder has already badged so a status change can repaint
+/// visible descendants without enumerating a directory or opening its files.
+struct FinderBadgeTracking {
+    private(set) var observedDirectories = Set<URL>()
+    private(set) var requestedURLs = Set<URL>()
+    private let maximumTrackedURLs = 10_000
+
+    mutating func beginObserving(_ url: URL) {
+        guard url.isFileURL else { return }
+        observedDirectories.insert(url.standardizedFileURL)
+    }
+
+    mutating func endObserving(_ url: URL) {
+        observedDirectories.remove(url.standardizedFileURL)
+        requestedURLs = requestedURLs.filter { isObserved($0) }
+    }
+
+    mutating func recordBadgeRequest(_ url: URL) {
+        guard url.isFileURL else { return }
+        let url = url.standardizedFileURL
+        if !requestedURLs.contains(url), requestedURLs.count >= maximumTrackedURLs, let discarded = requestedURLs.first {
+            requestedURLs.remove(discarded)
+        }
+        requestedURLs.insert(url)
+    }
+
+    func urlsToRebadge(in snapshot: FinderStatusSnapshot) -> Set<URL> {
+        var urls = requestedURLs.filter { isObserved($0) }
+        for repository in snapshot.repositories {
+            for url in FinderStatusCache.repositoryURLs(for: repository, in: snapshot) where isObserved(url) {
+                urls.insert(url)
+            }
+        }
+        return urls
+    }
+
+    private func isObserved(_ url: URL) -> Bool {
+        observedDirectories.contains { url.pathComponents.starts(with: $0.pathComponents) }
     }
 }
 

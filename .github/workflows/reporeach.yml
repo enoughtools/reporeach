@@ -107,7 +107,8 @@ jobs:
           mkdir -p build/control-smoke
           CGO_ENABLED=0 go build -trimpath -o build/control-smoke/artifact-fs ./cmd/artifact-fs
           swiftc -parse-as-library native/App/Models.swift native/App/EngineClient.swift \
-            native/Shared/ActionRoute.swift native/Tools/control-smoke.swift -o build/control-smoke/check
+            native/Shared/ActionRoute.swift native/Shared/FinderStatusCache.swift \
+            native/Tools/control-smoke.swift -o build/control-smoke/check
           build/control-smoke/check "$PWD/build/control-smoke/artifact-fs"
 
       - name: Real Go filesystem bridge and Swift extension client interop

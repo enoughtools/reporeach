@@ -124,6 +124,15 @@ func (s *Service) materializeRepository(ctx context.Context, op Operation, downl
 	if config.Name == "" {
 		return errors.New("the prepared repository storage is unavailable")
 	}
+	if _, ready := s.engine.ExistingCatalogRepository(config.Name); !ready {
+		return errors.New("the prepared repository working tree is unavailable")
+	}
+	// A prepared engine alone does not promote catalogue identities retained
+	// from cold browsing. Bind them before the first inventory, so discovering
+	// an uncached nested folder cannot change source attributes mid-export.
+	if err := catalog.ActivateRepositoryForExport(ctx, repo.ID); err != nil {
+		return err
+	}
 	view, err := s.virtualRepositoryPath(repo)
 	if err != nil {
 		return err

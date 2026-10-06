@@ -471,6 +471,10 @@ struct ContentView: View {
             } else {
                 ProgressView().controlSize(.small)
             }
+            if let detail = operation.progressDescription {
+                Text(detail).font(.system(size: compact ? 10 : 11)).foregroundStyle(ReachTheme.muted)
+                    .lineLimit(2)
+            }
         }
         .accessibilityElement(children: .combine)
     }
