@@ -96,6 +96,14 @@ if [ "$COMPILE_ONLY" = false ]; then
   python3 "$ROOT/scripts/release-manifest.py" source --output "$STAGE/source.json"
 fi
 xcodegen generate --spec "$PROJECT_SPEC" --project "$ROOT/native"
+mkdir -p "$DERIVED"
+REGISTRATION_INSPECTOR="$DERIVED/inspect-built-app-registration"
+python3 - "$ROOT/native/Tools/InspectBuiltAppRegistration.swift" "$REGISTRATION_INSPECTOR" "$(uname -m)" <<'PY_INSPECTOR'
+import subprocess, sys
+if sys.argv[3] not in ("arm64", "x86_64"):
+    raise SystemExit("Unsupported host architecture for the registration inspector.")
+subprocess.run(["xcrun", "--sdk", "macosx", "swiftc", "-parse-as-library", "-swift-version", "6", "-strict-concurrency=complete", "-warnings-as-errors", "-target", sys.argv[3] + "-apple-macosx13.0", "-framework", "AppKit", sys.argv[1], "-o", sys.argv[2]], check=True, timeout=60)
+PY_INSPECTOR
 xcodebuild -project "$ROOT/native/RepoReach.xcodeproj" -scheme "$SCHEME" \
   -configuration Release -derivedDataPath "$DERIVED" \
   ARCHS="$ARCH" ONLY_ACTIVE_ARCH=NO \
@@ -103,18 +111,37 @@ xcodebuild -project "$ROOT/native/RepoReach.xcodeproj" -scheme "$SCHEME" \
 # Xcode registers macOS app products during a successful build. Retire only
 # this build's unsigned product before packaging or returning compile output.
 # Do not clean up a pre-existing derived product after a failed build.
-python3 - "$DERIVED/Build/Products/Release/RepoReach.app" "$BACKEND" <<'PY_REGISTRATION'
-import pathlib, re, subprocess, sys
+python3 - "$DERIVED/Build/Products/Release/RepoReach.app" "$BACKEND" "$REGISTRATION_INSPECTOR" <<'PY_REGISTRATION'
+import json, pathlib, re, subprocess, sys
 
 app = pathlib.Path(sys.argv[1])
 if not app.is_dir() or app.is_symlink():
     raise SystemExit("Expected compiled app is missing or redirects through a symlink.")
 unregister = "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
-result = subprocess.run([unregister, "-u", str(app)], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-if result.returncode:
-    raise SystemExit("Could not unregister this exact compiled app; packaging stopped.")
-if sys.argv[2] == "fskit":
-    result = subprocess.run(["/usr/bin/pluginkit", "-m", "-A", "-D", "-v", "-i", "com.enoughtools.reporeach.fskit"], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+def invoke(arguments):
+    try:
+        return subprocess.run(arguments, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=20)
+    except (OSError, subprocess.SubprocessError):
+        raise SystemExit("Registration inspection or cleanup could not finish; packaging stopped.")
+
+def parent_registered():
+    result = invoke([sys.argv[3], str(app)])
+    if result.returncode or len(result.stdout) > 16384:
+        raise SystemExit("Could not inspect compiled app registration; packaging stopped.")
+    try:
+        report = json.loads(result.stdout)
+    except (ValueError, UnicodeError):
+        raise SystemExit("Invalid compiled app registration report; packaging stopped.")
+    keys = {"ok", "bundle_identifier", "expected_app_path", "exact_app_registered", "application_count", "unknowns", "output_truncated"}
+    if not isinstance(report, dict) or set(report) != keys or report["ok"] is not True or report["bundle_identifier"] != "com.enoughtools.reporeach" or report["expected_app_path"] != str(app) or type(report["exact_app_registered"]) is not bool or type(report["application_count"]) is not int or not 0 <= report["application_count"] <= 256 or report["unknowns"] != [] or report["output_truncated"] is not False or (report["exact_app_registered"] and report["application_count"] == 0):
+        raise SystemExit("Incomplete compiled app registration report; packaging stopped.")
+    return report["exact_app_registered"]
+
+def module_registered():
+    if sys.argv[2] != "fskit":
+        return False
+    result = invoke(["/usr/bin/pluginkit", "-m", "-A", "-D", "-v", "-i", "com.enoughtools.reporeach.fskit"])
     if result.returncode or len(result.stdout) > 1024 * 1024:
         raise SystemExit("Could not verify the compiled filesystem module registration; packaging stopped.")
     module = str(app / "Contents/Extensions/RepoReachFSKit.appex")
@@ -138,8 +165,16 @@ if sys.argv[2] == "fskit":
             records.append(fields[-1])
     if summary != len(records):
         raise SystemExit("Incomplete filesystem registration inventory; packaging stopped.")
-    if module in records:
-        raise SystemExit("This compiled filesystem module is still registered; packaging stopped.")
+    return module in records
+
+parent_present, module_present = parent_registered(), module_registered()
+if parent_present or module_present:
+    result = invoke([unregister, "-u", str(app)])
+    # A failed -u can mean the exact app was already absent. The exit status
+    # never proves absence: require fresh public parent and module inventories.
+    parent_present, module_present = parent_registered(), module_registered()
+    if parent_present or module_present:
+        raise SystemExit("This compiled app or filesystem module is still registered; packaging stopped.")
 PY_REGISTRATION
 if [ "$COMPILE_ONLY" = true ]; then
   if [ "$BACKEND" = fskit ]; then

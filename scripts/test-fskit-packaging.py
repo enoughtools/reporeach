@@ -568,58 +568,129 @@ class BuildRegistrationCleanupTests(unittest.TestCase):
         self.app = pathlib.Path(self.temporary.name) / "derived/Build/Products/Release/RepoReach.app"
         self.app.mkdir(parents=True)
         self.module = self.app / "Contents/Extensions/RepoReachFSKit.appex"
+        self.inspector = self.app.parents[3] / "inspect-built-app-registration"
         self.script = pathlib.Path(__file__).with_name("build-macos.sh").read_text()
         self.code = self.script.split("<<'PY_REGISTRATION'\n", 1)[1].split("\nPY_REGISTRATION", 1)[0]
+        self.no_modules = b" (no matches)\n"
 
-    def run_cleanup(self, inventory=b" (no matches)\n", unregister_status=0, inventory_status=0, backend="fskit"):
-        results = [SimpleNamespace(returncode=unregister_status, stdout=b"", stderr=b"")]
-        if not unregister_status and backend == "fskit":
-            results.append(SimpleNamespace(returncode=inventory_status, stdout=inventory, stderr=b""))
-        with mock.patch.object(sys, "argv", ["cleanup", str(self.app), backend]), mock.patch.object(subprocess, "run", side_effect=results) as run:
+    def result(self, output=b"", status=0):
+        return SimpleNamespace(returncode=status, stdout=output, stderr=b"")
+
+    def parent(self, registered=False):
+        return self.result(json.dumps({
+            "ok": True, "bundle_identifier": "com.enoughtools.reporeach",
+            "expected_app_path": str(self.app), "exact_app_registered": registered,
+            "application_count": 3, "unknowns": [], "output_truncated": False,
+        }).encode())
+
+    def run_cleanup(self, results, backend="fskit"):
+        with mock.patch.object(sys, "argv", ["cleanup", str(self.app), backend, str(self.inspector)]), mock.patch.object(subprocess, "run", side_effect=results) as run:
             exec(compile(self.code, "build-macos.sh registration cleanup", "exec"), {})
         return run.call_args_list
 
     def inventory(self, module):
         return f"     com.enoughtools.reporeach.fskit((null))\tfixture-uuid\t2026-10-05 00:00:00 +0000\t{module}\n (1 plug-in)\n".encode()
 
-    def test_cleanup_unregisters_only_exact_successful_product_and_reads_module_inventory(self):
-        calls = self.run_cleanup()
-        self.assertEqual(calls[0].args[0], ["/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister", "-u", str(self.app)])
+    def test_cleanup_unregisters_only_exact_successful_product_and_requires_fresh_proof(self):
+        calls = self.run_cleanup([self.parent(True), self.result(self.inventory(self.module)), self.result(), self.parent(), self.result(self.no_modules)])
+        self.assertEqual(calls[0].args[0], [str(self.inspector), str(self.app)])
         self.assertEqual(calls[1].args[0], ["/usr/bin/pluginkit", "-m", "-A", "-D", "-v", "-i", packaging.MODULE_ID])
+        self.assertEqual(calls[2].args[0], ["/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister", "-u", str(self.app)])
+        self.assertEqual(calls[3].args[0], calls[0].args[0])
+        self.assertEqual(calls[4].args[0], calls[1].args[0])
+        self.assertTrue(all(call.kwargs["timeout"] == 20 for call in calls))
         self.assertNotIn("REGISTER_APP_WITH_LAUNCH_SERVICES", self.script)
+        compile_position = self.script.index("<<'PY_INSPECTOR'")
         build_position = self.script.index("CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO build")
         cleanup_position = self.script.index("<<'PY_REGISTRATION'")
         validation_position = self.script.index('python3 "$ROOT/scripts/validate-fskit-bundle.py" compile')
+        self.assertLess(compile_position, build_position)
         self.assertLess(build_position, cleanup_position)
         self.assertLess(cleanup_position, validation_position)
         self.assertNotIn("trap ", self.script[:cleanup_position])
 
-    def test_unrelated_app_with_same_identifier_is_preserved(self):
+    def test_already_absent_exact_parent_and_module_skip_unregister_preserving_other_apps(self):
         other = self.app.parent / "Other.app/Contents/Extensions/RepoReachFSKit.appex"
-        calls = self.run_cleanup(inventory=self.inventory(other))
+        calls = self.run_cleanup([self.parent(), self.result(self.inventory(other))])
         self.assertEqual(len(calls), 2)
-        self.assertNotIn(str(other), calls[0].args[0])
+        self.assertFalse(any("-u" in call.args[0] for call in calls))
+        self.assertTrue(all(str(other) not in call.args[0] for call in calls))
 
-    def test_remaining_exact_module_or_incomplete_inventory_stops_packaging(self):
-        for inventory, reason in ((self.inventory(self.module), "still registered"), (b"", "Incomplete"), (b" (2 plug-ins)\n", "Incomplete"), (b"unstructured result\n", "Unexpected"), (b" (no matches)\n (no matches)\n", "Unexpected")):
+    def test_nonzero_unregister_is_accepted_only_with_fresh_parent_and_module_absence(self):
+        for status in (1, 7, 127):
+            with self.subTest(status=status):
+                calls = self.run_cleanup([self.parent(True), self.result(self.no_modules), self.result(status=status), self.parent(), self.result(self.no_modules)])
+                self.assertEqual(len(calls), 5)
+        for parent, modules in ((True, self.no_modules), (False, self.inventory(self.module))):
+            with self.subTest(parent=parent), self.assertRaisesRegex(SystemExit, "still registered"):
+                self.run_cleanup([self.parent(True), self.result(self.no_modules), self.result(status=1), self.parent(parent), self.result(modules)])
+        with self.assertRaisesRegex(SystemExit, "Could not inspect"):
+            self.run_cleanup([self.parent(True), self.result(self.no_modules), self.result(status=1), self.result(status=1)])
+
+    def test_incomplete_module_inventory_stops_before_unregister(self):
+        for inventory, reason in ((b"", "Incomplete"), (b" (2 plug-ins)\n", "Incomplete"), (b"unstructured result\n", "Unexpected"), (b" (no matches)\n (no matches)\n", "Unexpected")):
             with self.subTest(inventory=inventory), self.assertRaisesRegex(SystemExit, reason):
-                self.run_cleanup(inventory=inventory)
+                self.run_cleanup([self.parent(), self.result(inventory)])
 
-    def test_tool_failures_stop_without_followup_mutations(self):
-        with self.assertRaisesRegex(SystemExit, "Could not unregister"):
-            self.run_cleanup(unregister_status=1)
+    def test_parent_inventory_requires_complete_fixed_identity_and_typed_absence_report(self):
+        valid = json.loads(self.parent().stdout)
+        changes = ({"ok": False}, {"bundle_identifier": "another.app"}, {"expected_app_path": "/another/RepoReach.app"},
+                   {"exact_app_registered": 0}, {"application_count": True}, {"application_count": 257},
+                   {"unknowns": ["unavailable"]}, {"output_truncated": True},
+                   {"exact_app_registered": True, "application_count": 0})
+        for change in changes:
+            with self.subTest(change=change), self.assertRaisesRegex(SystemExit, "Incomplete"):
+                self.run_cleanup([self.result(json.dumps(dict(valid, **change)).encode())])
+        for output in (b"", b"not JSON", b"[]", json.dumps({key: value for key, value in valid.items() if key != "exact_app_registered"}).encode()):
+            with self.subTest(output=output), self.assertRaises(SystemExit):
+                self.run_cleanup([self.result(output)])
+
+    def test_tool_errors_or_timeouts_stop_without_cleanup_mutation(self):
+        with self.assertRaisesRegex(SystemExit, "Could not inspect"):
+            self.run_cleanup([self.result(status=1)])
         with self.assertRaisesRegex(SystemExit, "Could not verify"):
-            self.run_cleanup(inventory_status=1)
+            self.run_cleanup([self.parent(), self.result(status=1)])
+        with self.assertRaisesRegex(SystemExit, "could not finish"):
+            self.run_cleanup([subprocess.TimeoutExpired("fixture-inspector", 20)])
 
-    def test_legacy_build_only_unregisters_parent_and_redirected_product_is_rejected(self):
-        self.assertEqual(len(self.run_cleanup(backend="macfuse")), 1)
+    def test_legacy_parent_requires_public_absence_and_redirected_product_is_rejected(self):
+        self.assertEqual(len(self.run_cleanup([self.parent()], backend="macfuse")), 1)
+        calls = self.run_cleanup([self.parent(True), self.result(), self.parent()], backend="macfuse")
+        self.assertEqual(len(calls), 3)
+        self.assertTrue(all("pluginkit" not in " ".join(call.args[0]) for call in calls))
+        with self.assertRaisesRegex(SystemExit, "still registered"):
+            self.run_cleanup([self.parent(True), self.result(), self.parent(True)], backend="macfuse")
         self.app.rmdir()
         target = pathlib.Path(self.temporary.name) / "installed-app"
         target.mkdir()
         self.app.symlink_to(target, target_is_directory=True)
-        with mock.patch.object(sys, "argv", ["cleanup", str(self.app), "fskit"]), mock.patch.object(subprocess, "run") as run, self.assertRaisesRegex(SystemExit, "symlink"):
+        with mock.patch.object(sys, "argv", ["cleanup", str(self.app), "fskit", str(self.inspector)]), mock.patch.object(subprocess, "run") as run, self.assertRaisesRegex(SystemExit, "symlink"):
             exec(compile(self.code, "build-macos.sh registration cleanup", "exec"), {})
         run.assert_not_called()
+
+    @unittest.skipUnless(sys.platform == "darwin", "Compiles and reads the public macOS registration API")
+    def test_public_inspector_compiles_on_selected_sdk_and_reports_exact_absence(self):
+        import platform
+        source = pathlib.Path(__file__).resolve().parents[1] / "native/Tools/InspectBuiltAppRegistration.swift"
+        subprocess.run(["xcrun", "--sdk", "macosx", "swiftc", "-parse-as-library", "-swift-version", "6", "-strict-concurrency=complete", "-warnings-as-errors", "-target", platform.machine() + "-apple-macosx13.0", "-framework", "AppKit", str(source), "-o", str(self.inspector)], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
+        result = subprocess.run([str(self.inspector), str(self.app)], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=20)
+        report = json.loads(result.stdout)
+        self.assertEqual(set(report), set(json.loads(self.parent().stdout)))
+        self.assertIs(report["ok"], True)
+        self.assertEqual(report["bundle_identifier"], "com.enoughtools.reporeach")
+        self.assertEqual(report["expected_app_path"], str(self.app))
+        self.assertIs(report["exact_app_registered"], False)
+        self.assertEqual(report["unknowns"], [])
+        self.assertIs(report["output_truncated"], False)
+        for path in ("relative/RepoReach.app", "/tmp/../RepoReach.app", "/tmp/./RepoReach.app", "/tmp//RepoReach.app", "/tmp/RepoReach.app/"):
+            with self.subTest(path=path):
+                rejected = subprocess.run([str(self.inspector), path], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=20)
+                self.assertEqual(rejected.returncode, 1)
+                self.assertEqual(json.loads(rejected.stdout)["unknowns"], ["invalid_expected_app_path"])
+        text = source.read_text()
+        self.assertNotIn("standardizedFileURL", text)
+        self.assertNotIn("resolvingSymlinks", text)
+        self.assertNotIn("URL(fileURLWithPath", text)
 
 
 if __name__ == "__main__":
