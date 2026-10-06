@@ -23,6 +23,7 @@ import (
 	"github.com/cloudflare/artifact-fs/internal/fusefs"
 	"github.com/cloudflare/artifact-fs/internal/gitstore"
 	"github.com/cloudflare/artifact-fs/internal/model"
+	"github.com/cloudflare/artifact-fs/internal/overlay"
 )
 
 type Options struct {
@@ -59,11 +60,13 @@ type Service struct {
 	workers          sync.WaitGroup
 	// lifecycle protects mount changes. Repository operations never hold mu
 	// while waiting on FUSE or invoking git.
-	lifecycle       sync.Mutex
-	catalog         *catalogfs.FileSystem
-	mounted         fusefs.MountedFS
-	dependencyReady func() bool
-	mountCatalogue  func(context.Context, string, *catalogfs.FileSystem) (fusefs.MountedFS, error)
+	lifecycle              sync.Mutex
+	catalog                *catalogfs.FileSystem
+	catalogMetadata        *overlay.Store
+	mounted                fusefs.MountedFS
+	dependencyReady        func() bool
+	mountCatalogue         func(context.Context, string, *catalogfs.FileSystem) (fusefs.MountedFS, error)
+	closeCatalogueMetadata func(*overlay.Store) error
 	// FSKit 26 cannot invalidate catalogue changes made outside the mounted
 	// filesystem. Publish them only after a normal, successful unmount.
 	quiescentCatalogue bool
@@ -135,6 +138,7 @@ func New(ctx context.Context, opts Options) (*Service, error) {
 		dependencyReady: platformDependencyReady, quiescentCatalogue: runtime.GOOS == "darwin",
 	}
 	s.mountCatalogue = s.platformMountCatalogue
+	s.closeCatalogueMetadata = (*overlay.Store).Close
 	if err := s.recoverRootMigration(ctx); err != nil {
 		_ = engine.Close()
 		cancel()
@@ -409,23 +413,38 @@ func (s *Service) mountLocked(ctx context.Context) error {
 	if err := safeMountDirectory(root); err != nil {
 		return err
 	}
-	fs, err := catalogfs.New(entries, func(ctx context.Context, entry catalogfs.Entry) (*fusefs.ArtifactFuse, error) {
+	// A previous session may be detached but retain its store after a close
+	// failure. Finish that ownership before opening another database handle.
+	if err := s.closeCatalogueStoreLocked(); err != nil {
+		return err
+	}
+	metadata, err := openCatalogueMetadata(ctx, s.opts.StateDir)
+	if err != nil {
+		return fmt.Errorf("open catalogue metadata: %w", err)
+	}
+	s.mu.Lock()
+	s.catalogMetadata = metadata
+	s.mu.Unlock()
+	fs, err := catalogfs.NewWithMetadata(entries, func(ctx context.Context, entry catalogfs.Entry) (*fusefs.ArtifactFuse, error) {
 		unlock, err := s.lockRepo(ctx, entry.ID)
 		if err != nil {
 			return nil, err
 		}
 		defer unlock()
 		return s.ensureRepository(ctx, entry.ID)
-	})
+	}, metadata)
 	if err != nil {
-		return err
+		return errors.Join(err, s.closeCatalogueStoreLocked())
 	}
+	s.mu.Lock()
+	s.catalog = fs
+	s.mu.Unlock()
 	mounted, err := s.mountCatalogue(ctx, root, fs)
 	if err != nil && mounted == nil {
-		return err
+		return errors.Join(err, s.closeCatalogueStoreLocked())
 	}
 	if mounted == nil {
-		return errors.New("filesystem mount returned no lifecycle owner")
+		return errors.Join(errors.New("filesystem mount returned no lifecycle owner"), s.closeCatalogueStoreLocked())
 	}
 	s.mu.Lock()
 	if s.closing {
@@ -442,6 +461,8 @@ func (s *Service) mountLocked(ctx context.Context) error {
 			s.mu.Lock()
 			s.catalog, s.mounted = fs, mounted
 			s.mu.Unlock()
+		} else {
+			cleanupErr = s.closeCatalogueStoreLocked()
 		}
 		return errors.Join(errors.New("service is closing"), cleanupErr)
 	}
@@ -457,15 +478,26 @@ func (s *Service) mountLocked(ctx context.Context) error {
 	go func() {
 		defer s.workers.Done()
 		err := mounted.Join(s.ctx)
+		// Serialize database disposal with mount changes. Join errors alone do
+		// not establish that an uncertain mount has detached and drained.
+		s.lifecycle.Lock()
+		defer s.lifecycle.Unlock()
 		s.mu.Lock()
 		// A canceled observation does not prove the kernel mount detached.
 		// Retain ownership until Close can unmount it after parent cancellation.
-		if s.mounted == mounted && !s.closing && s.ctx.Err() == nil {
-			s.mounted, s.catalog = nil, nil
+		if s.mounted == mounted && !s.closing && s.ctx.Err() == nil && err == nil {
+			s.mounted = nil
 			s.message = "The repository folder was unmounted. Open RepoReach to mount it again."
-			if err != nil && !errors.Is(err, context.Canceled) {
-				s.message = safeError(err)
+			s.mu.Unlock()
+			if closeErr := s.closeCatalogueStoreLocked(); closeErr != nil {
+				s.mu.Lock()
+				s.message = safeError(closeErr)
+				s.mu.Unlock()
 			}
+			return
+		}
+		if s.mounted == mounted && !s.closing && s.ctx.Err() == nil && err != nil {
+			s.message = safeError(err)
 		}
 		s.mu.Unlock()
 	}()
@@ -526,7 +558,7 @@ func (s *Service) detachLocked() error {
 	mounted := s.mounted
 	s.mu.Unlock()
 	if mounted == nil {
-		return nil
+		return s.closeCatalogueStoreLocked()
 	}
 	if err := mounted.Unmount(); err != nil {
 		return fmt.Errorf("unmount repository folder: %w", err)
@@ -538,10 +570,10 @@ func (s *Service) detachLocked() error {
 	}
 	s.mu.Lock()
 	if s.mounted == mounted {
-		s.mounted, s.catalog = nil, nil
+		s.mounted = nil
 	}
 	s.mu.Unlock()
-	return nil
+	return s.closeCatalogueStoreLocked()
 }
 
 func (s *Service) Settings(ctx context.Context, root string) error {

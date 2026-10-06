@@ -137,7 +137,7 @@ private final class VolumeReadBuffer: @unchecked Sendable {
 
 @available(macOS 15.4, *)
 final class RepoReachVolume: FSVolume, FSVolume.Operations,
-    FSVolume.ReadWriteOperations, FSVolume.OpenCloseOperations {
+    FSVolume.ReadWriteOperations, FSVolume.OpenCloseOperations, FSVolume.XattrOperations {
 
     private struct ItemState {
         let item: RepoReachItem
@@ -201,7 +201,7 @@ final class RepoReachVolume: FSVolume, FSVolume.Operations,
     var restrictsOwnershipChanges: Bool { true }
     var truncatesLongNames: Bool { false }
     var maximumFileSize: UInt64 { UInt64(Int64.max) }
-    var maximumXattrSize: Int { 0 }
+    var maximumXattrSize: Int { FSBridgeClient.maximumXattrSize }
 
     var supportedVolumeCapabilities: FSVolume.SupportedCapabilities {
         let capabilities = FSVolume.SupportedCapabilities()
@@ -460,6 +460,46 @@ final class RepoReachVolume: FSVolume, FSVolume.Operations,
             }
             return try self.makeAttributes(attributes, inode: state.item.inode, parent: state.parent,
                                            desired: desiredAttributes, removed: state.removed)
+        }
+    }
+
+    func getXattr(named name: FSFileName, of item: FSItem,
+                  replyHandler: @escaping (Data?, Error?) -> Void) {
+        perform(exclusive: false, reply: replyHandler) {
+            let state = try self.state(for: item)
+            let name = try self.xattrName(name)
+            return try await self.client.getXattr(inode: state.item.inode, name: name)
+        }
+    }
+
+    func listXattrs(of item: FSItem, replyHandler: @escaping ([FSFileName]?, Error?) -> Void) {
+        perform(exclusive: false, reply: replyHandler) {
+            let state = try self.state(for: item)
+            let names = try await self.client.listXattrs(inode: state.item.inode)
+            return names.map { FSFileName(string: $0) }
+        }
+    }
+
+    func setXattr(named name: FSFileName, to value: Data?, on item: FSItem,
+                  policy: FSVolume.SetXattrPolicy, replyHandler: @escaping (Error?) -> Void) {
+        perform(exclusive: true, reply: replyHandler) {
+            try self.requireWritable()
+            let state = try self.state(for: item)
+            let name = try self.xattrName(name)
+            let bridgePolicy: FSBridgeXattrPolicy
+            switch policy {
+            case .alwaysSet: bridgePolicy = .alwaysSet
+            case .mustCreate: bridgePolicy = .mustCreate
+            case .mustReplace: bridgePolicy = .mustReplace
+            case .delete:
+                // Delete has no value, even if FSKit supplies an unused one.
+                try await self.client.removeXattr(inode: state.item.inode, name: name)
+                return
+            @unknown default: throw POSIXError(.EINVAL)
+            }
+            guard let value else { throw POSIXError(.EINVAL) }
+            guard value.count <= self.maximumXattrSize else { throw POSIXError(.E2BIG) }
+            try await self.client.setXattr(inode: state.item.inode, name: name, value: value, policy: bridgePolicy)
         }
     }
 
@@ -1139,6 +1179,13 @@ final class RepoReachVolume: FSVolume, FSVolume.Operations,
         guard !string.isEmpty, !name.data.contains(0), !name.data.contains(47) else { throw POSIXError(.EINVAL) }
         guard name.data.count <= maximumNameLength else { throw POSIXError(.ENAMETOOLONG) }
         guard allowDots || (string != "." && string != "..") else { throw POSIXError(.EINVAL) }
+        return string
+    }
+
+    private func xattrName(_ name: FSFileName) throws -> String {
+        guard let string = String(data: name.data, encoding: .utf8) else { throw POSIXError(.EINVAL) }
+        guard !name.data.isEmpty, !name.data.contains(0) else { throw POSIXError(.EINVAL) }
+        guard name.data.count <= FSBridgeClient.maximumXattrNameSize else { throw POSIXError(.ENAMETOOLONG) }
         return string
     }
 

@@ -3,6 +3,8 @@ import Foundation
 import Darwin
 #if canImport(Bridge)
 @testable import Bridge
+#elseif canImport(NativeFilesystem)
+@testable import NativeFilesystem
 #endif
 
 final class FSBridgeTests: XCTestCase {
@@ -174,6 +176,225 @@ final class FSBridgeTests: XCTestCase {
         await client.close()
     }
 
+    func testXattrBinaryOperationsPreserveEncodedNamesValuesAndPolicies() async throws {
+        let name = "com.example.-_~/a?b&c=é%#\r\n"
+        let target = "/v1/fs/xattr?inode=7&name=com.example.-_~%2Fa%3Fb%26c%3D%C3%A9%25%23%0D%0A"
+        let values = [Data(), Data((0...255).map(UInt8.init)) + Data([0, 255, 13, 10]),
+                      Data(repeating: 255, count: 1_048_576)]
+        for value in values {
+            let fixture = try BridgeSocketFixture { _ in Self.http(body: value, contentType: "application/octet-stream") }
+            defer { fixture.stop() }
+            let client = FSBridgeClient(configuration: try FSBridgeConfiguration(socketPath: fixture.socketPath, token: token))
+            let received = try await client.getXattr(inode: 7, name: name)
+            XCTAssertEqual(received, value)
+            let request = try fixture.capturedRequest()
+            XCTAssertEqual(request.method, "GET")
+            XCTAssertEqual(request.target, target)
+            XCTAssertTrue(request.body.isEmpty)
+            XCTAssertEqual(request.headers["authorization"], "Bearer " + token)
+            await client.close()
+        }
+        let policies: [(FSBridgeXattrPolicy, String)] = [
+            (.alwaysSet, "always_set"), (.mustCreate, "must_create"), (.mustReplace, "must_replace")
+        ]
+        for (policy, wirePolicy) in policies {
+            for value in values {
+                let fixture = try BridgeSocketFixture { request in
+                    let body = "{\"version\":1,\"errno\":0,\"written\":\(request.body.count)}"
+                    return Self.http(body: Data(body.utf8))
+                }
+                defer { fixture.stop() }
+                let client = FSBridgeClient(configuration: try FSBridgeConfiguration(socketPath: fixture.socketPath, token: token))
+                try await client.setXattr(inode: 7, name: name, value: value, policy: policy)
+                let request = try fixture.capturedRequest()
+                XCTAssertEqual(request.method, "PUT")
+                XCTAssertEqual(request.target, target + "&policy=" + wirePolicy)
+                XCTAssertEqual(request.body, value)
+                XCTAssertEqual(request.headers["content-type"], "application/octet-stream")
+                XCTAssertEqual(request.headers["authorization"], "Bearer " + token)
+                XCTAssertFalse(request.target.contains(token))
+                await client.close()
+            }
+        }
+    }
+
+    func testXattrRejectsMalformedBinaryResponsesAndInexactAcknowledgements() async throws {
+        let responses: [(Data, FSBridgeError)] = [
+            (Data("HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: 0\r\n\r\n".utf8), .malformedResponse),
+            (Self.http(body: Data([1]), contentType: "application/json"), .malformedResponse),
+            (Data("HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nX-RepoReach-Errno: 0\r\nTransfer-Encoding: chunked\r\n\r\n1\r\nx\r\n0\r\n\r\n".utf8), .malformedResponse),
+            (Data("HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nX-RepoReach-Errno: 0\r\nContent-Length: 2\r\n\r\nx".utf8), .malformedResponse),
+            (Data("HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nX-RepoReach-Errno: 0\r\nContent-Length: 1048577\r\n\r\n".utf8), .responseTooLarge)
+        ]
+        for (response, expected) in responses {
+            let fixture = try BridgeSocketFixture { _ in response }
+            defer { fixture.stop() }
+            let client = FSBridgeClient(configuration: try FSBridgeConfiguration(socketPath: fixture.socketPath, token: token))
+            await assertBridgeError(expected) { _ = try await client.getXattr(inode: 7, name: "com.example.binary") }
+            await client.close()
+        }
+        let acknowledgements = [
+            #"{"version":1,"errno":0}"#,
+            #"{"version":1,"errno":0,"written":-1}"#,
+            #"{"version":1,"errno":0,"written":1}"#,
+            #"{"version":1,"errno":0,"written":3}"#,
+            #"{"version":2,"errno":0,"written":2}"#
+        ]
+        for body in acknowledgements {
+            let fixture = try BridgeSocketFixture { _ in Self.http(body: Data(body.utf8)) }
+            defer { fixture.stop() }
+            let client = FSBridgeClient(configuration: try FSBridgeConfiguration(socketPath: fixture.socketPath, token: token))
+            await assertBridgeError(.malformedResponse) {
+                try await client.setXattr(inode: 7, name: "com.example.binary", value: Data([0, 255]), policy: .alwaysSet)
+            }
+            await client.close()
+        }
+        for body in [#"{"version":1,"errno":0}"#, #"{"version":1,"errno":0,"written":1}"#] {
+            let fixture = try BridgeSocketFixture { _ in Self.http(body: Data(body.utf8)) }
+            defer { fixture.stop() }
+            let client = FSBridgeClient(configuration: try FSBridgeConfiguration(socketPath: fixture.socketPath, token: token))
+            await assertBridgeError(.malformedResponse) {
+                try await client.setXattr(inode: 7, name: "com.example.empty", value: Data(), policy: .alwaysSet)
+            }
+            await client.close()
+        }
+    }
+
+    func testXattrMetadataPreservesExactWireFieldsAndUTF8NameIdentity() async throws {
+        let names = ["com.example.\u{00E9}", "com.example.e\u{0301}", "com.example./?&=\r\n"]
+        let body = try JSONSerialization.data(withJSONObject: ["version": 1, "errno": 0, "xattr_names": names])
+        let listFixture = try BridgeSocketFixture { _ in Self.http(body: body) }
+        defer { listFixture.stop() }
+        let listClient = FSBridgeClient(configuration: try FSBridgeConfiguration(socketPath: listFixture.socketPath, token: token))
+        let received = try await listClient.listXattrs(inode: 7)
+        // Swift String equality normalizes Unicode; metadata identity is its exact UTF-8 spelling.
+        XCTAssertEqual(received.map { Data($0.utf8) }, names.map { Data($0.utf8) })
+        XCTAssertNotEqual(Data(received[0].utf8), Data(received[1].utf8))
+        let listRequest = try listFixture.capturedRequest()
+        XCTAssertEqual(listRequest.method, "POST")
+        XCTAssertEqual(listRequest.target, "/v1/fs")
+        let listObject = try XCTUnwrap(JSONSerialization.jsonObject(with: listRequest.body) as? [String: Any])
+        XCTAssertEqual(Set(listObject.keys), ["version", "op", "inode"])
+        XCTAssertEqual(listObject["version"] as? Int, 1)
+        XCTAssertEqual(listObject["op"] as? String, "listxattr")
+        XCTAssertEqual(listObject["inode"] as? Int, 7)
+        await listClient.close()
+
+        let escapedNames = (0..<128).map {
+            String(format: "%03d", $0) + String(repeating: "\u{0001}", count: 124)
+        }
+        XCTAssertTrue(escapedNames.allSatisfy { $0.utf8.count == 127 })
+        let escapedBody = try JSONSerialization.data(withJSONObject: ["version": 1, "errno": 0, "xattr_names": escapedNames])
+        XCTAssertGreaterThan(escapedBody.count, 65_536)
+        let escapedFixture = try BridgeSocketFixture { _ in Self.http(body: escapedBody) }
+        defer { escapedFixture.stop() }
+        let escapedClient = FSBridgeClient(configuration: try FSBridgeConfiguration(socketPath: escapedFixture.socketPath, token: token))
+        let escapedReceived = try await escapedClient.listXattrs(inode: 7)
+        XCTAssertEqual(escapedReceived.map { Data($0.utf8) }, escapedNames.map { Data($0.utf8) })
+        await escapedClient.close()
+
+        let removeFixture = try BridgeSocketFixture { _ in Self.http(body: Data(#"{"version":1,"errno":0}"#.utf8)) }
+        defer { removeFixture.stop() }
+        let removeClient = FSBridgeClient(configuration: try FSBridgeConfiguration(socketPath: removeFixture.socketPath, token: token))
+        try await removeClient.removeXattr(inode: 7, name: names[2])
+        let removeRequest = try removeFixture.capturedRequest()
+        XCTAssertEqual(removeRequest.method, "POST")
+        XCTAssertEqual(removeRequest.target, "/v1/fs")
+        XCTAssertEqual(removeRequest.headers["authorization"], "Bearer " + token)
+        let removeObject = try XCTUnwrap(JSONSerialization.jsonObject(with: removeRequest.body) as? [String: Any])
+        XCTAssertEqual(Set(removeObject.keys), ["version", "op", "inode", "name"])
+        XCTAssertEqual(removeObject["version"] as? Int, 1)
+        XCTAssertEqual(removeObject["op"] as? String, "removexattr")
+        XCTAssertEqual(removeObject["inode"] as? Int, 7)
+        XCTAssertEqual(Data(try XCTUnwrap(removeObject["name"] as? String).utf8), Data(names[2].utf8))
+        await removeClient.close()
+    }
+
+    func testXattrRejectsInvalidListNamesAndExactUTF8Duplicates() async throws {
+        let invalidNames = [
+            [""], ["com.example.a\0b"], [String(repeating: "a", count: 128)],
+            [String(repeating: "é", count: 64)], ["com.example.same", "com.example.same"],
+            (0..<129).map { "com.example.\($0)" }
+        ]
+        var bodies = try invalidNames.map {
+            try JSONSerialization.data(withJSONObject: ["version": 1, "errno": 0, "xattr_names": $0])
+        }
+        bodies.append(contentsOf: [
+            Data(#"{"version":1,"errno":0}"#.utf8),
+            Data(#"{"version":1,"errno":0,"xattr_names":null}"#.utf8),
+            Data(#"{"version":1,"errno":0,"xattr_names":"com.example.name"}"#.utf8),
+            Data(#"{"version":1,"errno":0,"xattr_names":[1]}"#.utf8)
+        ])
+        for body in bodies {
+            let fixture = try BridgeSocketFixture { _ in Self.http(body: body) }
+            defer { fixture.stop() }
+            let client = FSBridgeClient(configuration: try FSBridgeConfiguration(socketPath: fixture.socketPath, token: token))
+            await assertBridgeError(.malformedResponse) { _ = try await client.listXattrs(inode: 7) }
+            await client.close()
+        }
+    }
+
+    func testXattrMissingTagIsOperationSpecificAndFollowsNumericErrnoValidation() async throws {
+        // Linux ENODATA is 61; Darwin ENOATTR has a different value.
+        let foreignMissingErrno: Int32 = 61
+        let cases: [(Int32, Int32, Bool?, FSBridgeError)] = [
+            (foreignMissingErrno, foreignMissingErrno, true, .filesystem(ENOATTR)),
+            (foreignMissingErrno, foreignMissingErrno, nil, .filesystem(foreignMissingErrno)),
+            (foreignMissingErrno, ENOENT, true, .malformedResponse),
+            (0, 0, true, .malformedResponse)
+        ]
+        for operation in ["get", "set", "list", "remove", "getattr"] {
+            for (errno, headerErrno, missing, xattrExpected) in cases {
+                var object: [String: Any] = ["version": 1, "errno": errno]
+                if let missing { object["xattr_missing"] = missing }
+                let body = try JSONSerialization.data(withJSONObject: object)
+                let fixture = try BridgeSocketFixture { _ in Self.http(body: body, errno: headerErrno, status: 404) }
+                defer { fixture.stop() }
+                let client = FSBridgeClient(configuration: try FSBridgeConfiguration(socketPath: fixture.socketPath, token: token))
+                let expected = operation == "getattr" && missing == true && errno != 0 && errno == headerErrno ?
+                    FSBridgeError.filesystem(foreignMissingErrno) : xattrExpected
+                await assertBridgeError(expected) {
+                    switch operation {
+                    case "get": _ = try await client.getXattr(inode: 7, name: "com.example.missing")
+                    case "set": try await client.setXattr(inode: 7, name: "com.example.missing", value: Data(), policy: .mustReplace)
+                    case "list": _ = try await client.listXattrs(inode: 7)
+                    case "remove": try await client.removeXattr(inode: 7, name: "com.example.missing")
+                    default: _ = try await client.request(FSBridgeRequest(op: "getattr", inode: 7))
+                    }
+                }
+                await client.close()
+            }
+        }
+    }
+
+    func testXattrBoundsAreCheckedBeforeConnectingAndUseUTF8Bytes() async throws {
+        let client = FSBridgeClient(configuration: try FSBridgeConfiguration(socketPath: "/tmp/nonexistent-rr-xattr.sock", token: token))
+        for name in ["", "a\0b", String(repeating: "a", count: 128), String(repeating: "é", count: 64)] {
+            await assertBridgeError(.invalidRequest) { _ = try await client.getXattr(inode: 7, name: name) }
+            await assertBridgeError(.invalidRequest) { try await client.setXattr(inode: 7, name: name, value: Data(), policy: .alwaysSet) }
+            await assertBridgeError(.invalidRequest) { try await client.removeXattr(inode: 7, name: name) }
+        }
+        await assertBridgeError(.invalidRequest) { _ = try await client.getXattr(inode: 0, name: "com.example.name") }
+        await assertBridgeError(.invalidRequest) { try await client.setXattr(inode: 0, name: "com.example.name", value: Data(), policy: .alwaysSet) }
+        await assertBridgeError(.invalidRequest) { _ = try await client.listXattrs(inode: 0) }
+        await assertBridgeError(.invalidRequest) { try await client.removeXattr(inode: 0, name: "com.example.name") }
+        await assertBridgeError(.invalidRequest) {
+            try await client.setXattr(inode: 7, name: "com.example.large",
+                                      value: Data(repeating: 0, count: 1_048_577), policy: .alwaysSet)
+        }
+        await client.close()
+
+        let boundaryName = String(repeating: "é", count: 63) + "a"
+        XCTAssertEqual(boundaryName.utf8.count, 127)
+        let fixture = try BridgeSocketFixture { _ in Self.http(body: Data(), contentType: "application/octet-stream") }
+        defer { fixture.stop() }
+        let boundaryClient = FSBridgeClient(configuration: try FSBridgeConfiguration(socketPath: fixture.socketPath, token: token))
+        let value = try await boundaryClient.getXattr(inode: UInt64.max, name: boundaryName)
+        XCTAssertTrue(value.isEmpty)
+        XCTAssertTrue(try fixture.capturedRequest().target.hasPrefix("/v1/fs/xattr?inode=18446744073709551615&name="))
+        await boundaryClient.close()
+    }
+
     func testRejectsMismatchedErrnoAndResponseVersion() async throws {
         for body in [#"{"version":1,"errno":2}"#, #"{"version":2,"errno":0}"#] {
             let fixture = try BridgeSocketFixture { _ in Self.http(body: Data(body.utf8), errno: 0) }
@@ -284,8 +505,14 @@ final class FSBridgeTests: XCTestCase {
         for task in active { _ = try? await task.value }
     }
 
-    private static func http(body: Data, contentType: String = "application/json", errno: Int32 = 0) -> Data {
-        var response = Data("HTTP/1.1 200 OK\r\nContent-Type: \(contentType)\r\nContent-Length: \(body.count)\r\nX-RepoReach-Errno: \(errno)\r\nConnection: close\r\n\r\n".utf8)
+    private func assertBridgeError(_ expected: FSBridgeError, file: StaticString = #filePath, line: UInt = #line,
+                                   operation: () async throws -> Void) async {
+        do { try await operation(); XCTFail("Expected bridge failure", file: file, line: line) }
+        catch { XCTAssertEqual(error as? FSBridgeError, expected, file: file, line: line) }
+    }
+
+    private static func http(body: Data, contentType: String = "application/json", errno: Int32 = 0, status: Int = 200) -> Data {
+        var response = Data("HTTP/1.1 \(status) Fixture\r\nContent-Type: \(contentType)\r\nContent-Length: \(body.count)\r\nX-RepoReach-Errno: \(errno)\r\nConnection: close\r\n\r\n".utf8)
         response.append(body)
         return response
     }

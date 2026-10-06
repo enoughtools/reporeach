@@ -7,6 +7,7 @@ package catalogfs
 
 import (
 	"context"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"runtime"
@@ -45,11 +46,13 @@ type repository struct {
 }
 
 type inode struct {
-	path    string // set only for synthetic catalogue directories
-	repo    *repository
-	local   fuseops.InodeID
-	refs    uint64
-	dirRefs uint64
+	path         string // set only for synthetic catalogue directories
+	metadataPath string // stable key for synthetic directories, independent of display path
+	metadataID   model.MetadataObjectID
+	repo         *repository
+	local        fuseops.InodeID
+	refs         uint64
+	dirRefs      uint64
 }
 
 type inodeKey struct {
@@ -69,8 +72,9 @@ type handle struct {
 }
 
 type catalogEntry struct {
-	name  string
-	inode fuseops.InodeID
+	name         string
+	inode        fuseops.InodeID
+	metadataPath string
 }
 
 // FileSystem multiplexes independent ArtifactFS adapters. It translates every
@@ -78,6 +82,7 @@ type catalogEntry struct {
 type FileSystem struct {
 	fuseutil.NotImplementedFileSystem
 	activate     Activate
+	metadata     model.OverlayStore
 	mu           sync.Mutex
 	repositories map[string]*repository
 	paths        map[string]fuseops.InodeID
@@ -94,13 +99,20 @@ var _ fuseutil.FileSystem = (*FileSystem)(nil)
 // New validates the complete catalogue before exposing it. Root and repository
 // placeholders are synthesized without calling Activate.
 func New(entries []Entry, activate Activate) (*FileSystem, error) {
+	return NewWithMetadata(entries, activate, nil)
+}
+
+// NewWithMetadata stores synthetic directory attributes outside repository
+// working trees. Its store must outlive this mount and survive repository
+// eviction; New preserves the metadata-free constructor for existing callers.
+func NewWithMetadata(entries []Entry, activate Activate, metadata model.OverlayStore) (*FileSystem, error) {
 	if activate == nil {
 		return nil, fmt.Errorf("catalogue activation callback is required")
 	}
 	fs := &FileSystem{
-		activate: activate, repositories: make(map[string]*repository),
+		activate: activate, metadata: metadata, repositories: make(map[string]*repository),
 		paths:       map[string]fuseops.InodeID{".": fuseops.RootInodeID},
-		inodes:      map[fuseops.InodeID]*inode{fuseops.RootInodeID: {path: "."}},
+		inodes:      map[fuseops.InodeID]*inode{fuseops.RootInodeID: {path: ".", metadataPath: "."}},
 		childInodes: make(map[inodeKey]fuseops.InodeID), handles: make(map[fuseops.HandleID]*handle),
 		nextInode: fuseops.RootInodeID + 1, nextHandle: 1, created: time.Now(),
 	}
@@ -190,7 +202,14 @@ func (fs *FileSystem) synthetic(path string, repo *repository) fuseops.InodeID {
 	}
 	id := fs.nextInode
 	fs.nextInode++
-	fs.inodes[id] = &inode{path: path, repo: repo, local: fuseops.RootInodeID}
+	metadataPath := model.CleanPath("owners/" + path)
+	if repo != nil {
+		// IDs are opaque and may contain separators or traversal syntax. Encode
+		// the complete ID so a renamed repository keeps its metadata and a new
+		// repository at the same display path cannot inherit it.
+		metadataPath = model.CleanPath("repos/" + hex.EncodeToString([]byte(repo.entry.ID)))
+	}
+	fs.inodes[id] = &inode{path: path, metadataPath: metadataPath, repo: repo, local: fuseops.RootInodeID}
 	return id
 }
 
@@ -329,6 +348,24 @@ func (fs *FileSystem) directoryAttrs() fuseops.InodeAttributes {
 	return fuseops.InodeAttributes{Size: 4096, Nlink: 2, Mode: os.ModeDir | 0o755, Atime: fs.created, Mtime: fs.created, Ctime: fs.created, Uid: uint32(os.Getuid()), Gid: uint32(os.Getgid())}
 }
 
+func (fs *FileSystem) syntheticDirectoryAttrs(ctx context.Context, n *inode) (fuseops.InodeAttributes, error) {
+	attrs := fs.directoryAttrs()
+	if fs.metadata == nil {
+		return attrs, nil
+	}
+	object, err := fs.syntheticMetadata(ctx, n)
+	if err != nil {
+		return fuseops.InodeAttributes{}, err
+	}
+	// Binding a never-mutated synthetic object has no ctime of its own. Keep
+	// the catalogue's normal fallback; a persisted mutation takes precedence
+	// even when it predates the current mount.
+	if object.CtimeUnixNs != 0 {
+		attrs.Ctime = time.Unix(0, object.CtimeUnixNs)
+	}
+	return attrs, nil
+}
+
 func (fs *FileSystem) StatFS(ctx context.Context, op *fuseops.StatFSOp) error {
 	// The same virtual capacity as an ordinary ArtifactFS working tree.
 	return (&fusefs.ArtifactFuse{}).StatFS(ctx, op)
@@ -350,7 +387,15 @@ func (fs *FileSystem) LookUpInode(ctx context.Context, op *fuseops.LookUpInodeOp
 		if !ok {
 			return syscall.ENOENT
 		}
-		op.Entry = fuseops.ChildInodeEntry{Child: id, Attributes: fs.directoryAttrs(), AttributesExpiration: time.Now().Add(time.Second), EntryExpiration: time.Now().Add(time.Second)}
+		child, err := fs.node(id)
+		if err != nil {
+			return err
+		}
+		attrs, err := fs.syntheticDirectoryAttrs(ctx, child)
+		if err != nil {
+			return err
+		}
+		op.Entry = fuseops.ChildInodeEntry{Child: id, Attributes: attrs, AttributesExpiration: time.Now().Add(time.Second), EntryExpiration: time.Now().Add(time.Second)}
 		return nil
 	}
 	backend, err := fs.activateRepo(ctx, n.repo)
@@ -374,7 +419,10 @@ func (fs *FileSystem) GetInodeAttributes(ctx context.Context, op *fuseops.GetIno
 		return err
 	}
 	if n.path != "" {
-		op.Attributes = fs.directoryAttrs()
+		op.Attributes, err = fs.syntheticDirectoryAttrs(ctx, n)
+		if err != nil {
+			return err
+		}
 		op.AttributesExpiration = time.Now().Add(time.Second)
 		return nil
 	}
@@ -448,7 +496,7 @@ func (fs *FileSystem) OpenDir(ctx context.Context, op *fuseops.OpenDirOp) error 
 			}
 			name, ok := strings.CutPrefix(path, prefix)
 			if ok && !strings.Contains(name, "/") {
-				entries = append(entries, catalogEntry{name, id})
+				entries = append(entries, catalogEntry{name: name, inode: id, metadataPath: fs.inodes[id].metadataPath})
 			}
 		}
 		fs.mu.Unlock()
@@ -466,7 +514,7 @@ func (fs *FileSystem) OpenDir(ctx context.Context, op *fuseops.OpenDirOp) error 
 		return err
 	}
 	child.Inode = op.Inode
-	child.Handle = fs.addHandle(&handle{directory: true, repo: n.repo, backend: backend, local: child.Handle, inode: n.local})
+	child.Handle = fs.addHandle(&handle{directory: true, repo: n.repo, backend: backend, local: child.Handle, inode: n.local, globalInode: op.Inode})
 	*op = child
 	return nil
 }
@@ -530,7 +578,13 @@ func (fs *FileSystem) ReadDirPlus(ctx context.Context, op *fuseops.ReadDirPlusOp
 	}
 	for i := int(op.Offset); i < len(h.entries); i++ {
 		e := h.entries[i]
-		entry := fuseops.ChildInodeEntry{Child: e.inode, Attributes: fs.directoryAttrs(), AttributesExpiration: time.Now().Add(time.Second), EntryExpiration: time.Now().Add(time.Second)}
+		// An open synthetic directory holds an immutable listing. Its metadata
+		// key must stay with the original entry if discovery replaces the path.
+		attrs, err := fs.syntheticDirectoryAttrs(ctx, &inode{metadataPath: e.metadataPath})
+		if err != nil {
+			return err
+		}
+		entry := fuseops.ChildInodeEntry{Child: e.inode, Attributes: attrs, AttributesExpiration: time.Now().Add(time.Second), EntryExpiration: time.Now().Add(time.Second)}
 		n := fuseutil.WriteDirentPlus(op.Dst[op.BytesRead:], fuseutil.DirentPlus{Dirent: fuseutil.Dirent{Offset: fuseops.DirOffset(i + 1), Inode: e.inode, Name: e.name, Type: fuseutil.DT_Directory}, Entry: entry})
 		if n == 0 {
 			break

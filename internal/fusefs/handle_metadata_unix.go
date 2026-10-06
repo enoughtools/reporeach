@@ -31,19 +31,27 @@ func (fs *ArtifactFuse) GetFileHandleAttributes(ctx context.Context, inode fuseo
 		return fuseops.InodeAttributes{}, syscall.EBADF
 	}
 	if fh.detached {
-		defer fh.mu.Unlock()
-		return detachedHandleAttributes(fh)
+		attrs, err := detachedHandleAttributes(fh)
+		metadataID := fh.inode.MetadataID
+		fh.mu.Unlock()
+		if err == nil {
+			err = fs.applyMetadataObjectCtime(ctx, metadataID, &attrs)
+		}
+		return attrs, err
 	}
 	path := fh.path
+	metadataID := fh.inode.MetadataID
 	fh.mu.Unlock()
 	if path == ".git" {
-		return fs.gitFileAttrs(), nil
+		attrs := fs.gitFileAttrs()
+		return attrs, fs.applyMetadataObjectCtime(ctx, metadataID, &attrs)
 	}
 	mode, size, typ, mtime, ctime, err := fs.resolveAttrs(ctx, path)
 	if err != nil {
 		return fuseops.InodeAttributes{}, fuseOperationError("handle getattr", err)
 	}
-	return inodeAttrs(mode, uint64(size), typ, mtime, ctime), nil
+	attrs := inodeAttrs(mode, uint64(size), typ, mtime, ctime)
+	return attrs, fs.applyMetadataObjectCtime(ctx, metadataID, &attrs)
 }
 
 // SetFileHandleAttributes preserves the distinction between an attached

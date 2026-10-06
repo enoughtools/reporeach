@@ -12,6 +12,39 @@ import (
 
 var ErrBlobTooLarge = errors.New("blob too large")
 
+// MetadataObjectID identifies a filesystem object independently of its current
+// path and of a mount's transient inode numbers. Detached objects remain usable
+// by retained inode references until an explicitly quiescent collection.
+type MetadataObjectID string
+
+type MetadataObject struct {
+	ID          MetadataObjectID
+	Type        string
+	CtimeUnixNs int64
+}
+
+type XattrSetPolicy uint8
+
+const (
+	XattrAlwaysSet XattrSetPolicy = iota
+	XattrMustCreate
+	XattrMustReplace
+	MaxXattrNameBytes   = 127
+	MaxXattrValueBytes  = 1 << 20
+	MaxXattrsPerObject  = 128
+	MaxXattrObjectBytes = 32 << 20
+	MaxXattrStoreBytes  = 256 << 20
+)
+
+var (
+	ErrMetadataObjectNotFound = errors.New("filesystem metadata object not found")
+	ErrXattrNotFound          = errors.New("extended attribute not found")
+	ErrXattrExists            = errors.New("extended attribute already exists")
+	ErrXattrTooLarge          = errors.New("extended attribute exceeds the supported limit")
+	ErrXattrStorageFull       = errors.New("extended attribute storage limit reached")
+	ErrInvalidXattr           = errors.New("invalid extended attribute")
+)
+
 type RepoID string
 
 // SourceRequirement describes the remote revision ArtifactFS must acquire.
@@ -216,6 +249,19 @@ type SnapshotStore interface {
 }
 
 type OverlayStore interface {
+	// BindMetadata requires a live namespace object. It returns its persistent
+	// metadata identity, creating one if necessary; a type replacement detaches
+	// the previous identity without changing retained references to it.
+	BindMetadata(ctx context.Context, path, nodeType string) (MetadataObject, error)
+	MetadataObject(ctx context.Context, id MetadataObjectID) (MetadataObject, bool, error)
+	GetMetadataXattr(ctx context.Context, id MetadataObjectID, name string) ([]byte, bool, error)
+	ListMetadataXattrs(ctx context.Context, id MetadataObjectID) ([]string, error)
+	SetMetadataXattr(ctx context.Context, id MetadataObjectID, name string, value []byte, policy XattrSetPolicy) error
+	RemoveMetadataXattr(ctx context.Context, id MetadataObjectID, name string) error
+	HasMetadataXattrs(ctx context.Context) (bool, error)
+	// CollectDetachedMetadata may run only after all mount/inode references to
+	// this store have drained. Merely reopening a store does not collect objects.
+	CollectDetachedMetadata(ctx context.Context) error
 	Get(path string) (OverlayEntry, bool)
 	Lookup(ctx context.Context, path string) (OverlayEntry, bool, error)
 	EnsureCopyOnWrite(ctx context.Context, repo RepoConfig, path string, base BaseNode) (OverlayEntry, error)
@@ -244,6 +290,9 @@ type OverlayStore interface {
 	RenameTree(ctx context.Context, oldPath, newPath string, sourceBasePaths, destinationBasePaths []string) error
 	RenameAndMarkModifiedFromBase(ctx context.Context, oldPath, newPath string, sourceOID string, sourceMode uint32) error
 	Mkdir(ctx context.Context, path string, mode uint32) error
+	// CreateDirectory creates a new namespace identity. Mkdir also serves base
+	// directory promotion and therefore preserves an existing metadata identity.
+	CreateDirectory(ctx context.Context, path string, mode uint32) error
 	SetMode(ctx context.Context, path string, mode uint32) error
 	SetMtime(ctx context.Context, path string, t time.Time) error
 	Reconcile(ctx context.Context, baseLookup func(path string) (BaseNode, bool)) error

@@ -45,7 +45,7 @@ func (s *Store) createFileOpened(ctx context.Context, path string, mode uint32, 
 	}
 	now := time.Now().UnixNano()
 	e := model.OverlayEntry{RepoID: s.repo.ID, Path: model.CleanPath(path), Kind: model.OverlayKindCreate, BackingPath: backing, Mode: mode, MtimeUnixNs: now, CtimeUnixNs: now}
-	if err := s.upsertEntry(ctx, e); err != nil {
+	if err := s.publishNamespaceEntryLocked(ctx, e, "file", true); err != nil {
 		return model.OverlayEntry{}, nil, err
 	}
 	published = true

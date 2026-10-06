@@ -443,10 +443,16 @@ func TestPersistentCatalogReclaimsPristineRemoteBackedBaseline(t *testing.T) {
 	if err := svc.FreeRepositorySpace(ctx, cfg.Name); err != nil {
 		t.Fatalf("app-owned baseline pin prevented safe cleanup: %v", err)
 	}
-	for _, path := range []string{cfg.GitDir, cfg.MetaDBPath, cfg.OverlayDir, cfg.BlobCacheDir} {
+	for _, path := range []string{cfg.GitDir, cfg.MetaDBPath, cfg.BlobCacheDir} {
 		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
 			t.Fatalf("pristine owned data was not reclaimed at %s: %v", path, err)
 		}
+	}
+	if _, err := os.Stat(cfg.OverlayDBPath); err != nil {
+		t.Fatalf("cleanup removed local metadata database: %v", err)
+	}
+	if err := verifyEmptyOverlayUpper(cfg.OverlayDir); err != nil {
+		t.Fatal(err)
 	}
 	if sourceHead := strings.TrimSpace(runCmdOutput(t, "git", "--git-dir", strings.TrimPrefix(cfg.RemoteURL, "file://"), "rev-parse", "HEAD")); sourceHead == "" {
 		t.Fatal("safe cleanup removed original source")

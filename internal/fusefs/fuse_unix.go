@@ -48,16 +48,17 @@ type ArtifactFuse struct {
 }
 
 type InodeRef struct {
-	ID      fuseops.InodeID
-	Path    string
-	Type    string // file, dir, symlink
-	Mode    uint32
-	Gen     int64
-	Refcnt  int64
-	DirRefs int64 // directory handles retaining READDIR-only identities
-	IsRoot  bool
-	Overlay bool
-	Stale   bool
+	ID         fuseops.InodeID
+	Path       string
+	Type       string // file, dir, symlink
+	Mode       uint32
+	Gen        int64
+	Refcnt     int64
+	DirRefs    int64 // directory handles retaining READDIR-only identities
+	IsRoot     bool
+	Overlay    bool
+	Stale      bool
+	MetadataID model.MetadataObjectID
 }
 
 type detachedMetadata struct {
@@ -71,6 +72,7 @@ type DirHandle struct {
 	commitTime   int64
 	entries      []ReaddirEntry
 	direntInodes map[fuseops.InodeID]struct{}
+	entryInodes  map[string]fuseops.InodeID
 }
 
 type FileHandle struct {
@@ -96,6 +98,7 @@ type ReaddirEntry struct {
 	FromOverlay bool
 	MtimeUnixNs int64
 	CtimeUnixNs int64
+	MetadataID  model.MetadataObjectID
 }
 
 func (e ReaddirEntry) direntType() fuseutil.DirentType {
@@ -132,8 +135,12 @@ func (fs *ArtifactFuse) allocInode(path, typ string, mode uint32, gen int64) *In
 	// Caller must hold fs.mu write lock.
 	if id, ok := fs.pathToInode[path]; ok {
 		if ref, ok := fs.inodes[id]; ok {
-			ref.Refcnt++
-			return ref
+			if ref.Type == typ {
+				ref.Refcnt++
+				return ref
+			}
+			ref.Stale = true
+			delete(fs.pathToInode, path)
 		}
 	}
 	id := fs.nextInodeID
@@ -219,8 +226,8 @@ func samePathOrDescendant(path, root string) bool {
 	return path == root || strings.HasPrefix(path, root+"/")
 }
 
-func (fs *ArtifactFuse) childPath(parentID fuseops.InodeID, name string) (*InodeRef, string, error) {
-	parent, err := fs.requireInode(parentID, syscall.ENOENT)
+func (fs *ArtifactFuse) childPath(ctx context.Context, parentID fuseops.InodeID, name string) (*InodeRef, string, error) {
+	parent, err := fs.requireLiveInode(ctx, parentID, syscall.ENOENT)
 	if err != nil {
 		return nil, "", err
 	}
@@ -466,7 +473,7 @@ func (fs *ArtifactFuse) StatFS(_ context.Context, op *fuseops.StatFSOp) error {
 func (fs *ArtifactFuse) LookUpInode(ctx context.Context, op *fuseops.LookUpInodeOp) error {
 	fs.handleOps.RLock()
 	defer fs.handleOps.RUnlock()
-	parent, err := fs.requireInode(op.Parent, syscall.ENOENT)
+	parent, err := fs.requireLiveInode(ctx, op.Parent, syscall.ENOENT)
 	if err != nil {
 		return err
 	}
@@ -481,6 +488,10 @@ func (fs *ArtifactFuse) LookUpInode(ctx context.Context, op *fuseops.LookUpInode
 		op.Entry.Child = ref.ID
 		op.Entry.Attributes = fs.gitFileAttrs()
 		setChildEntryExpiry(&op.Entry, time.Minute)
+		if err := fs.applyMetadataCtime(ctx, ref, &op.Entry.Attributes); err != nil {
+			fs.dropInodeLookup(ref.ID)
+			return err
+		}
 		return nil
 	}
 
@@ -491,6 +502,9 @@ func (fs *ArtifactFuse) LookUpInode(ctx context.Context, op *fuseops.LookUpInode
 		}
 		return fuseOperationError("lookup", err)
 	}
+	if err := fs.refreshMetadataPath(ctx, childPath, typ); err != nil {
+		return err
+	}
 
 	fs.mu.Lock()
 	ref := fs.allocInode(childPath, typ, mode, fs.resolver.Generation())
@@ -499,13 +513,17 @@ func (fs *ArtifactFuse) LookUpInode(ctx context.Context, op *fuseops.LookUpInode
 	op.Entry.Child = ref.ID
 	op.Entry.Attributes = inodeAttrs(mode, uint64(size), typ, mtime, ctime)
 	setChildEntryExpiry(&op.Entry, time.Second)
+	if err := fs.applyMetadataCtime(ctx, ref, &op.Entry.Attributes); err != nil {
+		fs.dropInodeLookup(ref.ID)
+		return err
+	}
 	return nil
 }
 
 func (fs *ArtifactFuse) GetInodeAttributes(ctx context.Context, op *fuseops.GetInodeAttributesOp) error {
 	fs.handleOps.RLock()
 	defer fs.handleOps.RUnlock()
-	ref, err := fs.requireInode(op.Inode, syscall.ESTALE)
+	ref, err := fs.requireLiveInode(ctx, op.Inode, syscall.ESTALE)
 	if err != nil {
 		return err
 	}
@@ -515,19 +533,19 @@ func (fs *ArtifactFuse) GetInodeAttributes(ctx context.Context, op *fuseops.GetI
 			if mode, size, typ, mtime, ctime, err := fs.resolver.Getattr(ref.Path); err == nil {
 				op.Attributes = inodeAttrs(mode, uint64(size), typ, mtime, ctime)
 				op.AttributesExpiration = attrExpiry(time.Second)
-				return nil
+				return fs.applyMetadataCtime(ctx, ref, &op.Attributes)
 			}
 		}
 		now := time.Now()
 		op.Attributes = inodeAttrs(ref.Mode, 4096, "dir", now, now)
 		op.AttributesExpiration = attrExpiry(time.Second)
-		return nil
+		return fs.applyMetadataCtime(ctx, ref, &op.Attributes)
 	}
 
 	if ref.Path == ".git" {
 		op.Attributes = fs.gitFileAttrs()
 		op.AttributesExpiration = attrExpiry(time.Minute)
-		return nil
+		return fs.applyMetadataCtime(ctx, ref, &op.Attributes)
 	}
 
 	mode, size, typ, mtime, ctime, err := fs.resolveAttrs(ctx, ref.Path)
@@ -539,7 +557,7 @@ func (fs *ArtifactFuse) GetInodeAttributes(ctx context.Context, op *fuseops.GetI
 	}
 	op.Attributes = inodeAttrs(mode, uint64(size), typ, mtime, ctime)
 	op.AttributesExpiration = attrExpiry(time.Second)
-	return nil
+	return fs.applyMetadataCtime(ctx, ref, &op.Attributes)
 }
 
 func (fs *ArtifactFuse) resolveAttrs(ctx context.Context, path string) (mode uint32, size int64, nodeType string, mtime time.Time, ctime time.Time, err error) {
@@ -583,7 +601,7 @@ func (fs *ArtifactFuse) resolveAttrs(ctx context.Context, path string) (mode uin
 func (fs *ArtifactFuse) SetInodeAttributes(ctx context.Context, op *fuseops.SetInodeAttributesOp) error {
 	fs.handleOps.Lock()
 	defer fs.handleOps.Unlock()
-	ref, err := fs.requireInode(op.Inode, syscall.ESTALE)
+	ref, err := fs.requireLiveInode(ctx, op.Inode, syscall.ESTALE)
 	if err != nil {
 		return err
 	}
@@ -649,13 +667,16 @@ func (fs *ArtifactFuse) ForgetInode(_ context.Context, op *fuseops.ForgetInodeOp
 func (fs *ArtifactFuse) OpenDir(ctx context.Context, op *fuseops.OpenDirOp) error {
 	fs.handleOps.RLock()
 	defer fs.handleOps.RUnlock()
-	ref, err := fs.requireInode(op.Inode, syscall.ESTALE)
+	ref, err := fs.requireLiveInode(ctx, op.Inode, syscall.ESTALE)
 	if err != nil {
 		return err
 	}
 	// Eagerly load children at open time to avoid races on concurrent ReadDir.
-	entries, gen, commitTime, err := fs.resolver.ReaddirSnapshot(ctx, ref.Path)
+	fs.resolver.transition.RLock()
+	gen, commitTime := fs.resolver.Generation(), fs.resolver.CommitTime()
+	entries, err := fs.resolver.readdirTypedAt(ctx, ref.Path, gen)
 	if err != nil {
+		fs.resolver.transition.RUnlock()
 		if errors.Is(err, iofs.ErrNotExist) {
 			return syscall.ENOENT
 		}
@@ -664,6 +685,17 @@ func (fs *ArtifactFuse) OpenDir(ctx context.Context, op *fuseops.OpenDirOp) erro
 	if ref.IsRoot {
 		entries = append([]ReaddirEntry{{Name: ".git", Type: "file", Mode: 0o644, SizeBytes: int64(len(fs.gitfileContent)), SizeState: "known"}}, entries...)
 	}
+	if fs.engine != nil && fs.engine.Overlay != nil {
+		for i := range entries {
+			object, err := fs.engine.Overlay.BindMetadata(ctx, cleanChildPath(ref.Path, entries[i].Name), entries[i].Type)
+			if err != nil {
+				fs.resolver.transition.RUnlock()
+				return xattrError("bind directory entry metadata", err)
+			}
+			entries[i].MetadataID = object.ID
+		}
+	}
+	fs.resolver.transition.RUnlock()
 
 	dh := &DirHandle{inode: ref, gen: gen, commitTime: commitTime, entries: entries}
 	fs.mu.Lock()
@@ -682,7 +714,7 @@ func (fs *ArtifactFuse) ReadDir(ctx context.Context, op *fuseops.ReadDirOp) erro
 // ReadDirWithInodeMapping lets a containing filesystem translate the child
 // filesystem's inode namespace. The mapper must not acquire lookup references:
 // ordinary READDIR does not grant the kernel an inode lookup reference.
-func (fs *ArtifactFuse) ReadDirWithInodeMapping(_ context.Context, op *fuseops.ReadDirOp, mapInode func(fuseops.InodeID) fuseops.InodeID) error {
+func (fs *ArtifactFuse) ReadDirWithInodeMapping(ctx context.Context, op *fuseops.ReadDirOp, mapInode func(fuseops.InodeID) fuseops.InodeID) error {
 	fs.handleOps.RLock()
 	defer fs.handleOps.RUnlock()
 	dh, err := fs.dirHandle(op.Handle)
@@ -708,26 +740,11 @@ func (fs *ArtifactFuse) ReadDirWithInodeMapping(_ context.Context, op *fuseops.R
 			// d_ino=0 entries, and a shared placeholder aliases all siblings.
 			// READDIR grants no lookup references, so retain a zero-reference
 			// identity until a later lookup/forget establishes its lifetime.
-			path := model.CleanPath(filepath.Join(dh.inode.Path, e.Name))
-			fs.mu.Lock()
-			var ref *InodeRef
-			if id, ok := fs.pathToInode[path]; ok {
-				ref = fs.inodes[id]
+			ref, err := fs.directoryEntryInode(ctx, dh, e, false)
+			if err != nil {
+				return err
 			}
-			if ref == nil {
-				ref = fs.allocInode(path, e.Type, e.Mode, dh.gen)
-				ref.Refcnt = 0
-			}
-			if dh.direntInodes == nil {
-				dh.direntInodes = make(map[fuseops.InodeID]struct{})
-			}
-			if _, retained := dh.direntInodes[ref.ID]; !retained {
-				dh.direntInodes[ref.ID] = struct{}{}
-				ref.DirRefs++
-			}
-			local := ref.ID
-			fs.mu.Unlock()
-			dirent.Inode = mapInode(local)
+			dirent.Inode = mapInode(ref.ID)
 			n = fuseutil.WriteDirent(op.Dst[op.BytesRead:], dirent)
 		}
 		op.BytesRead += n
@@ -741,7 +758,7 @@ func (fs *ArtifactFuse) ReadDirPlus(ctx context.Context, op *fuseops.ReadDirPlus
 
 // ReadDirPlusWithInodeMapping translates only entries actually returned to the
 // kernel. Each mapper call represents one lookup reference, just as LookUpInode.
-func (fs *ArtifactFuse) ReadDirPlusWithInodeMapping(_ context.Context, op *fuseops.ReadDirPlusOp, mapInode func(fuseops.InodeID) fuseops.InodeID) error {
+func (fs *ArtifactFuse) ReadDirPlusWithInodeMapping(ctx context.Context, op *fuseops.ReadDirPlusOp, mapInode func(fuseops.InodeID) fuseops.InodeID) error {
 	fs.handleOps.RLock()
 	defer fs.handleOps.RUnlock()
 	dh, err := fs.dirHandle(op.Handle)
@@ -752,8 +769,12 @@ func (fs *ArtifactFuse) ReadDirPlusWithInodeMapping(_ context.Context, op *fuseo
 	offset := int(op.Offset)
 	for i := offset; i < len(dh.entries); i++ {
 		e := dh.entries[i]
-		childPath := cleanChildPath(dh.inode.Path, e.Name)
-		entry, err := fs.childEntryFromReaddir(childPath, dh.gen, dh.commitTime, e)
+		// Check the fixed wire record plus name before acquiring its lookup.
+		preview := fuseutil.DirentPlus{Dirent: fuseutil.Dirent{Name: e.Name}, Entry: fuseops.ChildInodeEntry{Child: 1}}
+		if fuseutil.WriteDirentPlus(op.Dst[op.BytesRead:], preview) == 0 {
+			break
+		}
+		entry, err := fs.childEntryFromReaddir(ctx, dh, e)
 		if err != nil {
 			if errors.Is(err, iofs.ErrNotExist) {
 				return syscall.ENOENT
@@ -786,24 +807,31 @@ func (fs *ArtifactFuse) ReadDirPlusWithInodeMapping(_ context.Context, op *fuseo
 	return nil
 }
 
-func (fs *ArtifactFuse) childEntryFromReaddir(path string, gen, commitTime int64, e ReaddirEntry) (fuseops.ChildInodeEntry, error) {
+func (fs *ArtifactFuse) childEntryFromReaddir(ctx context.Context, dh *DirHandle, e ReaddirEntry) (fuseops.ChildInodeEntry, error) {
+	path := cleanChildPath(dh.inode.Path, e.Name)
+	ref, err := fs.directoryEntryInode(ctx, dh, e, true)
+	if err != nil {
+		return fuseops.ChildInodeEntry{}, err
+	}
 	if path == ".git" {
-		fs.mu.Lock()
-		ref := fs.allocInode(path, "file", 0o644, gen)
-		fs.mu.Unlock()
 		entry := fuseops.ChildInodeEntry{Child: ref.ID, Attributes: fs.gitFileAttrs()}
 		setChildEntryExpiry(&entry, time.Minute)
+		if err := fs.applyMetadataObjectCtime(ctx, e.MetadataID, &entry.Attributes); err != nil {
+			fs.dropInodeLookup(ref.ID)
+			return fuseops.ChildInodeEntry{}, err
+		}
 		return entry, nil
 	}
-	mode, size, typ, mtime, ctime := readdirAttrs(e, gen, commitTime)
-	fs.mu.Lock()
-	ref := fs.allocInode(path, typ, mode, gen)
-	fs.mu.Unlock()
+	mode, size, typ, mtime, ctime := readdirAttrs(e, dh.gen, dh.commitTime)
 	entry := fuseops.ChildInodeEntry{
 		Child:      ref.ID,
 		Attributes: inodeAttrs(mode, uint64(size), typ, mtime, ctime),
 	}
 	setChildEntryExpiry(&entry, time.Second)
+	if err := fs.applyMetadataObjectCtime(ctx, e.MetadataID, &entry.Attributes); err != nil {
+		fs.dropInodeLookup(ref.ID)
+		return fuseops.ChildInodeEntry{}, err
+	}
 	return entry, nil
 }
 
@@ -847,7 +875,7 @@ func (fs *ArtifactFuse) ReleaseDirHandle(_ context.Context, op *fuseops.ReleaseD
 func (fs *ArtifactFuse) OpenFile(ctx context.Context, op *fuseops.OpenFileOp) error {
 	fs.handleOps.Lock()
 	defer fs.handleOps.Unlock()
-	ref, err := fs.requireInode(op.Inode, syscall.ESTALE)
+	ref, err := fs.requireLiveInode(ctx, op.Inode, syscall.ESTALE)
 	if err != nil {
 		return err
 	}
@@ -994,7 +1022,7 @@ func (fs *ArtifactFuse) WriteFile(ctx context.Context, op *fuseops.WriteFileOp) 
 func (fs *ArtifactFuse) CreateFile(ctx context.Context, op *fuseops.CreateFileOp) error {
 	fs.handleOps.Lock()
 	defer fs.handleOps.Unlock()
-	_, childPath, err := fs.childPath(op.Parent, op.Name)
+	_, childPath, err := fs.childPath(ctx, op.Parent, op.Name)
 	if err != nil {
 		return err
 	}
@@ -1012,9 +1040,11 @@ func (fs *ArtifactFuse) CreateFile(ctx context.Context, op *fuseops.CreateFileOp
 	if err != nil {
 		return fuseOperationError("create", err)
 	}
+	fs.retireInodePath(childPath)
 	fs.mu.Lock()
 	ref := fs.allocInode(childPath, "file", uint32(op.Mode), fs.resolver.Generation())
-	fh := &FileHandle{inode: ref, path: childPath, cacheFile: file, cacheGeneration: -1, access: fileAccess(int(op.OpenFlags))}
+	handleRef := *ref
+	fh := &FileHandle{inode: &handleRef, path: childPath, cacheFile: file, cacheGeneration: -1, access: fileAccess(int(op.OpenFlags))}
 	handle := fs.nextHandleID
 	fs.nextHandleID++
 	fs.fileHandles[handle] = fh
@@ -1031,7 +1061,7 @@ func (fs *ArtifactFuse) CreateFile(ctx context.Context, op *fuseops.CreateFileOp
 func (fs *ArtifactFuse) CreateSymlink(ctx context.Context, op *fuseops.CreateSymlinkOp) error {
 	fs.handleOps.Lock()
 	defer fs.handleOps.Unlock()
-	_, childPath, err := fs.childPath(op.Parent, op.Name)
+	_, childPath, err := fs.childPath(ctx, op.Parent, op.Name)
 	if err != nil {
 		return err
 	}
@@ -1051,6 +1081,7 @@ func (fs *ArtifactFuse) CreateSymlink(ctx context.Context, op *fuseops.CreateSym
 	if _, err := fs.engine.Overlay.CreateSymlink(ctx, childPath, op.Target); err != nil {
 		return fuseOperationError("symlink", err)
 	}
+	fs.retireInodePath(childPath)
 	fs.mu.Lock()
 	ref := fs.allocInode(childPath, "symlink", 0o120000, fs.resolver.Generation())
 	fs.mu.Unlock()
@@ -1065,7 +1096,7 @@ func (fs *ArtifactFuse) CreateSymlink(ctx context.Context, op *fuseops.CreateSym
 func (fs *ArtifactFuse) MkDir(ctx context.Context, op *fuseops.MkDirOp) error {
 	fs.handleOps.Lock()
 	defer fs.handleOps.Unlock()
-	_, childPath, err := fs.childPath(op.Parent, op.Name)
+	_, childPath, err := fs.childPath(ctx, op.Parent, op.Name)
 	if err != nil {
 		return err
 	}
@@ -1079,9 +1110,10 @@ func (fs *ArtifactFuse) MkDir(ctx context.Context, op *fuseops.MkDirOp) error {
 	} else if !errors.Is(err, iofs.ErrNotExist) {
 		return fuseOperationError("check mkdir name", err)
 	}
-	if err := fs.engine.Overlay.Mkdir(ctx, childPath, uint32(op.Mode)); err != nil {
+	if err := fs.engine.Overlay.CreateDirectory(ctx, childPath, uint32(op.Mode)); err != nil {
 		return fuseOperationError("mkdir", err)
 	}
+	fs.retireInodePath(childPath)
 	fs.mu.Lock()
 	ref := fs.allocInode(childPath, "dir", uint32(op.Mode), fs.resolver.Generation())
 	fs.mu.Unlock()
@@ -1096,8 +1128,11 @@ func (fs *ArtifactFuse) MkDir(ctx context.Context, op *fuseops.MkDirOp) error {
 func (fs *ArtifactFuse) RmDir(ctx context.Context, op *fuseops.RmDirOp) error {
 	fs.handleOps.Lock()
 	defer fs.handleOps.Unlock()
-	_, childPath, err := fs.childPath(op.Parent, op.Name)
+	_, childPath, err := fs.childPath(ctx, op.Parent, op.Name)
 	if err != nil {
+		return err
+	}
+	if err := fs.captureMetadataForPaths(ctx, childPath); err != nil {
 		return err
 	}
 	if err := fs.engine.Rmdir(ctx, childPath); err != nil {
@@ -1113,8 +1148,11 @@ func (fs *ArtifactFuse) RmDir(ctx context.Context, op *fuseops.RmDirOp) error {
 func (fs *ArtifactFuse) Unlink(ctx context.Context, op *fuseops.UnlinkOp) error {
 	fs.handleOps.Lock()
 	defer fs.handleOps.Unlock()
-	_, childPath, err := fs.childPath(op.Parent, op.Name)
+	_, childPath, err := fs.childPath(ctx, op.Parent, op.Name)
 	if err != nil {
+		return err
+	}
+	if err := fs.captureMetadataForPaths(ctx, childPath); err != nil {
 		return err
 	}
 	if err := fs.engine.ensureOverlay(ctx, childPath); err != nil {
@@ -1134,11 +1172,11 @@ func (fs *ArtifactFuse) Unlink(ctx context.Context, op *fuseops.UnlinkOp) error 
 func (fs *ArtifactFuse) Rename(ctx context.Context, op *fuseops.RenameOp) error {
 	fs.handleOps.Lock()
 	defer fs.handleOps.Unlock()
-	oldParent, err := fs.requireInode(op.OldParent, syscall.ENOENT)
+	oldParent, err := fs.requireLiveInode(ctx, op.OldParent, syscall.ENOENT)
 	if err != nil {
 		return err
 	}
-	newParent, err := fs.requireInode(op.NewParent, syscall.ENOENT)
+	newParent, err := fs.requireLiveInode(ctx, op.NewParent, syscall.ENOENT)
 	if err != nil {
 		return err
 	}
@@ -1166,6 +1204,9 @@ func (fs *ArtifactFuse) Rename(ctx context.Context, op *fuseops.RenameOp) error 
 		if sourceType != "dir" && destinationType == "dir" {
 			return syscall.EISDIR
 		}
+	}
+	if err := fs.captureMetadataForPaths(ctx, oldPath, newPath); err != nil {
+		return err
 	}
 	if sourceType != "dir" {
 		if err := fs.engine.ensureOverlay(ctx, oldPath); err != nil {
@@ -1318,19 +1359,6 @@ func (fs *ArtifactFuse) ReleaseFileHandle(_ context.Context, op *fuseops.Release
 		fh.release()
 	}
 	return nil
-}
-
-func (fs *ArtifactFuse) GetXattr(_ context.Context, _ *fuseops.GetXattrOp) error {
-	return syscall.ENOSYS
-}
-func (fs *ArtifactFuse) ListXattr(_ context.Context, _ *fuseops.ListXattrOp) error {
-	return syscall.ENOSYS
-}
-func (fs *ArtifactFuse) SetXattr(_ context.Context, _ *fuseops.SetXattrOp) error {
-	return syscall.ENOSYS
-}
-func (fs *ArtifactFuse) RemoveXattr(_ context.Context, _ *fuseops.RemoveXattrOp) error {
-	return syscall.ENOSYS
 }
 
 // --- Mount lifecycle ---

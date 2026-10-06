@@ -1,5 +1,5 @@
 #!/bin/bash
-# Run production filesystem policy and read lifecycle tests without an app or system mount.
+# Run production filesystem callbacks and bridge tests without an app or system mount.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
@@ -19,6 +19,8 @@ for source in BridgeModels BridgeConfiguration BridgeClient BridgeTransport Repo
 done
 cp "$ROOT/native/Shared/FSBridgeContainer.swift" "$PACKAGE_DIR/Sources/NativeFilesystem/"
 cp "$ROOT/native/FSKitTests/FSVolumeReadTests.swift" "$PACKAGE_DIR/Tests/NativeFilesystemTests/"
+cp "$ROOT/native/FSKitTests/NativeVolumeXattrTests.swift" "$PACKAGE_DIR/Tests/NativeFilesystemTests/"
+cp "$ROOT/native/Tests/FSBridgeTests.swift" "$PACKAGE_DIR/Tests/NativeFilesystemTests/"
 cat > "$PACKAGE_DIR/Package.swift" <<'SWIFT'
 // swift-tools-version: 5.10
 import PackageDescription
@@ -35,4 +37,4 @@ let package = Package(
 SWIFT
 
 xcrun --sdk macosx swift test --package-path "$PACKAGE_DIR" \
-  --filter FSVolumeReadTests -Xswiftc -warnings-as-errors
+  --filter 'FSVolumeReadTests|NativeVolumeXattrTests|FSBridgeTests' -Xswiftc -warnings-as-errors

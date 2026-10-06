@@ -175,6 +175,8 @@ func (s *Service) DownloadCurrentTree(ctx context.Context, name string, progress
 }
 
 // FreeRepositorySpace removes only engine-owned, remotely recoverable data.
+// The clean overlay database remains in place because local file metadata is
+// not stored in Git and must survive reacquiring the repository.
 // The desktop catalogue must detach and gate access to this repository before
 // calling, and retain its discovery entry independently of the engine registry.
 // A rejected operation leaves all data in place, but its runtime is stopped.
@@ -226,8 +228,15 @@ func (s *Service) FreeRepositorySpace(ctx context.Context, name string) (retErr 
 			if latest.ConfigVersion != disabled.ConfigVersion {
 				return registry.ErrRepoChanged
 			}
-			original.ConfigVersion = rand.Text()
-			return s.registry.AddRepo(restoreCtx, original)
+			if !sameRepositoryStorage(latest, original) {
+				return errors.New("repository storage changed; retained data needs recovery")
+			}
+			if err := syncRetainedOverlay(*transaction); err != nil {
+				return err
+			}
+			latest.Enabled = original.Enabled
+			latest.ConfigVersion = rand.Text()
+			return s.registry.AddRepo(restoreCtx, latest)
 		})
 		if err != nil {
 			retErr = errors.Join(retErr, fmt.Errorf("restore repository registration: %w", err))
@@ -247,6 +256,9 @@ func (s *Service) FreeRepositorySpace(ctx context.Context, name string) (retErr 
 			}
 			if latest.ConfigVersion != disabled.ConfigVersion {
 				return registry.ErrRepoChanged
+			}
+			if !sameRepositoryStorage(latest, original) {
+				return errors.New("repository storage changed; retained data needs recovery")
 			}
 			if err := s.validateOwnedRepoStorage(latest); err != nil {
 				return err
@@ -299,25 +311,24 @@ func (s *Service) FreeRepositorySpace(ctx context.Context, name string) (retErr 
 			if err := ctx.Err(); err != nil {
 				return err
 			}
+			if err := syncRetainedOverlay(*transaction); err != nil {
+				return err
+			}
 			paths := repositoryStoragePaths(latest)
 			tombstone := transaction.dir
-			type movedPath struct{ original, temporary string }
-			var moved []movedPath
+			var moved []movedStoragePath
 			rollback := func(cause error) error {
-				for i := len(moved) - 1; i >= 0; i-- {
-					if err := os.Rename(moved[i].temporary, moved[i].original); err != nil {
-						rollbackIncomplete = true
-						cause = errors.Join(cause, fmt.Errorf("restore data retained at %s: %w", moved[i].temporary, err))
-						continue
-					}
-					if err := errors.Join(syncStorageDirectory(filepath.Dir(moved[i].original)), syncStorageDirectory(tombstone)); err != nil {
-						rollbackIncomplete = true
-						cause = errors.Join(cause, fmt.Errorf("persist restored data at %s: %w", moved[i].original, err))
-					}
-				}
-				return cause
+				err := restoreMovedStoragePaths(*transaction, moved)
+				rollbackIncomplete = err != nil
+				return errors.Join(cause, err)
 			}
 			for i, path := range paths {
+				if transaction.PreserveOverlay && i == storageOverlayPathIndex {
+					continue
+				}
+				if err := validateRetainedOverlay(*transaction); err != nil {
+					return rollback(err)
+				}
 				if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
 					continue
 				} else if err != nil {
@@ -327,10 +338,13 @@ func (s *Service) FreeRepositorySpace(ctx context.Context, name string) (retErr 
 				if err := os.Rename(path, target); err != nil {
 					return rollback(err)
 				}
-				moved = append(moved, movedPath{path, target})
+				moved = append(moved, movedStoragePath{path, target})
 				if err := errors.Join(syncStorageDirectory(filepath.Dir(path)), syncStorageDirectory(tombstone)); err != nil {
 					return rollback(err)
 				}
+			}
+			if err := validateRetainedOverlay(*transaction); err != nil {
+				return rollback(err)
 			}
 			if err := s.registry.RemoveRepo(ctx, name); err != nil {
 				return rollback(err)
@@ -338,6 +352,9 @@ func (s *Service) FreeRepositorySpace(ctx context.Context, name string) (retErr 
 			removed = true
 			// The commit point is registry removal. A cleanup failure retains
 			// recoverable data in the tombstone rather than restoring half a repo.
+			if err := validateRetainedOverlay(*transaction); err != nil {
+				return fmt.Errorf("repository released; retained metadata needs recovery: %w", err)
+			}
 			if err := removeStorageTransaction(tombstone); err != nil {
 				return fmt.Errorf("repository released; cleanup remains at %s: %w", tombstone, err)
 			}

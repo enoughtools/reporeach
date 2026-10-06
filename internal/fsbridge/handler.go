@@ -3,6 +3,7 @@
 package fsbridge
 
 import (
+	"bytes"
 	"context"
 	"crypto/subtle"
 	"encoding/binary"
@@ -63,6 +64,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.read(w, r)
 	case r.URL.Path == "/v1/fs/write" && r.Method == http.MethodPut:
 		h.write(w, r)
+	case r.URL.Path == "/v1/fs/xattr" && r.Method == http.MethodGet:
+		h.getXattr(w, r)
+	case r.URL.Path == "/v1/fs/xattr" && r.Method == http.MethodPut:
+		h.setXattr(w, r)
 	default:
 		writeResponse(w, http.StatusNotFound, Response{Version: Version, Errno: int(syscall.ENOSYS)})
 	}
@@ -71,6 +76,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func writeResponse(w http.ResponseWriter, status int, response Response) {
 	if response.Entries == nil {
 		response.Entries = make([]DirectoryEntry, 0)
+	}
+	if response.XattrNames == nil {
+		response.XattrNames = make([]string, 0)
 	}
 	data, err := json.Marshal(response)
 	if err != nil {
@@ -114,7 +122,12 @@ func errno(err error) int {
 
 func (h *Handler) metadata(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, MaxMetadataSize)
-	decoder := json.NewDecoder(r.Body)
+	data, err := io.ReadAll(r.Body)
+	if err != nil || !validMetadataEncoding(data) {
+		writeResponse(w, http.StatusBadRequest, Response{Version: Version, Errno: int(syscall.EINVAL)})
+		return
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
 	var request Request
 	if err := decoder.Decode(&request); err != nil {
@@ -128,7 +141,11 @@ func (h *Handler) metadata(w http.ResponseWriter, r *http.Request) {
 	}
 	response, err := h.dispatch(r.Context(), request)
 	if err != nil {
-		response = Response{Version: Version, Errno: errno(err)}
+		if request.Op == "listxattr" || request.Op == "removexattr" {
+			response = xattrErrorResponse(err)
+		} else {
+			response = Response{Version: Version, Errno: errno(err)}
+		}
 	}
 	writeResponse(w, http.StatusOK, response)
 }
@@ -364,6 +381,16 @@ func (h *Handler) dispatch(ctx context.Context, r Request) (Response, error) {
 			return response, syscall.EILSEQ
 		}
 		response.Target = op.Target
+	case "listxattr":
+		if inode == 0 {
+			return response, syscall.EINVAL
+		}
+		return h.listXattr(ctx, inode)
+	case "removexattr":
+		if inode == 0 || !validXattrName(r.Name) {
+			return response, syscall.EINVAL
+		}
+		return response, h.filesystem.RemoveXattr(ctx, &fuseops.RemoveXattrOp{Inode: inode, Name: r.Name})
 	case "open":
 		if inode == 0 {
 			return response, syscall.EINVAL

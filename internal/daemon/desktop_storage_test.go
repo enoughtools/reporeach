@@ -135,7 +135,7 @@ func TestDownloadCurrentTreeRejectsDuplicateCheckoutFilterBlob(t *testing.T) {
 	}
 }
 
-func TestFreeRepositorySpaceReclaimsAllOwnedData(t *testing.T) {
+func TestFreeRepositorySpaceReclaimsRecoverableData(t *testing.T) {
 	svc, cfg, _ := storageFixture(t)
 	if _, err := svc.DownloadCurrentTree(context.Background(), cfg.Name, nil); err != nil {
 		t.Fatal(err)
@@ -146,10 +146,88 @@ func TestFreeRepositorySpaceReclaimsAllOwnedData(t *testing.T) {
 	if _, err := svc.registry.GetRepo(context.Background(), cfg.Name); err == nil {
 		t.Fatal("engine registration still present")
 	}
-	for _, path := range []string{filepath.Dir(cfg.GitDir), cfg.OverlayDir, cfg.BlobCacheDir, cfg.MetaDBPath} {
+	for _, path := range []string{filepath.Dir(cfg.GitDir), cfg.BlobCacheDir, cfg.MetaDBPath} {
 		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
 			t.Fatalf("owned data remains at %s: %v", path, err)
 		}
+	}
+	if _, err := os.Stat(cfg.OverlayDBPath); err != nil {
+		t.Fatalf("local metadata database was not retained: %v", err)
+	}
+	if err := verifyEmptyOverlayUpper(cfg.OverlayDir); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func setStorageFixtureMetadata(t *testing.T, cfg model.RepoConfig, value []byte) model.MetadataObjectID {
+	t.Helper()
+	ctx := context.Background()
+	store, err := overlay.New(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	object, err := store.BindMetadata(ctx, "README.md", "file")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetMetadataXattr(ctx, object.ID, "com.apple.provenance", value, model.XattrAlwaysSet); err != nil {
+		t.Fatal(err)
+	}
+	if entries, err := store.ListByPrefix(ctx, "."); err != nil || len(entries) != 0 {
+		t.Fatalf("metadata dirtied file overlay: entries = %+v, err = %v", entries, err)
+	}
+	return object.ID
+}
+
+func assertStorageFixtureMetadata(t *testing.T, cfg model.RepoConfig, id model.MetadataObjectID, value []byte) {
+	t.Helper()
+	ctx := context.Background()
+	store, err := overlay.New(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	object, err := store.BindMetadata(ctx, "README.md", "file")
+	if err != nil || object.ID != id {
+		t.Fatalf("retained metadata identity = %+v, err = %v, want %s", object, err, id)
+	}
+	got, found, err := store.GetMetadataXattr(ctx, id, "com.apple.provenance")
+	if err != nil || !found || !bytes.Equal(got, value) {
+		t.Fatalf("retained attribute = %v, found = %v, err = %v, want %v", got, found, err, value)
+	}
+	if entries, err := store.ListByPrefix(ctx, "."); err != nil || len(entries) != 0 {
+		t.Fatalf("metadata became file overlay: entries = %+v, err = %v", entries, err)
+	}
+}
+
+func TestFreeRepositorySpacePreservesMetadataAcrossReacquisition(t *testing.T) {
+	ctx := context.Background()
+	svc, cfg, _ := storageFixture(t)
+	value := []byte{0, 0xff, 0x80, 1, 2, 3, 4, 5, 6, 7, 0}
+	id := setStorageFixtureMetadata(t, cfg, value)
+	before, err := readStorageDirectoryIdentity(cfg.OverlayDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for cycle := range 2 {
+		if _, err := svc.DownloadCurrentTree(ctx, cfg.Name, nil); err != nil {
+			t.Fatal(err)
+		}
+		if err := svc.FreeRepositorySpace(ctx, cfg.Name); err != nil {
+			t.Fatalf("release %d: %v", cycle, err)
+		}
+		assertStorageFixtureMetadata(t, cfg, id, value)
+		if after, err := readStorageDirectoryIdentity(cfg.OverlayDir); err != nil || after != before {
+			t.Fatalf("release changed retained directory: %+v, err = %v, want %+v", after, err, before)
+		}
+		if err := svc.AddRepo(ctx, cfg); err != nil {
+			t.Fatalf("reacquire %d: %v", cycle, err)
+		}
+		assertStorageFixtureMetadata(t, cfg, id, value)
+	}
+	if _, err := os.Stat(filepath.Join(strings.TrimPrefix(cfg.RemoteURL, "file://"), "HEAD")); err != nil {
+		t.Fatalf("release affected original source: %v", err)
 	}
 }
 

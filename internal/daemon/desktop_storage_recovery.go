@@ -1,25 +1,42 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"github.com/cloudflare/artifact-fs/internal/model"
+	"github.com/cloudflare/artifact-fs/internal/overlay"
 	"github.com/cloudflare/artifact-fs/internal/registry"
 )
 
 type storageTransaction struct {
-	Version         int              `json:"version"`
-	Original        model.RepoConfig `json:"original"`
-	DisabledVersion string           `json:"disabledVersion"`
+	Version         int                       `json:"version"`
+	Original        model.RepoConfig          `json:"original"`
+	DisabledVersion string                    `json:"disabledVersion"`
+	PreserveOverlay bool                      `json:"preserveOverlay,omitempty"`
+	OverlayIdentity *storageDirectoryIdentity `json:"overlayIdentity,omitempty"`
 	dir             string
 }
+
+// The overlay keeps metadata that Git cannot restore. Its directory identity
+// remains stable across normal SQLite updates and WAL checkpoints.
+type storageDirectoryIdentity struct {
+	Device uint64 `json:"device"`
+	Inode  uint64 `json:"inode"`
+}
+
+const storageOverlayPathIndex = 1
+
+type movedStoragePath struct{ original, temporary string }
 
 func repositoryStoragePaths(cfg model.RepoConfig) []string {
 	return []string{filepath.Dir(cfg.GitDir), cfg.OverlayDir, cfg.BlobCacheDir,
@@ -27,11 +44,28 @@ func repositoryStoragePaths(cfg model.RepoConfig) []string {
 }
 
 func (s *Service) newStorageTransaction(original, disabled model.RepoConfig) (*storageTransaction, error) {
+	// A never-mounted repository may not have an overlay yet. Establish its
+	// canonical database before journalling the directory we will preserve.
+	store, err := overlay.New(context.Background(), original)
+	if err != nil {
+		return nil, err
+	}
+	if err := store.Close(); err != nil {
+		return nil, err
+	}
+	if err := errors.Join(syncStorageDirectory(original.OverlayDir), syncStorageDirectory(filepath.Dir(original.OverlayDir))); err != nil {
+		return nil, err
+	}
+	identity, err := readStorageDirectoryIdentity(original.OverlayDir)
+	if err != nil {
+		return nil, err
+	}
 	dir, err := os.MkdirTemp(s.root, ".free-space-"+string(original.ID)+"-")
 	if err != nil {
 		return nil, err
 	}
-	transaction := &storageTransaction{Version: 1, Original: original, DisabledVersion: disabled.ConfigVersion, dir: dir}
+	transaction := &storageTransaction{Version: 2, Original: original, DisabledVersion: disabled.ConfigVersion,
+		PreserveOverlay: true, OverlayIdentity: &identity, dir: dir}
 	data, err := json.Marshal(transaction)
 	if err != nil {
 		_ = os.Remove(dir)
@@ -58,6 +92,69 @@ func (s *Service) newStorageTransaction(original, disabled model.RepoConfig) (*s
 		return nil, err
 	}
 	return transaction, nil
+}
+
+func readStorageDirectoryIdentity(path string) (storageDirectoryIdentity, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return storageDirectoryIdentity{}, err
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return storageDirectoryIdentity{}, errors.New("retained overlay is not a real directory; repository data was retained")
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return storageDirectoryIdentity{}, errors.New("cannot identify retained overlay directory; repository data was retained")
+	}
+	return storageDirectoryIdentity{Device: uint64(stat.Dev), Inode: uint64(stat.Ino)}, nil
+}
+
+func sameRepositoryStorage(a, b model.RepoConfig) bool {
+	return a.ID == b.ID && a.Name == b.Name && a.PreparedGitDir == b.PreparedGitDir &&
+		a.GitDir == b.GitDir && a.OverlayDir == b.OverlayDir && a.OverlayDBPath == b.OverlayDBPath &&
+		a.BlobCacheDir == b.BlobCacheDir && a.MetaDBPath == b.MetaDBPath
+}
+
+// Restore in reverse move order without replacing data that appeared after the
+// original move. Any failed restoration leaves its journalled copy recoverable.
+func restoreMovedStoragePaths(transaction storageTransaction, moved []movedStoragePath) (retErr error) {
+	if transaction.PreserveOverlay {
+		if err := validateRetainedOverlay(transaction); err != nil {
+			return err
+		}
+		for _, path := range moved {
+			if path.original == transaction.Original.OverlayDir {
+				return errors.New("storage rollback would replace a retained overlay; retained data needs recovery")
+			}
+		}
+	}
+	for i := len(moved) - 1; i >= 0; i-- {
+		if _, err := os.Lstat(moved[i].original); err == nil {
+			retErr = errors.Join(retErr, fmt.Errorf("storage rollback collision at %s; retained data remains at %s", moved[i].original, moved[i].temporary))
+			continue
+		} else if !errors.Is(err, os.ErrNotExist) {
+			retErr = errors.Join(retErr, err)
+			continue
+		}
+		if err := os.Rename(moved[i].temporary, moved[i].original); err != nil {
+			retErr = errors.Join(retErr, fmt.Errorf("restore data retained at %s: %w", moved[i].temporary, err))
+			continue
+		}
+		if err := errors.Join(syncStorageDirectory(filepath.Dir(moved[i].original)), syncStorageDirectory(transaction.dir)); err != nil {
+			retErr = errors.Join(retErr, fmt.Errorf("persist restored data at %s: %w", moved[i].original, err))
+		}
+	}
+	return retErr
+}
+
+func syncRetainedOverlay(transaction storageTransaction) error {
+	if !transaction.PreserveOverlay {
+		return nil
+	}
+	if err := validateRetainedOverlay(transaction); err != nil {
+		return err
+	}
+	return errors.Join(syncStorageDirectory(transaction.Original.OverlayDir), syncStorageDirectory(filepath.Dir(transaction.Original.OverlayDir)))
 }
 
 func syncStorageDirectory(path string) error {
@@ -93,7 +190,7 @@ func (s *Service) RecoverStorageTransactions(ctx context.Context) error {
 			return errors.New("unexpected storage transaction entry; repository data was retained")
 		}
 		dir := filepath.Join(s.root, entry.Name())
-		data, err := os.ReadFile(filepath.Join(dir, "transaction.json"))
+		transaction, err := readStorageTransaction(dir)
 		if err != nil {
 			// A kill before the manifest was written can leave an empty directory;
 			// nothing was disabled or moved yet, so removing an empty dir is safe.
@@ -104,11 +201,6 @@ func (s *Service) RecoverStorageTransactions(ctx context.Context) error {
 			}
 			return fmt.Errorf("read retained storage transaction %s: %w", dir, err)
 		}
-		var transaction storageTransaction
-		if err := json.Unmarshal(data, &transaction); err != nil {
-			return fmt.Errorf("read retained storage transaction %s: %w", dir, err)
-		}
-		transaction.dir = dir
 		if err := s.validateStorageTransaction(transaction); err != nil {
 			return err
 		}
@@ -117,9 +209,15 @@ func (s *Service) RecoverStorageTransactions(ctx context.Context) error {
 			return s.withRepoConfigLock(ctx, cfg.Name, func() error {
 				latest, err := s.registry.GetRepo(ctx, cfg.Name)
 				if errors.Is(err, registry.ErrRepoNotFound) {
+					if err := syncRetainedOverlay(transaction); err != nil {
+						return err
+					}
 					return removeStorageTransaction(dir) // Registration removal committed.
 				}
 				if err != nil {
+					return err
+				}
+				if err := syncRetainedOverlay(transaction); err != nil {
 					return err
 				}
 				if latest.ConfigVersion != transaction.DisabledVersion && latest.ConfigVersion != cfg.ConfigVersion {
@@ -136,7 +234,18 @@ func (s *Service) RecoverStorageTransactions(ctx context.Context) error {
 					}
 					return errors.New("storage transaction conflicts with a newer repository configuration; retained data needs recovery")
 				}
+				if !sameRepositoryStorage(latest, cfg) {
+					return errors.New("storage transaction conflicts with changed repository storage; retained data needs recovery")
+				}
 				for i, destination := range repositoryStoragePaths(cfg) {
+					if transaction.PreserveOverlay && i == storageOverlayPathIndex {
+						continue
+					}
+					if transaction.PreserveOverlay {
+						if err := validateRetainedOverlay(transaction); err != nil {
+							return err
+						}
+					}
 					source := filepath.Join(dir, fmt.Sprintf("%d", i))
 					if _, err := os.Lstat(source); errors.Is(err, os.ErrNotExist) {
 						continue
@@ -175,9 +284,13 @@ func (s *Service) RecoverStorageTransactions(ctx context.Context) error {
 				if err := syncStorageDirectory(dir); err != nil {
 					return err
 				}
+				if err := syncRetainedOverlay(transaction); err != nil {
+					return err
+				}
 				if latest.ConfigVersion == transaction.DisabledVersion {
-					cfg.ConfigVersion = rand.Text()
-					if err := s.registry.AddRepo(ctx, cfg); err != nil {
+					latest.Enabled = cfg.Enabled
+					latest.ConfigVersion = rand.Text()
+					if err := s.registry.AddRepo(ctx, latest); err != nil {
 						return err
 					}
 				}
@@ -190,9 +303,54 @@ func (s *Service) RecoverStorageTransactions(ctx context.Context) error {
 	return nil
 }
 
+func readStorageTransaction(dir string) (storageTransaction, error) {
+	const maxManifestBytes = 64 << 10
+	path := filepath.Join(dir, "transaction.json")
+	info, err := os.Lstat(path)
+	if err != nil {
+		return storageTransaction{}, err
+	}
+	if !info.Mode().IsRegular() || info.Size() > maxManifestBytes {
+		return storageTransaction{}, errors.New("unexpected storage transaction manifest; retained data needs recovery")
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return storageTransaction{}, err
+	}
+	defer file.Close()
+	opened, err := file.Stat()
+	if err != nil {
+		return storageTransaction{}, err
+	}
+	if !os.SameFile(info, opened) {
+		return storageTransaction{}, errors.New("storage transaction manifest changed; retained data needs recovery")
+	}
+	data, err := io.ReadAll(io.LimitReader(file, maxManifestBytes+1))
+	if err != nil {
+		return storageTransaction{}, err
+	}
+	if len(data) > maxManifestBytes {
+		return storageTransaction{}, errors.New("storage transaction manifest is too large; retained data needs recovery")
+	}
+	var transaction storageTransaction
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&transaction); err != nil {
+		return storageTransaction{}, err
+	}
+	if err := decoder.Decode(new(any)); !errors.Is(err, io.EOF) {
+		return storageTransaction{}, errors.New("storage transaction manifest has trailing data; retained data needs recovery")
+	}
+	transaction.dir = dir
+	return transaction, nil
+}
+
 func (s *Service) validateStorageTransaction(transaction storageTransaction) error {
 	cfg := transaction.Original
-	if transaction.Version != 1 || transaction.DisabledVersion == "" {
+	if transaction.DisabledVersion == "" ||
+		(transaction.Version != 1 && transaction.Version != 2) ||
+		(transaction.Version == 1 && (transaction.PreserveOverlay || transaction.OverlayIdentity != nil)) ||
+		(transaction.Version == 2 && (!transaction.PreserveOverlay || transaction.OverlayIdentity == nil)) {
 		return errors.New("unrecognized storage transaction; retained data needs recovery")
 	}
 	if err := model.ValidateRepoName(cfg.Name); err != nil {
@@ -201,6 +359,9 @@ func (s *Service) validateStorageTransaction(transaction storageTransaction) err
 	if err := model.ValidateRepoName(string(cfg.ID)); err != nil {
 		return err
 	}
+	if !strings.HasPrefix(filepath.Base(transaction.dir), ".free-space-"+string(cfg.ID)+"-") {
+		return errors.New("storage transaction has an unexpected identity; retained data needs recovery")
+	}
 	expected := model.RepoConfig{ID: cfg.ID, Name: cfg.Name}
 	s.fillPaths(&expected)
 	if cfg.PreparedGitDir || cfg.GitDir != expected.GitDir || cfg.OverlayDir != expected.OverlayDir || cfg.BlobCacheDir != expected.BlobCacheDir || cfg.MetaDBPath != expected.MetaDBPath || cfg.OverlayDBPath != expected.OverlayDBPath {
@@ -208,7 +369,7 @@ func (s *Service) validateStorageTransaction(transaction storageTransaction) err
 	}
 	// Recovery must not follow a replaced storage parent outside the state root.
 	for _, path := range repositoryStoragePaths(cfg) {
-		for parent := filepath.Dir(path); parent != filepath.Clean(s.root); parent = filepath.Dir(parent) {
+		for parent := filepath.Dir(path); model.CleanPath(parent) != model.CleanPath(s.root); parent = filepath.Dir(parent) {
 			if parent == filepath.Dir(parent) {
 				return errors.New("storage transaction escapes its state root")
 			}
@@ -229,9 +390,56 @@ func (s *Service) validateStorageTransaction(transaction storageTransaction) err
 		if entry.Type()&os.ModeSymlink != 0 {
 			return errors.New("storage transaction contains a symbolic link; retained data needs recovery")
 		}
+		if transaction.PreserveOverlay && entry.Name() == "1" {
+			return errors.New("storage transaction moved a retained overlay; retained data needs recovery")
+		}
 		if entry.Name() != "transaction.json" && entry.Name() != "0" && entry.Name() != "1" && entry.Name() != "2" && entry.Name() != "3" && entry.Name() != "4" && entry.Name() != "5" {
 			return errors.New("storage transaction contains unknown files; retained data needs recovery")
 		}
+	}
+	if transaction.PreserveOverlay {
+		return validateRetainedOverlay(transaction)
+	}
+	return nil
+}
+
+func validateRetainedOverlay(transaction storageTransaction) error {
+	cfg := transaction.Original
+	identity, err := readStorageDirectoryIdentity(cfg.OverlayDir)
+	if err != nil {
+		return fmt.Errorf("verify retained overlay: %w", err)
+	}
+	if transaction.OverlayIdentity == nil || identity != *transaction.OverlayIdentity {
+		return errors.New("retained overlay directory was replaced; retained data needs recovery")
+	}
+	entries, err := os.ReadDir(cfg.OverlayDir)
+	if err != nil {
+		return err
+	}
+	databaseFound, upperFound := false, false
+	for _, entry := range entries {
+		path := filepath.Join(cfg.OverlayDir, entry.Name())
+		info, err := os.Lstat(path)
+		if err != nil {
+			return err
+		}
+		switch entry.Name() {
+		case "upper":
+			upperFound = true
+			if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+				return errors.New("retained overlay has an invalid upper directory; retained data needs recovery")
+			}
+		case "meta.sqlite", "meta.sqlite-wal", "meta.sqlite-shm":
+			databaseFound = databaseFound || entry.Name() == "meta.sqlite"
+			if !info.Mode().IsRegular() {
+				return errors.New("retained overlay has an invalid metadata file; retained data needs recovery")
+			}
+		default:
+			return errors.New("retained overlay has unrecognized files; retained data needs recovery")
+		}
+	}
+	if !databaseFound || !upperFound {
+		return errors.New("retained overlay metadata is missing; retained data needs recovery")
 	}
 	return nil
 }

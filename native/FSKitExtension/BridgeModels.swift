@@ -66,6 +66,13 @@ struct FSBridgeAttributeChanges: Codable, Equatable, Sendable {
     }
 }
 
+/// These are bridge policies, rather than Darwin's differently numbered flags.
+enum FSBridgeXattrPolicy: String, Sendable {
+    case alwaysSet = "always_set"
+    case mustCreate = "must_create"
+    case mustReplace = "must_replace"
+}
+
 struct FSBridgeResponse: Decodable, Sendable {
     let version: Int
     let errno: Int32
@@ -77,10 +84,13 @@ struct FSBridgeResponse: Decodable, Sendable {
     let target: String?
     let written: Int?
     let stat: FSBridgeStat?
+    let xattrNames: [String]?
+    let xattrMissing: Bool?
 
     enum CodingKeys: String, CodingKey {
         case version, errno, node, handle, entries, eof, target, written, stat
         case nextOffset = "next_offset"
+        case xattrNames = "xattr_names", xattrMissing = "xattr_missing"
     }
 }
 

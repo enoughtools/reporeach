@@ -58,6 +58,10 @@ func New(ctx context.Context, cfg model.RepoConfig) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
+	if err := ensureMetadataSchema(ctx, db); err != nil {
+		db.Close()
+		return nil, err
+	}
 	upperDir := filepath.Join(cfg.OverlayDir, "upper")
 	if err := os.MkdirAll(upperDir, 0o755); err != nil {
 		db.Close()
@@ -176,7 +180,7 @@ func (s *Store) EnsureCopyOnWriteFrom(ctx context.Context, _ model.RepoConfig, p
 			SourceMode:  base.Mode,
 			TargetPath:  string(target),
 		}
-		if err := s.upsertEntry(ctx, e); err != nil {
+		if err := s.publishNamespaceEntryLocked(ctx, e, "symlink", false); err != nil {
 			return model.OverlayEntry{}, err
 		}
 		return e, nil
@@ -217,7 +221,7 @@ func (s *Store) EnsureCopyOnWriteFrom(ctx context.Context, _ model.RepoConfig, p
 		SourceOID:   base.ObjectOID,
 		SourceMode:  base.Mode,
 	}
-	if err := s.upsertEntry(ctx, e); err != nil {
+	if err := s.publishNamespaceEntryLocked(ctx, e, "file", false); err != nil {
 		os.Remove(backing)
 		return model.OverlayEntry{}, err
 	}
@@ -246,7 +250,7 @@ func (s *Store) CreateSymlink(ctx context.Context, path string, target string) (
 		CtimeUnixNs: now,
 		TargetPath:  target,
 	}
-	if err := s.upsertEntry(ctx, e); err != nil {
+	if err := s.publishNamespaceEntryLocked(ctx, e, "symlink", true); err != nil {
 		return model.OverlayEntry{}, err
 	}
 	return e, nil
@@ -334,7 +338,18 @@ func (s *Store) Remove(ctx context.Context, path string) error {
 	}
 	now := time.Now().UnixNano()
 	e := model.OverlayEntry{RepoID: s.repo.ID, Path: path, Kind: model.OverlayKindDelete, Mode: 0, MtimeUnixNs: now, CtimeUnixNs: now}
-	if err := s.upsertEntry(ctx, e); err != nil {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := s.upsertEntryTx(ctx, tx, e); err != nil {
+		return err
+	}
+	if err := detachMetadataBindingsTx(ctx, tx, path, true); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
 		return err
 	}
 	if existing.BackingPath != "" {
@@ -442,6 +457,9 @@ func (s *Store) renameLocked(ctx context.Context, oldPath, newPath string, prese
 		if _, err := tx.ExecContext(ctx, `INSERT INTO overlay_entries(path, kind, backing_path, mode, size_bytes, mtime_unix_ns, ctime_unix_ns, source_oid, source_mode, target_path) VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(path) DO UPDATE SET kind='delete',mode=0,source_oid='',source_mode=0,mtime_unix_ns=excluded.mtime_unix_ns,ctime_unix_ns=excluded.ctime_unix_ns,target_path=excluded.target_path`, oldPath, model.OverlayKindDelete, "", 0, 0, now, now, "", 0, whiteoutTargetPath); err != nil {
 			return err
 		}
+	}
+	if err := moveMetadataBindingsTx(ctx, tx, oldPath, newPath, false); err != nil {
+		return err
 	}
 	if err := tx.Commit(); err != nil {
 		return err
@@ -603,6 +621,9 @@ func (s *Store) renameTreeLocked(ctx context.Context, oldPath, newPath string, s
 			return err
 		}
 	}
+	if err := moveMetadataBindingsTx(ctx, tx, oldPath, newPath, true); err != nil {
+		return err
+	}
 	if err := tx.Commit(); err != nil {
 		return err
 	}
@@ -671,6 +692,9 @@ func (s *Store) RenameAndMarkModifiedFromBase(ctx context.Context, oldPath, newP
 			return err
 		}
 	}
+	if err := moveMetadataBindingsTx(ctx, tx, oldPath, newPath, false); err != nil {
+		return err
+	}
 	if err := tx.Commit(); err != nil {
 		return err
 	}
@@ -683,6 +707,19 @@ func (s *Store) RenameAndMarkModifiedFromBase(ctx context.Context, oldPath, newP
 func (s *Store) Mkdir(ctx context.Context, path string, mode uint32) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.mkdirLocked(ctx, path, mode, false)
+}
+
+// CreateDirectory creates a new directory identity. Mkdir also materializes
+// existing base directories for chmod, timestamps and rename preparation, so
+// those callers must keep their existing metadata identity.
+func (s *Store) CreateDirectory(ctx context.Context, path string, mode uint32) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.mkdirLocked(ctx, path, mode, true)
+}
+
+func (s *Store) mkdirLocked(ctx context.Context, path string, mode uint32, replace bool) error {
 	path = model.CleanPath(path)
 	mode, _ = normalizeGitDirMode(mode)
 	backing, err := os.MkdirTemp(s.upperDir, ".artifact-fs-dir-*")
@@ -695,7 +732,7 @@ func (s *Store) Mkdir(ctx context.Context, path string, mode uint32) error {
 	}
 	now := time.Now().UnixNano()
 	e := model.OverlayEntry{RepoID: s.repo.ID, Path: path, Kind: model.OverlayKindMkdir, BackingPath: backing, Mode: mode, MtimeUnixNs: now, CtimeUnixNs: now}
-	if err := s.upsertEntry(ctx, e); err != nil {
+	if err := s.publishNamespaceEntryLocked(ctx, e, "dir", replace); err != nil {
 		os.Remove(backing)
 		return err
 	}
@@ -912,10 +949,7 @@ func (s *Store) ReconcileChecked(ctx context.Context, baseLookup func(path strin
 			}
 		}
 	}
-	if len(toRemove) == 0 && len(toUpdate) == 0 {
-		return nil
-	}
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := beginMetadataTransaction(ctx, s.db)
 	if err != nil {
 		return err
 	}
@@ -946,6 +980,9 @@ func (s *Store) ReconcileChecked(ctx context.Context, baseLookup func(path strin
 		if _, err := updateStmt.ExecContext(ctx, update.after.Kind, update.after.SourceOID, update.after.SourceMode, update.after.TargetPath, update.before.Path, update.before.Kind, update.before.SourceOID, update.before.SourceMode, update.before.Mode, update.before.MtimeUnixNs, update.before.CtimeUnixNs); err != nil {
 			return err
 		}
+	}
+	if err := s.reconcileMetadataBindingsTx(ctx, tx, baseLookup); err != nil {
+		return err
 	}
 	if err := tx.Commit(); err != nil {
 		return err
@@ -1047,11 +1084,7 @@ func (s *Store) queryEntries(ctx context.Context, query string, args ...any) ([]
 	return out, rows.Err()
 }
 
-func (s *Store) upsertEntry(ctx context.Context, e model.OverlayEntry) error {
-	if e.Path == "" {
-		return errors.New("empty path")
-	}
-	_, err := s.db.ExecContext(ctx, `
+const upsertOverlayEntrySQL = `
 	INSERT INTO overlay_entries(path, kind, backing_path, mode, size_bytes, mtime_unix_ns, ctime_unix_ns, source_oid, source_mode, target_path)
 	VALUES(?,?,?,?,?,?,?,?,?,?)
 	ON CONFLICT(path) DO UPDATE SET
@@ -1063,8 +1096,108 @@ func (s *Store) upsertEntry(ctx context.Context, e model.OverlayEntry) error {
 	ctime_unix_ns=excluded.ctime_unix_ns,
 	source_oid=excluded.source_oid,
 	source_mode=excluded.source_mode,
-	target_path=excluded.target_path`, e.Path, e.Kind, e.BackingPath, e.Mode, e.SizeBytes, e.MtimeUnixNs, e.CtimeUnixNs, e.SourceOID, e.SourceMode, e.TargetPath)
+	target_path=excluded.target_path`
+
+func (s *Store) upsertEntry(ctx context.Context, e model.OverlayEntry) error {
+	if e.Path == "" {
+		return errors.New("empty path")
+	}
+	_, err := s.db.ExecContext(ctx, upsertOverlayEntrySQL, e.Path, e.Kind, e.BackingPath, e.Mode, e.SizeBytes, e.MtimeUnixNs, e.CtimeUnixNs, e.SourceOID, e.SourceMode, e.TargetPath)
 	return err
+}
+
+func (s *Store) upsertEntryTx(ctx context.Context, tx *sql.Tx, e model.OverlayEntry) error {
+	if e.Path == "" {
+		return errors.New("empty path")
+	}
+	_, err := tx.ExecContext(ctx, upsertOverlayEntrySQL, e.Path, e.Kind, e.BackingPath, e.Mode, e.SizeBytes, e.MtimeUnixNs, e.CtimeUnixNs, e.SourceOID, e.SourceMode, e.TargetPath)
+	return err
+}
+
+// publishNamespaceEntryLocked publishes the byte representation and metadata
+// binding together. Existing-object promotion retains its metadata; creation
+// detaches prior objects without deleting metadata held by retained inodes.
+func (s *Store) publishNamespaceEntryLocked(ctx context.Context, e model.OverlayEntry, nodeType string, replace bool) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := s.upsertEntryTx(ctx, tx, e); err != nil {
+		return err
+	}
+	if replace {
+		if err := detachMetadataBindingsTx(ctx, tx, e.Path, true); err != nil {
+			return err
+		}
+	}
+	if _, err := createMetadataBindingTx(ctx, tx, e.Path, nodeType, replace); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s *Store) reconcileMetadataBindingsTx(ctx context.Context, tx *sql.Tx, baseLookup func(string) (model.BaseNode, bool, error)) error {
+	rows, err := tx.QueryContext(ctx, `SELECT b.path, o.node_type FROM metadata_bindings b JOIN metadata_objects o ON o.id=b.object_id ORDER BY b.path`)
+	if err != nil {
+		return err
+	}
+	type binding struct{ path, nodeType string }
+	var bindings []binding
+	for rows.Next() {
+		var item binding
+		if err := rows.Scan(&item.path, &item.nodeType); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		bindings = append(bindings, item)
+	}
+	if err := errors.Join(rows.Err(), rows.Close()); err != nil {
+		return err
+	}
+	for _, item := range bindings {
+		if item.path == "." || item.path == ".git" {
+			continue
+		}
+		typeNow, exists, err := mergedNodeTypeTx(ctx, tx, item.path, baseLookup)
+		if err != nil {
+			return err
+		}
+		if exists && typeNow == item.nodeType {
+			// A directory deletion or replacement can hide metadata-only base
+			// descendants even when an exact snapshot lookup still finds them.
+			for ancestor := model.CleanPath(filepath.Dir(item.path)); ancestor != "."; ancestor = model.CleanPath(filepath.Dir(ancestor)) {
+				ancestorType, ancestorExists, err := mergedNodeTypeTx(ctx, tx, ancestor, baseLookup)
+				if err != nil {
+					return err
+				}
+				if !ancestorExists || ancestorType != "dir" {
+					exists = false
+					break
+				}
+			}
+		}
+		if !exists || typeNow != item.nodeType {
+			if err := detachMetadataBindingsTx(ctx, tx, item.path, false); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func mergedNodeTypeTx(ctx context.Context, tx *sql.Tx, path string, baseLookup func(string) (model.BaseNode, bool, error)) (string, bool, error) {
+	var kind model.OverlayKind
+	err := tx.QueryRowContext(ctx, `SELECT kind FROM overlay_entries WHERE path=?`, path).Scan(&kind)
+	if err == nil {
+		e := model.OverlayEntry{Kind: kind}
+		return e.NodeType(), !e.IsDeleted(), nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return "", false, err
+	}
+	base, exists, err := baseLookup(path)
+	return base.Type, exists, err
 }
 
 // copyFileContents copies src into dst, truncating dst first. Returns

@@ -321,7 +321,7 @@ func (e *Engine) snapshotTreePaths(ctx context.Context, root string) ([]string, 
 func (e *Engine) Mkdir(ctx context.Context, path string, mode uint32) error {
 	e.Resolver.transition.RLock()
 	defer e.Resolver.transition.RUnlock()
-	return e.Overlay.Mkdir(ctx, path, mode)
+	return e.Overlay.CreateDirectory(ctx, path, mode)
 }
 
 func (e *Engine) Rmdir(ctx context.Context, path string) error {

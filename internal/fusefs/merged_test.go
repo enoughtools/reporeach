@@ -3,10 +3,12 @@ package fusefs
 import (
 	"context"
 	"errors"
+	"fmt"
 	iofs "io/fs"
 	"maps"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -40,10 +42,102 @@ func (f *fakeSnapshot) ListChildren(_ int64, path string) ([]model.BaseNode, err
 
 // fakeOverlay satisfies model.OverlayStore for testing.
 type fakeOverlay struct {
-	entries map[string]model.OverlayEntry
-	list    []model.OverlayEntry
-	writes  int
-	data    []byte
+	entries          map[string]model.OverlayEntry
+	list             []model.OverlayEntry
+	writes           int
+	data             []byte
+	metadataMu       sync.Mutex
+	metadataNext     int
+	metadataBindings map[string]model.MetadataObject
+	metadataObjects  map[model.MetadataObjectID]model.MetadataObject
+	metadataAttrs    map[model.MetadataObjectID]map[string][]byte
+}
+
+func (f *fakeOverlay) BindMetadata(_ context.Context, path, typ string) (model.MetadataObject, error) {
+	f.metadataMu.Lock()
+	defer f.metadataMu.Unlock()
+	if f.metadataBindings == nil {
+		f.metadataBindings = make(map[string]model.MetadataObject)
+		f.metadataObjects = make(map[model.MetadataObjectID]model.MetadataObject)
+		f.metadataAttrs = make(map[model.MetadataObjectID]map[string][]byte)
+	}
+	path = model.CleanPath(path)
+	if object, ok := f.metadataBindings[path]; ok && object.Type == typ {
+		return object, nil
+	}
+	f.metadataNext++
+	object := model.MetadataObject{ID: model.MetadataObjectID(fmt.Sprint(f.metadataNext)), Type: typ}
+	f.metadataBindings[path], f.metadataObjects[object.ID] = object, object
+	f.metadataAttrs[object.ID] = make(map[string][]byte)
+	return object, nil
+}
+
+func (f *fakeOverlay) MetadataObject(_ context.Context, id model.MetadataObjectID) (model.MetadataObject, bool, error) {
+	f.metadataMu.Lock()
+	defer f.metadataMu.Unlock()
+	object, ok := f.metadataObjects[id]
+	return object, ok, nil
+}
+
+func (f *fakeOverlay) GetMetadataXattr(_ context.Context, id model.MetadataObjectID, name string) ([]byte, bool, error) {
+	f.metadataMu.Lock()
+	defer f.metadataMu.Unlock()
+	value, ok := f.metadataAttrs[id][name]
+	return append([]byte{}, value...), ok, nil
+}
+
+func (f *fakeOverlay) ListMetadataXattrs(_ context.Context, id model.MetadataObjectID) ([]string, error) {
+	f.metadataMu.Lock()
+	defer f.metadataMu.Unlock()
+	var names []string
+	for name := range f.metadataAttrs[id] {
+		names = append(names, name)
+	}
+	return names, nil
+}
+
+func (f *fakeOverlay) SetMetadataXattr(_ context.Context, id model.MetadataObjectID, name string, value []byte, policy model.XattrSetPolicy) error {
+	f.metadataMu.Lock()
+	defer f.metadataMu.Unlock()
+	attrs, ok := f.metadataAttrs[id]
+	if !ok {
+		return model.ErrMetadataObjectNotFound
+	}
+	_, found := attrs[name]
+	if policy == model.XattrMustCreate && found {
+		return model.ErrXattrExists
+	}
+	if policy == model.XattrMustReplace && !found {
+		return model.ErrXattrNotFound
+	}
+	attrs[name] = append([]byte{}, value...)
+	return nil
+}
+
+func (f *fakeOverlay) RemoveMetadataXattr(_ context.Context, id model.MetadataObjectID, name string) error {
+	f.metadataMu.Lock()
+	defer f.metadataMu.Unlock()
+	if _, ok := f.metadataAttrs[id][name]; !ok {
+		return model.ErrXattrNotFound
+	}
+	delete(f.metadataAttrs[id], name)
+	return nil
+}
+
+func (f *fakeOverlay) HasMetadataXattrs(_ context.Context) (bool, error) {
+	f.metadataMu.Lock()
+	defer f.metadataMu.Unlock()
+	for _, attrs := range f.metadataAttrs {
+		if len(attrs) != 0 {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (f *fakeOverlay) CollectDetachedMetadata(context.Context) error { return nil }
+func (f *fakeOverlay) CreateDirectory(ctx context.Context, path string, mode uint32) error {
+	return f.Mkdir(ctx, path, mode)
 }
 
 func (f *fakeOverlay) Get(path string) (model.OverlayEntry, bool) {

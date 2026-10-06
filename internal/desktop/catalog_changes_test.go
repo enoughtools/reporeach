@@ -282,11 +282,15 @@ func TestCatalogueChangeCommitsBeforeFreshMount(t *testing.T) {
 			s := newCatalogueChangeService(t)
 			h := mountCatalogueChangeService(t, s)
 			before := snapshotCatalogueChange(t, s)
+			oldMetadata := s.catalogMetadata
 			h.mounts[0].onUnmount = func() {
 				current := snapshotCatalogueChange(t, s)
 				if !reflect.DeepEqual(current.state, before.state) || !bytes.Equal(current.disk, before.disk) {
 					t.Error("catalogue changed before normal detach succeeded")
 				}
+			}
+			h.mounts[0].onJoin = func(context.Context) {
+				assertCatalogueChangeView(t, h.catalogues[0], []string{"Team/a", "other/repo"})
 			}
 			h.onMount = func(_ context.Context, fs *catalogfs.FileSystem) error {
 				assertCatalogueChangePersisted(t, s)
@@ -299,7 +303,9 @@ func TestCatalogueChangeCommitsBeforeFreshMount(t *testing.T) {
 			if len(h.mounts) != 2 || len(h.catalogues) != 2 || h.catalogues[0] == h.catalogues[1] || h.mounts[0].unmountCalls != 1 || !s.Status().Mounted {
 				t.Fatal("successful change did not replace the detached catalogue")
 			}
-			assertCatalogueChangeView(t, h.catalogues[0], []string{"Team/a", "other/repo"})
+			if _, err := oldMetadata.HasMetadataXattrs(context.Background()); err == nil {
+				t.Fatal("replacement mount retained the drained catalogue database")
+			}
 			after := snapshotCatalogueChange(t, s)
 			if !reflect.DeepEqual(after.pins, before.pins) || !reflect.DeepEqual(after.status.Operations, before.status.Operations) {
 				t.Fatal("catalogue commit changed pin verification or operation history")

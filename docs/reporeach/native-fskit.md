@@ -42,7 +42,7 @@ The current [native project](../../native/project.yml) embeds an `extensionkit-e
 
 The resource points to a private connection directory, not a repository checkout. [Bridge configuration parsing](../../native/FSKitExtension/BridgeConfiguration.swift) reads `connection.json`, version 1 metadata containing the Unix socket path and a local bearer secret. It requires an owned regular file with mode `0600`, rejects symlinks, bounds the file to 16 KiB, and redacts the secret from its debug description. The socket is a separate direct child of the module’s entitled macOS app-group container; the resource directory and repository storage stay in their existing locations. The [module lifecycle](../../native/FSKitExtension/RepoReachFileSystem.swift) holds the resource's security scope while loaded and releases it after volume shutdown drains. The Go mount helper selects filesystem type `reporeach` and supplies that resource directory and the chosen target path to the system mount tool. These are source contracts, not proof of installed authorization or a working mount.
 
-The [Go bridge](../../internal/fsbridge/server.go) uses an AF_UNIX-only listener with mode `0600` inside the owned private app-group container. The parent app, Go engine and filesystem module claim the same Team-ID-prefixed group; Foundation resolves the container, and real access, ownership and Unix socket path bounds are checked. A source-scoped lock preserves one session when descriptor and socket directories differ. The engine removes only its own socket and descriptor after draining; the group container is never deleted. Apple [documents Team-ID-prefixed groups for macOS](https://developer.apple.com/documentation/xcode/accessing-app-group-containers) and [app-group socket placement](https://developer.apple.com/documentation/bundleresources/entitlements/com.apple.security.application-groups). It creates a fresh 32-byte local capability per mount, and the handler checks authorization before dispatch. The protocol uses HTTP framing: JSON for bounded operation metadata and binary bodies for file reads/writes, with a 1 MiB bound per binary request. It delegates to the existing catalogue/engine rather than create another Git or storage implementation. The adapter currently supports UTF-8 filenames; special files, hard links, and extended attributes are unsupported. These limits must remain explicit rather than treating a successful connection as complete POSIX filesystem coverage.
+The [Go bridge](../../internal/fsbridge/server.go) uses an AF_UNIX-only listener with mode `0600` inside the owned private app-group container. The parent app, Go engine and filesystem module claim the same Team-ID-prefixed group; Foundation resolves the container, and real access, ownership and Unix socket path bounds are checked. A source-scoped lock preserves one session when descriptor and socket directories differ. The engine removes only its own socket and descriptor after draining; the group container is never deleted. Apple [documents Team-ID-prefixed groups for macOS](https://developer.apple.com/documentation/xcode/accessing-app-group-containers) and [app-group socket placement](https://developer.apple.com/documentation/bundleresources/entitlements/com.apple.security.application-groups). It creates a fresh 32-byte local capability per mount, and the handler checks authorization before dispatch. The protocol uses HTTP framing: JSON for bounded operation metadata and binary bodies for file reads/writes and extended attributes, with a 1 MiB bound per binary request. It delegates to the existing catalogue/engine rather than create another Git or storage implementation. The adapter currently supports UTF-8 filenames and attribute names; special files and hard links are unsupported. These limits must remain explicit rather than treating a successful connection as complete POSIX filesystem coverage.
 
 Bridge shutdown waits for calls before releasing tracked handles/lookups and attempting identity-checked connection cleanup. A timeout retains resources for a later drain attempt; daemon backing stores remain owned by the daemon. Native volume shutdown attempts flush/release/forget cleanup and records POSIX errors while continuing. That behavior is not a guarantee that every flush succeeded, and needs failure/recovery tests alongside normal teardown.
 
@@ -145,6 +145,26 @@ mount pass.
 
 Local verification does cover the real Go Unix socket, catalogue, snapshot, overlay, and hydrator with the production Swift bridge client, including binary data, directory pagination, authorization, error mapping, and cleanup. Core FSVolume callback tests use the installed SDK's real FSKit framework. These tests exercise the adapter without a kernel mount; they do not establish resource authorization, installed activation, or kernel cache behavior.
 
+The metadata correction implements FSKit's native extended-attribute callbacks
+over authenticated binary bridge operations. Attribute values are SQLite BLOBs;
+create and replace policies, quotas, and namespace changes are transactional.
+Opaque object identities let retained inodes keep their attributes after rename
+or unlink without transferring them to a replacement at the same path. Catalogue
+folders have a separate persistent store, so setting their metadata does not
+activate or download a repository. The virtual `.git` file also has its own
+metadata identity.
+
+Attributes survive service restart, reconciliation, and Free Up Space. Eviction
+preserves the private metadata database while removing recoverable Git/blob
+caches; adopting the same repository reuses its metadata. Git commits and pushes
+do not back up these local attributes. Bounds are 127 UTF-8 bytes per name, 1 MiB
+per value, 128 attributes and 32 MiB per object, and 256 MiB per store. The focused
+native suite passes 59 tests with warnings treated as errors, including binary
+and empty values, policy errors, read-only refusal, and retained identities.
+Real Go-to-SDK callback integration also passes. Installed-module attribute
+delivery and elimination of the observed AppleDouble fallback still require
+mounted acceptance.
+
 ## Cache coherence is a release gate
 
 The earlier live FUSE policy can change a namespace or committed base outside filesystem calls when the watcher publishes a branch change or a repo/owner switch removes catalogue entries. Applying that policy unchanged to FSKit would require the kernel to discard obsolete contents, attributes, and directory entries.
@@ -187,6 +207,6 @@ Before publishing a native FSKit release, use disposable repositories and record
 4. Warm kernel caches, then switch branches, refresh, restart, and change repo/owner visibility. Assert exact contents, attributes, names, and Git status. Check fresh lookups after a completed reconnect, and clear refusal with preserved state/handles when readers make detachment busy. Establish the macOS 26 policy rather than infer it from bridge responses.
 5. Exercise pinning, conservative Free Up Space refusal, reconnect/relocation, busy unmount, cancellation, extension/service failure, restart, and recovery without dropping staged or uncommitted work.
 
-The [opt-in mounted acceptance harness](fskit-acceptance.md) prepares disposable local fixtures and covers the core Finder/Git/reconnect sequence once a matching installed module is available. Its previous skip on macOS 15 is not evidence of a mounted pass. The updated macOS 27 host has now run this harness with its authorized development module; probe failed before attachment. Successful mounted acceptance remains outstanding.
+The [opt-in mounted acceptance harness](fskit-acceptance.md) prepares disposable local fixtures and covers the core Finder/Git/reconnect sequence once a matching installed module is available. Its previous skip on macOS 15 is not evidence of a mounted pass. The updated macOS 27 host has attached its authorized development module and passed reads, executable launch, writes, and staging; the metadata sidecar prevents the complete sequence from passing. Complete mounted acceptance remains outstanding.
 
 Record results by source revision, macOS/Xcode versions, architecture, signing/profile state, and actual mounted environment. Update this status only from that evidence; keep previous release tags, manifests, artifacts, and validation records unchanged.

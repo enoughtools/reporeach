@@ -6,11 +6,17 @@
 // Unix socket and requires a fresh capability for each mount session.
 package fsbridge
 
+import "github.com/cloudflare/artifact-fs/internal/model"
+
 const (
-	Version           = 1
-	MaxChunkSize      = 1 << 20
-	MaxMetadataSize   = 64 << 10
-	DirectoryPageSize = 64 << 10
+	Version                  = 1
+	MaxChunkSize             = 1 << 20
+	MaxMetadataSize          = 64 << 10
+	DirectoryPageSize        = 64 << 10
+	MaxXattrNameSize         = model.MaxXattrNameBytes
+	MaxXattrValueSize        = model.MaxXattrValueBytes
+	MaxXattrListSize         = model.MaxXattrsPerObject * (model.MaxXattrNameBytes + 1)
+	MaxXattrListResponseSize = 4 << 20
 )
 
 type Descriptor struct {
@@ -99,4 +105,8 @@ type Response struct {
 	Target     string           `json:"target,omitempty"`
 	Written    int              `json:"written"`
 	Stat       *Statistics      `json:"stat,omitempty"`
+	XattrNames []string         `json:"xattr_names"`
+	// XattrMissing is portable across the native client test hosts. Numeric
+	// errno values continue to describe the server's platform.
+	XattrMissing bool `json:"xattr_missing,omitempty"`
 }

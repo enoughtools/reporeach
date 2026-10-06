@@ -265,15 +265,6 @@ func (fs *FileSystem) ReleaseFileHandle(ctx context.Context, op *fuseops.Release
 	return h.backend.ReleaseFileHandle(ctx, &child)
 }
 
-// ArtifactFS currently does not implement xattrs. Metadata probes on dormant
-// catalogue folders must not activate a repository merely to return ENOSYS.
-func (fs *FileSystem) GetXattr(context.Context, *fuseops.GetXattrOp) error   { return syscall.ENOSYS }
-func (fs *FileSystem) ListXattr(context.Context, *fuseops.ListXattrOp) error { return syscall.ENOSYS }
-func (fs *FileSystem) SetXattr(context.Context, *fuseops.SetXattrOp) error   { return syscall.ENOSYS }
-func (fs *FileSystem) RemoveXattr(context.Context, *fuseops.RemoveXattrOp) error {
-	return syscall.ENOSYS
-}
-
 // Destroy releases the userspace file descriptors after the mount stops. It
 // does not close backing stores: those belong to the repository lifecycle owner.
 func (fs *FileSystem) Destroy() {

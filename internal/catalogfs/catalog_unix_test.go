@@ -21,6 +21,7 @@ import (
 	"github.com/cloudflare/artifact-fs/internal/model"
 	"github.com/cloudflare/artifact-fs/internal/overlay"
 	"github.com/cloudflare/artifact-fs/internal/snapshot"
+	"github.com/jacobsa/fuse"
 	"github.com/jacobsa/fuse/fuseops"
 )
 
@@ -173,7 +174,7 @@ func TestCatalogueBrowsingDoesNotActivateOrHydrate(t *testing.T) {
 		if err := fs.GetInodeAttributes(ctx, attrs); err != nil || !attrs.Attributes.Mode.IsDir() {
 			t.Fatalf("repo placeholder: %v", err)
 		}
-		if err := fs.GetXattr(ctx, &fuseops.GetXattrOp{Inode: id, Name: "com.apple.FinderInfo"}); err != syscall.ENOSYS {
+		if err := fs.GetXattr(ctx, &fuseops.GetXattrOp{Inode: id, Name: "com.apple.FinderInfo"}); err != fuse.ENOATTR {
 			t.Fatal(err)
 		}
 	}

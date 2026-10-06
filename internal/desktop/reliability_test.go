@@ -44,6 +44,12 @@ func TestServiceClosingDuringMountRetainsOwnershipUntilDetached(t *testing.T) {
 	mountDone := make(chan error, 1)
 	go func() { mountDone <- s.Mount(context.Background()) }()
 	<-entered
+	s.mu.Lock()
+	metadata := s.catalogMetadata
+	s.mu.Unlock()
+	if metadata == nil {
+		t.Fatal("mount callback did not receive a metadata lifecycle owner")
+	}
 	closeDone := make(chan error, 1)
 	go func() { closeDone <- s.Close() }()
 	awaitDesktop(t, func() bool { s.mu.Lock(); defer s.mu.Unlock(); return s.closing })
@@ -68,6 +74,9 @@ func TestServiceClosingDuringMountRetainsOwnershipUntilDetached(t *testing.T) {
 	defer mounted.mu.Unlock()
 	if mounted.attempts != 2 {
 		t.Fatalf("unmount attempts = %d", mounted.attempts)
+	}
+	if _, err := metadata.HasMetadataXattrs(context.Background()); err == nil {
+		t.Fatal("closing during mount leaked the catalogue metadata database")
 	}
 }
 

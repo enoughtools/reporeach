@@ -62,6 +62,25 @@ private func lookup(_ volume: RepoReachVolume, _ parent: FSItem, _ name: String)
     try await pair { volume.lookupItem(named: FSFileName(string: name), inDirectory: parent, replyHandler: $0) }
 }
 
+@available(macOS 15.4, *)
+private func xattr(_ volume: RepoReachVolume, _ item: FSItem, _ name: String) async throws -> Data {
+    try await one { volume.getXattr(named: FSFileName(string: name), of: item, replyHandler: $0) }
+}
+
+@available(macOS 15.4, *)
+private func setXattr(_ volume: RepoReachVolume, _ item: FSItem, _ name: String,
+                      value: Data?, policy: FSVolume.SetXattrPolicy = .alwaysSet) async throws {
+    try await done { volume.setXattr(named: FSFileName(string: name), to: value, on: item,
+                                    policy: policy, replyHandler: $0) }
+}
+
+@available(macOS 15.4, *)
+private func checkXattr(_ volume: RepoReachVolume, _ item: FSItem, _ name: String,
+                        equals expected: Data, _ message: String) async throws {
+    let value = try await xattr(volume, item, name)
+    try checked(value == expected, message)
+}
+
 private final class ReadReceipt: @unchecked Sendable {
     private let lock = NSLock()
     private var bytes = Data()
@@ -114,9 +133,32 @@ struct VolumeSmoke {
         let root: FSItem = try await one { volume.activate(replyHandler: $0) }
         let rootAttrs = try await attrs(volume, root)
         try checked((root as? RepoReachItem)?.inode == 1 && rootAttrs.fileID == .rootDirectory && rootAttrs.type == .directory, "Root inode translation")
+        try await setXattr(volume, root, "user.catalog", value: Data([11, 0, 255]))
         let owner = try await lookup(volume, root, "alice")
+        try await setXattr(volume, owner, "user.catalog", value: Data([22, 0, 255]))
         let repo = try await lookup(volume, owner, "project")
+        try await setXattr(volume, repo, "user.catalog", value: Data([33, 0, 255]))
+        try await checkXattr(volume, root, "user.catalog", equals: Data([11, 0, 255]), "Catalogue root stores its own attributes")
+        try await checkXattr(volume, owner, "user.catalog", equals: Data([22, 0, 255]), "Owner folder stores its own attributes")
+        try await checkXattr(volume, repo, "user.catalog", equals: Data([33, 0, 255]), "Repository placeholder stores its own attributes")
         let beforeOpen = try await lookup(volume, repo, "README.md")
+        let attributeName = "user.雪/a+b&c?d=e#\u{1}"
+        let attributeBytes = Data((0...255).map(UInt8.init)) + Data([0, 255, 128, 13, 10])
+        try await errorCode(ENOATTR) { _ = try await xattr(volume, beforeOpen, attributeName) }
+        try await setXattr(volume, beforeOpen, attributeName, value: attributeBytes, policy: .mustCreate)
+        try await checkXattr(volume, beforeOpen, attributeName, equals: attributeBytes,
+                             "General binary attributes preserve delimiters and UTF-8 names without opening the file")
+        try await errorCode(EEXIST) { try await setXattr(volume, beforeOpen, attributeName, value: Data(), policy: .mustCreate) }
+        try await setXattr(volume, beforeOpen, attributeName, value: Data(), policy: .mustReplace)
+        try await checkXattr(volume, beforeOpen, attributeName, equals: Data(), "Empty attributes remain present")
+        let attributeNames: [FSFileName] = try await one { volume.listXattrs(of: beforeOpen, replyHandler: $0) }
+        try checked(attributeNames.contains { $0.data == Data(attributeName.utf8) }, "Attributes list uses exact name bytes")
+        try await setXattr(volume, beforeOpen, attributeName, value: nil, policy: .delete)
+        try await errorCode(ENOATTR) { _ = try await xattr(volume, beforeOpen, attributeName) }
+        try await errorCode(ENOATTR) { try await setXattr(volume, beforeOpen, attributeName, value: Data(), policy: .mustReplace) }
+        let gitfile = try await lookup(volume, repo, ".git")
+        try await setXattr(volume, gitfile, "user.gitfile", value: attributeBytes)
+        try await checkXattr(volume, gitfile, "user.gitfile", equals: attributeBytes, "Synthetic gitfile stores its own attributes")
         let header = try await read(volume, beforeOpen, length: 4096)
         try checked(!header.isEmpty, "Vnode header read succeeds before any open callback")
         try await errorCode(EBADF) { try await done { volume.closeItem(beforeOpen, modes: [.read], replyHandler: $0) } }
@@ -138,6 +180,10 @@ struct VolumeSmoke {
         initial.size = 4
         initial.modifyTime = timespec(tv_sec: 1_700_000_000, tv_nsec: 123_456_789)
         let file = try await create(volume, repo, "native-volume.bin", attributes: initial)
+        try await setXattr(volume, file, "user.identity", value: Data([99, 0, 255]))
+        let maximumAttribute = Data(repeating: 0xff, count: FSBridgeClient.maximumXattrSize)
+        try await setXattr(volume, file, "user.maximum", value: maximumAttribute)
+        try await checkXattr(volume, file, "user.maximum", equals: maximumAttribute, "Maximum-size attributes are binary safe")
         let fileAttrs = try await attrs(volume, file)
         try checked(fileAttrs.mode == 0o640 && fileAttrs.size == 4 && initial.wasAttributeConsumed(.mode) && initial.wasAttributeConsumed(.size) && initial.wasAttributeConsumed(.modifyTime), "Creation attributes and consumed masks")
         let combined = FSItem.SetAttributesRequest()
@@ -165,11 +211,15 @@ struct VolumeSmoke {
         let shortAttrs: FSItem.Attributes = try await one { volume.setAttributes(shorter, on: file, replyHandler: $0) }
         try checked(shortAttrs.size == 1024 && shorter.wasAttributeConsumed(.size), "Truncate attributes")
         let target = try await create(volume, repo, "native-target.bin")
+        try await setXattr(volume, target, "user.identity", value: Data([33, 0, 128]))
         let _: Int = try await one { reply in volume.write(contents: Data([9, 8, 7]), to: target, at: 0) { count, error in reply(count, error) } }
         let _: FSFileName = try await one { volume.renameItem(file, inDirectory: repo, named: FSFileName(string: "native-volume.bin"), to: FSFileName(string: "native-target.bin"), inDirectory: repo, overItem: target, replyHandler: $0) }
         let removedTarget = try await attrs(volume, target)
         try checked(removedTarget.size == 3 && removedTarget.linkCount == 0, "Overwritten open vnode keeps descriptor metadata")
+        try await checkXattr(volume, file, "user.identity", equals: Data([99, 0, 255]), "Rename preserves source attributes")
+        try await checkXattr(volume, target, "user.identity", equals: Data([33, 0, 128]), "Overwritten object retains its metadata")
         try await done { volume.removeItem(file, named: FSFileName(string: "native-target.bin"), fromDirectory: repo, replyHandler: $0) }
+        try await checkXattr(volume, file, "user.identity", equals: Data([99, 0, 255]), "Unlinked item retains its own metadata")
         let unlinked = try await attrs(volume, file)
         try checked(unlinked.size == 1024 && unlinked.linkCount == 0, "Open-unlinked getattr")
         let detachedSize = FSItem.SetAttributesRequest(); detachedSize.size = 2
@@ -181,9 +231,12 @@ struct VolumeSmoke {
         try checked(detachedBytes == Data([0, 255]), "Independent retained handle observes detached write")
         let recreated = try await create(volume, repo, "native-target.bin")
         try checked((recreated as! RepoReachItem).inode != fileInode, "Recreated path receives a new inode")
+        try await errorCode(ENOATTR) { _ = try await xattr(volume, recreated, "user.identity") }
         let link: FSItem = try await pair { volume.createSymbolicLink(named: FSFileName(string: "native-link"), inDirectory: repo, attributes: FSItem.SetAttributesRequest(), linkContents: FSFileName(string: "../README.md"), replyHandler: $0) }
         let linkTarget: FSFileName = try await one { volume.readSymbolicLink(link, replyHandler: $0) }
         try checked(linkTarget.string == "../README.md", "Symbolic link round trip")
+        try await setXattr(volume, link, "user.symlink", value: attributeBytes)
+        try await checkXattr(volume, link, "user.symlink", equals: attributeBytes, "Symlink attributes address the link itself")
         let parent = try await create(volume, repo, "native-dir", type: .directory)
         let child = try await create(volume, parent, "child", type: .directory)
         try await done { volume.reclaimItem(parent, replyHandler: $0) }
@@ -196,10 +249,18 @@ struct VolumeSmoke {
         let ro = RepoReachVolume(client: try FSBridgeClient(configURL: configURL), identifier: UUID(), readOnly: true)
         let roRoot: FSItem = try await one { ro.activate(replyHandler: $0) }
         try await errorCode(EROFS) { _ = try await create(ro, roRoot, "forbidden") }
+        let roOwner = try await lookup(ro, roRoot, "alice")
+        let roRepo = try await lookup(ro, roOwner, "project")
+        let roGitfile = try await lookup(ro, roRepo, ".git")
+        try await checkXattr(ro, roGitfile, "user.gitfile", equals: attributeBytes, "Read-only volume permits attribute reads")
+        for policy: FSVolume.SetXattrPolicy in [.alwaysSet, .mustCreate, .mustReplace, .delete] {
+            try await errorCode(EROFS) { try await setXattr(ro, roGitfile, "user.gitfile", value: nil, policy: policy) }
+        }
         _ = try await raw.request(FSBridgeRequest(op: "release", inode: fileInode, handle: extraHandle))
         try await done { volume.closeItem(file, modes: [], replyHandler: $0) }
         let closedRemoved = try await attrs(volume, file)
         try checked(closedRemoved.size == 2 && closedRemoved.linkCount == 0, "Closed removed vnode keeps last attributes")
+        try await checkXattr(volume, file, "user.identity", equals: Data([99, 0, 255]), "Closed retained removed item keeps metadata identity")
         for mode: UInt32 in [0o400, 0] {
             let request = FSItem.SetAttributesRequest(); request.mode = mode
             let restricted = try await create(volume, repo, "native-restricted-\(mode)", attributes: request)
@@ -237,7 +298,12 @@ struct VolumeSmoke {
         try await errorCode(ESTALE) { _ = try await attrs(volume, recreated) }
         let newOwner = try await lookup(volume, root, "alice")
         let newRepo = try await lookup(volume, newOwner, "project")
+        try await checkXattr(volume, root, "user.catalog", equals: Data([11, 0, 255]), "Remount preserves catalogue root metadata")
+        try await checkXattr(volume, newOwner, "user.catalog", equals: Data([22, 0, 255]), "Remount preserves owner metadata")
+        try await checkXattr(volume, newRepo, "user.catalog", equals: Data([33, 0, 255]), "Remount preserves repository placeholder metadata")
         _ = try await lookup(volume, newRepo, "native-target.bin")
+        let remountedGitfile = try await lookup(volume, newRepo, ".git")
+        try await checkXattr(volume, remountedGitfile, "user.gitfile", equals: attributeBytes, "Remount preserves gitfile attributes")
         let committedOwner = try await lookup(volume, root, "team")
         let committedRepo = try await lookup(volume, committedOwner, "project")
         let committed = try await lookup(volume, committedRepo, "README.md")
@@ -256,6 +322,6 @@ struct VolumeSmoke {
         try await errorCode(ENXIO) { _ = try await attrs(volume, root) }
         await raw.close()
         try checked(cowWrite == 3 && cowRead == Data([77, 0, 255]), "Previously opened committed reader observes linked copy-on-write data; fixture bytes returned: \(Array(cowRead))")
-        print("PASS actual SDK FSVolume lifecycle/remount, vnode reads before open/after close, bounded temporary readers, binary reads/writes, root IDs, lookup/create/setattrs masks, rename/unlink retained handles, restrictive create/chmod capabilities, committed copy-on-write reads, symlinks, parent retention, unsupported operations, read-only errors, concurrent shutdown")
+        print("PASS actual SDK FSVolume lifecycle/remount, binary and empty xattrs, metadata policies/bounds and retained identities, catalogue/gitfile/symlink metadata, vnode reads before open/after close, bounded temporary readers, binary reads/writes, root IDs, lookup/create/setattrs masks, rename/unlink retained handles, restrictive create/chmod capabilities, committed copy-on-write reads, symlinks, parent retention, unsupported operations, read-only errors, concurrent shutdown")
     }
 }

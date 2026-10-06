@@ -6,11 +6,14 @@ import (
 	"context"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/cloudflare/artifact-fs/internal/catalogfs"
 	"github.com/cloudflare/artifact-fs/internal/fusefs"
+	"github.com/cloudflare/artifact-fs/internal/model"
+	"github.com/cloudflare/artifact-fs/internal/overlay"
 )
 
 // TestNativeFSKitBridgeClient runs an externally compiled Swift protocol/volume
@@ -27,9 +30,18 @@ func TestNativeFSKitBridgeClient(t *testing.T) {
 	for _, entry := range bridgeCatalogEntries {
 		fixtures[entry.ID] = newBridgeCatalogFixture(t, entry.ID)
 	}
-	catalog, err := catalogfs.New(bridgeCatalogEntries, func(_ context.Context, entry catalogfs.Entry) (*fusefs.ArtifactFuse, error) {
-		return fixtures[entry.ID].backend, nil
+	metadataRoot := t.TempDir()
+	metadata, err := overlay.New(context.Background(), model.RepoConfig{
+		ID: "catalog", Name: "catalog", OverlayDir: filepath.Join(metadataRoot, "overlay"),
+		OverlayDBPath: filepath.Join(metadataRoot, "overlay.db"),
 	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = metadata.Close() })
+	catalog, err := catalogfs.NewWithMetadata(bridgeCatalogEntries, func(_ context.Context, entry catalogfs.Entry) (*fusefs.ArtifactFuse, error) {
+		return fixtures[entry.ID].backend, nil
+	}, metadata)
 	if err != nil {
 		t.Fatal(err)
 	}
