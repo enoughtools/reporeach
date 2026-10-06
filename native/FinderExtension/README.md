@@ -7,6 +7,7 @@ The host app writes the metadata-only snapshot atomically to `~/Library/Applicat
 ```json
 {
   "mountRoot": "/Users/example/Repos",
+  "virtualRoot": "/Users/example/Library/Application Support/RepoReach/native-catalogue/volume",
   "repositories": [
     { "id": "example/project", "state": "ready", "pinned": false, "error": null },
     { "id": "local/notes", "state": "available", "pinned": false,
@@ -17,7 +18,9 @@ The host app writes the metadata-only snapshot atomically to `~/Library/Applicat
 
 Finder does not read repository contents or run Git commands. It sends validated `reporeach://action?repo=example/project&action=keep` URLs to the host app with activation disabled. The host must revalidate each route and check repository state before acting, particularly before freeing storage.
 
-`localPath` and `localKind` are optional for compatibility with older snapshots. A local path must be an absolute, non-root directory path, paired with `adopted` or `materialized`. Selection matching compares path components without resolving symlinks or accessing files, including native `.git` paths. A deeper registered checkout takes precedence over its containing checkout; equal-depth ambiguous registrations offer no actions. The extension observes the catalogue root and registered physical checkout roots using only this metadata.
+`virtualRoot`, `localPath`, and `localKind` are optional for compatibility with older snapshots. Finder follows virtual repository links into the private volume, so the extension also observes `virtualRoot` while virtual entries exist and maps its owner/repository paths back to registered virtual entries. Adopted and materialized entries never acquire private virtual paths. The chosen and private roots must be absolute, non-root, and disjoint; traversal components and control characters are rejected.
+
+A local path must be an absolute, non-root directory path, paired with `adopted` or `materialized`. Selection matching compares path components without resolving symlinks or accessing files, including native `.git` paths. A deeper registered checkout takes precedence over its containing checkout; equal-depth ambiguous registrations offer no actions. The extension observes the catalogue, private virtual volume, and registered physical checkout roots using only this metadata.
 
 For the developer beta, the extension is sandboxed and `Finder.entitlements` grants read-only access to exactly the shared metadata file in the current user's Application Support directory. There are deliberately no app-group entitlements requiring a provisioning profile. The containing app is not sandboxed. The shared cache locates the named user's home rather than the extension's private sandbox container. New cache contents are written to a 0600 temporary file and then atomically replace the old file.
 

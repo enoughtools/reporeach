@@ -197,6 +197,7 @@ struct EngineOperation: Codable, Identifiable, Equatable {
 struct EngineStatus: Codable, Equatable {
     let version: String
     let mountRoot: String
+    let virtualRoot: String?
     let mounted: Bool
     let dependencyReady: Bool
     let account: GitHubAccount?
@@ -206,17 +207,20 @@ struct EngineStatus: Codable, Equatable {
     let message: String?
 
     init(version: String = "0.1.0", mountRoot: String, mounted: Bool = false, dependencyReady: Bool = false,
-         account: GitHubAccount? = nil, repositories: [RepositoryRecord] = [], operations: [EngineOperation] = [], organizations: [OrganizationRecord] = [], message: String? = nil) {
+         account: GitHubAccount? = nil, repositories: [RepositoryRecord] = [], operations: [EngineOperation] = [], organizations: [OrganizationRecord] = [], message: String? = nil,
+         virtualRoot: String? = nil) {
         self.version = version; self.mountRoot = mountRoot; self.mounted = mounted
         self.dependencyReady = dependencyReady; self.account = account; self.repositories = repositories
         self.operations = operations; self.organizations = organizations; self.message = message
+        self.virtualRoot = virtualRoot
     }
 
-    enum CodingKeys: String, CodingKey { case version, mountRoot, mounted, dependencyReady, account, repositories, operations, organizations, message }
+    enum CodingKeys: String, CodingKey { case version, mountRoot, virtualRoot, mounted, dependencyReady, account, repositories, operations, organizations, message }
     init(from decoder: Decoder) throws {
         let value = try decoder.container(keyedBy: CodingKeys.self)
         version = try value.decodeIfPresent(String.self, forKey: .version) ?? "0.1.0"
         mountRoot = try value.decode(String.self, forKey: .mountRoot)
+        virtualRoot = try value.decodeIfPresent(String.self, forKey: .virtualRoot)
         mounted = try value.decodeIfPresent(Bool.self, forKey: .mounted) ?? false
         dependencyReady = try value.decodeIfPresent(Bool.self, forKey: .dependencyReady) ?? false
         account = try value.decodeIfPresent(GitHubAccount.self, forKey: .account)

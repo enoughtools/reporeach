@@ -61,8 +61,11 @@ type Operation struct {
 }
 
 type Status struct {
-	Version         string         `json:"version"`
-	MountRoot       string         `json:"mountRoot"`
+	Version   string `json:"version"`
+	MountRoot string `json:"mountRoot"`
+	// Finder resolves virtual catalogue links to this private volume path.
+	// Supplying it as metadata keeps badges and actions independent of file IO.
+	VirtualRoot     string         `json:"virtualRoot,omitempty"`
 	Mounted         bool           `json:"mounted"`
 	DependencyReady bool           `json:"dependencyReady"`
 	Account         *Account       `json:"account,omitempty"`

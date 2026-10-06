@@ -18,6 +18,7 @@ struct FinderRepositoryStatus: Codable, Equatable {
     }
 
     var isAdopted: Bool { localKind == "adopted" && localURL != nil }
+    var isVirtual: Bool { localPath == nil && localKind == nil }
     var localURL: URL? {
         guard ["adopted", "materialized"].contains(localKind ?? ""), let localPath else { return nil }
         return FinderStatusCache.directoryURL(for: localPath)
@@ -27,6 +28,13 @@ struct FinderRepositoryStatus: Codable, Equatable {
 struct FinderStatusSnapshot: Codable, Equatable {
     let mountRoot: String
     let repositories: [FinderRepositoryStatus]
+    let virtualRoot: String?
+
+    init(mountRoot: String, repositories: [FinderRepositoryStatus], virtualRoot: String? = nil) {
+        self.mountRoot = mountRoot
+        self.repositories = repositories
+        self.virtualRoot = virtualRoot
+    }
 }
 
 /// Metadata only. Finder never needs to open a repository to decide its badge.
@@ -97,39 +105,53 @@ struct FinderStatusCache {
     }
 
     static func mountRootURL(in snapshot: FinderStatusSnapshot) -> URL? {
-        directoryURL(for: snapshot.mountRoot)
+        roots(in: snapshot)?.catalogue
+    }
+
+    static func virtualRootURL(in snapshot: FinderStatusSnapshot) -> URL? {
+        roots(in: snapshot)?.virtual
     }
 
     static func directoryURL(for path: String) -> URL? {
         guard path.hasPrefix("/"),
-              !path.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) else { return nil }
+              !path.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }),
+              !path.split(separator: "/").contains(where: { $0 == "." || $0 == ".." }) else { return nil }
         let url = URL(fileURLWithPath: path, isDirectory: true).standardizedFileURL
         return url.path == "/" ? nil : url
     }
 
     static func repositoryURLs(for repository: FinderRepositoryStatus, in snapshot: FinderStatusSnapshot) -> [URL] {
-        guard ActionRoute.isValidRepositoryID(repository.id), let root = mountRootURL(in: snapshot) else { return [] }
-        let catalogueURL = root.appendingPathComponent(repository.id, isDirectory: true)
-        if let localURL = repository.localURL, localURL != catalogueURL { return [catalogueURL, localURL] }
-        return [catalogueURL]
+        guard ActionRoute.isValidRepositoryID(repository.id), let roots = roots(in: snapshot) else { return [] }
+        var urls = [roots.catalogue.appendingPathComponent(repository.id, isDirectory: true)]
+        if let localURL = repository.localURL, !urls.contains(localURL) { urls.append(localURL) }
+        if repository.isVirtual, let virtualRoot = roots.virtual {
+            urls.append(virtualRoot.appendingPathComponent(repository.id, isDirectory: true))
+        }
+        return urls
     }
 
     static func observedDirectoryURLs(in snapshot: FinderStatusSnapshot) -> Set<URL> {
-        guard let root = mountRootURL(in: snapshot) else { return [] }
-        return Set([root] + snapshot.repositories.compactMap(\.localURL))
+        guard let roots = roots(in: snapshot) else { return [] }
+        var urls = Set([roots.catalogue] + snapshot.repositories.compactMap(\.localURL))
+        if snapshot.repositories.contains(where: \.isVirtual), let virtualRoot = roots.virtual { urls.insert(virtualRoot) }
+        return urls
     }
 
     /// Resolve the containing repository from a selection without reading files.
     /// Component comparison keeps /Repos-other outside a /Repos catalogue.
     static func repositoryID(for selectionURL: URL, in snapshot: FinderStatusSnapshot) -> String? {
-        guard selectionURL.isFileURL, let root = mountRootURL(in: snapshot) else { return nil }
+        guard selectionURL.isFileURL, let roots = roots(in: snapshot) else { return nil }
         let selectedComponents = selectionURL.standardizedFileURL.pathComponents
         var matches: [(id: String, depth: Int)] = []
-        let rootComponents = root.pathComponents
-        if selectedComponents.count >= rootComponents.count + 2, selectedComponents.starts(with: rootComponents) {
-            let id = "\(selectedComponents[rootComponents.count])/\(selectedComponents[rootComponents.count + 1])"
-            if ActionRoute.isValidRepositoryID(id), snapshot.repositories.contains(where: { $0.id == id }) {
-                matches.append((id, rootComponents.count + 2))
+        var catalogueRoots = [(roots.catalogue, false)]
+        if let virtualRoot = roots.virtual { catalogueRoots.append((virtualRoot, true)) }
+        for (root, virtualOnly) in catalogueRoots {
+            let components = root.pathComponents
+            if selectedComponents.count >= components.count + 2, selectedComponents.starts(with: components) {
+                let id = "\(selectedComponents[components.count])/\(selectedComponents[components.count + 1])"
+                if ActionRoute.isValidRepositoryID(id), snapshot.repositories.contains(where: { $0.id == id && (!virtualOnly || $0.isVirtual) }) {
+                    matches.append((id, components.count + 2))
+                }
             }
         }
         for repository in snapshot.repositories {
@@ -152,6 +174,15 @@ struct FinderStatusCache {
             let localMetadataValid = repository.localPath == nil && repository.localKind == nil || repository.localURL != nil
             return localMetadataValid && ActionRoute.isValidRepositoryID(repository.id) && identifiers.insert(repository.id).inserted
         }
+    }
+
+    private static func roots(in snapshot: FinderStatusSnapshot) -> (catalogue: URL, virtual: URL?)? {
+        guard let catalogue = directoryURL(for: snapshot.mountRoot) else { return nil }
+        guard let path = snapshot.virtualRoot else { return (catalogue, nil) }
+        guard let virtual = directoryURL(for: path),
+              !catalogue.pathComponents.starts(with: virtual.pathComponents),
+              !virtual.pathComponents.starts(with: catalogue.pathComponents) else { return nil }
+        return (catalogue, virtual)
     }
 
     enum CacheError: Error {

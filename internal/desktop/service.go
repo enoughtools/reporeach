@@ -301,8 +301,13 @@ func (s *Service) Status() Status {
 		copyAccount := *s.state.Account
 		account = &copyAccount
 	}
+	var virtualRoot string
+	if s.hybridCatalogue {
+		virtualRoot = filepath.Join(s.opts.StateDir, "native-catalogue", "volume")
+	}
 	return Status{Version: Version, MountRoot: s.state.MountRoot,
-		Mounted: s.mounted != nil, DependencyReady: s.dependencyReady(),
+		VirtualRoot: virtualRoot,
+		Mounted:     s.mounted != nil, DependencyReady: s.dependencyReady(),
 		Account: account, Repositories: repos, Operations: operations,
 		Organizations: s.organizationsLocked(), Message: strings.TrimSpace(s.message + "\n" + s.retainedCheckoutMessage)}
 }

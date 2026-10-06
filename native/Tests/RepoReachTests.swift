@@ -78,6 +78,7 @@ final class FinderCacheTests: XCTestCase {
         let legacy = try JSONDecoder().decode(FinderStatusSnapshot.self, from: Data(#"{"mountRoot":"/Users/example/Repositories","repositories":[{"id":"owner/repo","state":"virtual","pinned":false}]}"#.utf8))
         XCTAssertNil(legacy.repositories.first?.localPath)
         XCTAssertNil(legacy.repositories.first?.localKind)
+        XCTAssertNil(legacy.virtualRoot)
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         defer { try? FileManager.default.removeItem(at: directory) }
         let cache = FinderStatusCache(fileURL: directory.appendingPathComponent("status.json"))
@@ -101,6 +102,81 @@ final class FinderCacheTests: XCTestCase {
                 FinderRepositoryStatus(id: "owner/repo", state: "available", pinned: false, localPath: path, localKind: kind)
             ])
             XCTAssertThrowsError(try cache.write(status))
+        }
+    }
+
+    func testResolvedVirtualSelectionMapsRepositoryAndObservesBothCatalogueRoots() {
+        let repository = FinderRepositoryStatus(id: "owner/repo", state: "virtual", pinned: false)
+        let virtualRoot = "/Users/example/Library/Application Support/RepoReach/native-catalogue/volume"
+        let status = FinderStatusSnapshot(mountRoot: "/Users/example/Repositories", repositories: [repository], virtualRoot: virtualRoot)
+        let selection = URL(fileURLWithPath: virtualRoot).appendingPathComponent("owner/repo/Sources/main.swift")
+
+        XCTAssertEqual(FinderStatusCache.repositoryID(for: selection, in: status), repository.id)
+        XCTAssertEqual(FinderStatusCache.repositoryID(for: URL(fileURLWithPath: status.mountRoot + "/owner/repo"), in: status), repository.id)
+        XCTAssertEqual(FinderStatusCache.repositoryURLs(for: repository, in: status), [
+            URL(fileURLWithPath: status.mountRoot + "/owner/repo", isDirectory: true),
+            URL(fileURLWithPath: virtualRoot + "/owner/repo", isDirectory: true)
+        ])
+        XCTAssertEqual(FinderStatusCache.observedDirectoryURLs(in: status), [
+            URL(fileURLWithPath: status.mountRoot, isDirectory: true), URL(fileURLWithPath: virtualRoot, isDirectory: true)
+        ])
+        XCTAssertNil(FinderStatusCache.repositoryID(for: URL(fileURLWithPath: virtualRoot + "-other/owner/repo"), in: status))
+        XCTAssertNil(FinderStatusCache.repositoryID(for: URL(fileURLWithPath: virtualRoot + "/owner/missing"), in: status))
+        XCTAssertNil(FinderStatusCache.repositoryID(for: URL(fileURLWithPath: virtualRoot + "/owner/repo/../../../outside"), in: status))
+    }
+
+    func testLocalCheckoutsNeverAcquireVirtualRepositoryPaths() {
+        let virtualRoot = "/Users/example/PrivateVirtualCatalogue"
+        let repositories = [
+            FinderRepositoryStatus(id: "local/adopted", state: "available", pinned: false,
+                                   localPath: "/Users/example/Source/adopted", localKind: "adopted"),
+            FinderRepositoryStatus(id: "owner/kept", state: "available", pinned: true,
+                                   localPath: "/Users/example/Repositories/owner/kept", localKind: "materialized")
+        ]
+        let status = FinderStatusSnapshot(mountRoot: "/Users/example/Repositories", repositories: repositories, virtualRoot: virtualRoot)
+        XCTAssertFalse(FinderStatusCache.observedDirectoryURLs(in: status).contains(URL(fileURLWithPath: virtualRoot, isDirectory: true)))
+        for repository in repositories {
+            let virtualURL = URL(fileURLWithPath: virtualRoot + "/" + repository.id, isDirectory: true)
+            XCTAssertFalse(FinderStatusCache.repositoryURLs(for: repository, in: status).contains(virtualURL))
+            XCTAssertNil(FinderStatusCache.repositoryID(for: virtualURL.appendingPathComponent(".git/index"), in: status))
+            XCTAssertEqual(FinderStatusCache.repositoryID(for: repository.localURL!.appendingPathComponent(".git/index"), in: status), repository.id)
+        }
+    }
+
+    func testVirtualAndPhysicalSelectionCollisionOffersNoAction() {
+        let virtualRoot = "/Users/example/PrivateVirtualCatalogue"
+        let status = FinderStatusSnapshot(mountRoot: "/Users/example/Repositories", repositories: [
+            FinderRepositoryStatus(id: "owner/repo", state: "virtual", pinned: false),
+            FinderRepositoryStatus(id: "local/physical", state: "available", pinned: false,
+                                   localPath: virtualRoot + "/owner/repo", localKind: "adopted")
+        ], virtualRoot: virtualRoot)
+        XCTAssertNil(FinderStatusCache.repositoryID(for: URL(fileURLWithPath: virtualRoot + "/owner/repo/file"), in: status))
+    }
+
+    func testVirtualRootRoundTripsAndLegacyNullRootRemainsCompatible() throws {
+        let status = FinderStatusSnapshot(mountRoot: "/Users/example/Repositories", repositories: snapshot().repositories,
+                                          virtualRoot: "/Users/example/PrivateVirtualCatalogue")
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let cache = FinderStatusCache(fileURL: directory.appendingPathComponent("status.json"))
+        try cache.write(status)
+        XCTAssertEqual(cache.read(), status)
+        let legacy = try JSONDecoder().decode(FinderStatusSnapshot.self, from: Data(#"{"mountRoot":"/Users/example/Repositories","repositories":[],"virtualRoot":null}"#.utf8))
+        XCTAssertNil(legacy.virtualRoot)
+        XCTAssertEqual(FinderStatusCache.observedDirectoryURLs(in: legacy), [URL(fileURLWithPath: legacy.mountRoot, isDirectory: true)])
+    }
+
+    func testUnsafeOrOverlappingVirtualRootsCannotBeObservedOrMapped() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let cache = FinderStatusCache(fileURL: directory.appendingPathComponent("status.json"))
+        for path in ["", "/", "relative/volume", "/Users/example/volume\u{0000}", "/Users/example/../volume",
+                     "/Users/example/Repositories", "/Users/example/Repositories/nested", "/Users/example"] {
+            let status = FinderStatusSnapshot(mountRoot: "/Users/example/Repositories", repositories: snapshot().repositories, virtualRoot: path)
+            XCTAssertThrowsError(try cache.write(status))
+            XCTAssertTrue(FinderStatusCache.observedDirectoryURLs(in: status).isEmpty)
+            XCTAssertTrue(FinderStatusCache.repositoryURLs(for: status.repositories[0], in: status).isEmpty)
+            XCTAssertNil(FinderStatusCache.repositoryID(for: URL(fileURLWithPath: status.mountRoot + "/owner/repo"), in: status))
         }
     }
 
@@ -140,6 +216,15 @@ final class EngineContractTests: XCTestCase {
         XCTAssertTrue(status.repositories[0].privateRepository)
         XCTAssertEqual(status.repositories[0].description, "")
         XCTAssertTrue(status.operations.isEmpty)
+        XCTAssertNil(status.virtualRoot)
+    }
+
+    func testVirtualRootStatusFieldSurvivesDecodeAndRoundTrip() throws {
+        let json = #"{"mountRoot":"/Users/example/Repositories","virtualRoot":"/Users/example/PrivateVirtualCatalogue"}"#
+        let status = try JSONDecoder().decode(EngineStatus.self, from: Data(json.utf8))
+        XCTAssertEqual(status.virtualRoot, "/Users/example/PrivateVirtualCatalogue")
+        XCTAssertEqual(try JSONDecoder().decode(EngineStatus.self, from: JSONEncoder().encode(status)), status)
+        XCTAssertNil(EngineStatus(mountRoot: status.mountRoot).virtualRoot)
     }
 
     func testOperationProgressUsesCompletedFilesAndClamps() throws {
