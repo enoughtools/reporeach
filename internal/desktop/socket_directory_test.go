@@ -86,13 +86,17 @@ func TestSettingsCannotCoverSharedSocketDirectory(t *testing.T) {
 	for _, name := range []string{"same", "nested", "ancestor", "physical alias"} {
 		t.Run(name, func(t *testing.T) {
 			s := newDesktopTestService(t, "exit 4")
-			// Keep the group's ancestor separate from Go's usual test root so
-			// this verifies the shared endpoint boundary independently.
-			group, err := os.MkdirTemp("/tmp", "rr-socket-boundary-")
+			// Give the group its own ancestor, separate from the existing
+			// mount's temporary tree on both Linux and Darwin.
+			parent, err := os.MkdirTemp("/tmp", "rr-socket-boundary-")
 			if err != nil {
 				t.Fatal(err)
 			}
-			t.Cleanup(func() { _ = os.RemoveAll(group) })
+			t.Cleanup(func() { _ = os.RemoveAll(parent) })
+			group := filepath.Join(parent, "group")
+			if err := os.Mkdir(group, 0o700); err != nil {
+				t.Fatal(err)
+			}
 			s.opts.FSKitSocketDir = group
 			root := group
 			switch name {
