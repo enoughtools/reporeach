@@ -223,7 +223,7 @@ The private bridge currently refuses an existing socket rather than automaticall
 | Local activation experiment | The complete signed validation app passes the primary mounted sequence on macOS 27.0.1 ARM64: reads/execution, writes, Git commits/branch checkout, native metadata, busy refusal, repo/org reconnects, remount and orderly restart. Normal detachment and both helper exits are confirmed. |
 | Cold storage | The `a708aba` test helper with source-equivalent preserved `8807963` native app passes cold Keep, exact unique-blob accounting, offline restart with zero remote requests, and clean Free/reacquisition preserving native metadata. All captured mounts and helpers detach normally. |
 | Validation app replacement | Newly registered `a708aba` validation app fails helper dispatch before mounting in two attempts; public enablement passes. Restoring the preserved app succeeds. Registration/IPC logs do not establish the cause. Production installation remains a separate gate. |
-| Distribution authorization | Matching Apple-authenticated FSKit Developer ID profile and existing local certificate binding pass. Complete production app assembly and activation are pending. |
+| Distribution authorization | Matching Apple-authenticated FSKit Developer ID profile and existing local certificate binding pass. Complete ARM64 and Intel production candidates pass Apple notarization, stapling and Gatekeeper checks. Installed production activation remains pending. |
 | Kernel cache coherence | Persistent working-tree and quiescent catalogue policies are implemented in source; actual macOS 26 mounted proof remains outstanding. |
 | Existing beta.3 proof | Historical Go/native/Linux FUSE evidence remains valid for that release and is not FSKit evidence. |
 

@@ -235,6 +235,9 @@ for PLIST in "${PLISTS[@]}"; do
 done
 /usr/libexec/PlistBuddy -c "Add :RepoReachReleaseVersion string $VERSION" "$APP/Contents/Info.plist" 2>/dev/null || \
   /usr/libexec/PlistBuddy -c "Set :RepoReachReleaseVersion $VERSION" "$APP/Contents/Info.plist"
+SOURCE_REVISION="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["revision"])' "$STAGE/source.json")"
+/usr/libexec/PlistBuddy -c "Add :RepoReachSourceRevision string $SOURCE_REVISION" "$APP/Contents/Info.plist" 2>/dev/null || \
+  /usr/libexec/PlistBuddy -c "Set :RepoReachSourceRevision $SOURCE_REVISION" "$APP/Contents/Info.plist"
 SIGNATURE=ad-hoc
 if [ -n "$SIGN_IDENTITY" ]; then
   SIGNATURE=developer-id

@@ -58,6 +58,37 @@ if (
   throw new Error("Native release downloads require Developer ID signing");
 }
 const nativeDownload = Boolean(firstDownload && backend === "fskit");
+const setupDocument =
+  nativeDownload || !firstDownload ? "native-fskit" : "platform-setup";
+const sourceRevision = release?.source?.revision;
+const setupRef =
+  firstDownload &&
+  typeof sourceRevision === "string" &&
+  /^[0-9a-f]{40}$/.test(sourceRevision)
+    ? sourceRevision
+    : setupDocument === "native-fskit"
+      ? "codex/native-fskit"
+      : "main";
+const setupURL = new URL(
+  (firstDownload && release?.requirements?.setupURL) ||
+    `https://github.com/enoughtools/reporeach/blob/${setupRef}/docs/reporeach/${setupDocument}.md`,
+);
+const setupPath = setupURL.pathname.match(
+  /^\/enoughtools\/reporeach\/blob\/(?:[0-9a-f]{40}|main|codex\/native-fskit)\/docs\/reporeach\/(platform-setup|native-fskit)\.md$/,
+);
+if (
+  setupURL.protocol !== "https:" ||
+  setupURL.hostname !== "github.com" ||
+  setupURL.port ||
+  setupURL.username ||
+  setupURL.password ||
+  setupURL.search ||
+  setupURL.hash ||
+  setupPath?.[1] !== setupDocument
+) {
+  throw new Error("Invalid release setup documentation URL");
+}
+const setupHref = setupURL.href;
 function macOSVersion(value: string) {
   if (!/^\d+(?:\.\d+){0,2}$/.test(value)) {
     throw new Error("Invalid release macOS requirement");
@@ -357,9 +388,7 @@ const faqs = [
           </h2><p>
             Built in the open by Enough Tools, on the foundation of Cloudflare's
             ArtifactFS. Free to use, inspect, and contribute to.
-          </p><a
-            class="text-link"
-            href="https://github.com/enoughtools/reporeach/blob/main/docs/reporeach/user-guide.md"
+          </p><a id="setup-guide" class="text-link" href={setupHref}
             >Read the setup guide</a
           >
         </div>
@@ -408,7 +437,7 @@ const faqs = [
               firstDownload ? (
                 <>
                   macOS {minimumMacOS}+ · Git ·{" "}
-                  <a href="https://github.com/enoughtools/reporeach/blob/main/docs/reporeach/platform-setup.md">
+                  <a id="requirements-setup" href={setupHref}>
                     {nativeDownload
                       ? "Bundled extension · No driver install"
                       : "macFUSE kernel backend required"}

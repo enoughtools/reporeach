@@ -92,6 +92,8 @@ def manifest(args):
     if len(backends) != 1:
         raise SystemExit("Architecture packages use different filesystem backends. Rebuild before publishing.")
     backend = backends.pop()
+    setup_document = "native-fskit.md" if backend == "fskit" else "platform-setup.md"
+    setup_url = f"{identity['url']}/blob/{identity['revision']}/docs/reporeach/{setup_document}"
     if backend == "fskit":
         modules = [build.get("filesystemModule") for build in builds]
         if not all(module and module.get("embeddedProfileSha256") for module in modules) or not all(module == modules[0] for module in modules):
@@ -111,7 +113,7 @@ def manifest(args):
         "requirements": {
             "macFUSE": True, "macFUSEBackend": "kernel", "macFUSEURL": "https://macfuse.io/",
             "git": True,
-            "setupURL": "https://github.com/enoughtools/reporeach/blob/main/docs/reporeach/platform-setup.md",
+            "setupURL": setup_url,
             "appleSiliconApproval": "The kernel backend requires approval in System Settings and may require Reduced Security and user-managed kernel extensions in macOS Recovery.",
         },
         "githubCLI": {"version": "2.102.0"}, "builds": builds, "artifacts": artifacts,
@@ -120,7 +122,7 @@ def manifest(args):
         document["requirements"] = {
             "macFUSE": False, "fsKit": True, "fsKitModuleBundled": True,
             "git": True,
-            "setupURL": "https://github.com/enoughtools/reporeach/blob/main/docs/reporeach/platform-setup.md",
+            "setupURL": setup_url,
             "extensionEnablement": "Enable the bundled RepoReach FSKit extension in System Settings. Virtual mounts require macOS 26 or later.",
         }
     (args.directory / "release.json").write_text(json.dumps(document, indent=2) + "\n")

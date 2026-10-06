@@ -279,7 +279,17 @@ final class RepositoryStore: ObservableObject {
         if let url = URL(string: "x-apple.systempreferences:com.apple.LoginItems-Settings.extension"), NSWorkspace.shared.open(url) { return }
         NSWorkspace.shared.open(URL(fileURLWithPath: "/System/Applications/System Settings.app"))
     }
-    func openDependencyPage() { NSWorkspace.shared.open(URL(string: "https://github.com/enoughtools/reporeach/blob/main/docs/reporeach/platform-setup.md")!) }
+    func openDependencyPage() {
+        #if REPOREACH_NATIVE_FSKIT
+        let document = "native-fskit.md"
+        #else
+        let document = "platform-setup.md"
+        #endif
+        let revision = Bundle.main.object(forInfoDictionaryKey: "RepoReachSourceRevision") as? String ?? "codex/native-fskit"
+        if let url = URL(string: "https://github.com/enoughtools/reporeach/blob/\(revision)/docs/reporeach/\(document)") {
+            NSWorkspace.shared.open(url)
+        }
+    }
 
     func setLaunchAtLogin(_ enabled: Bool) async {
         guard !demoMode else { return }

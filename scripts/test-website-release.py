@@ -20,6 +20,9 @@ from html.parser import HTMLParser
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 SITE = ROOT / "site"
 VERSION = "9.8.7-ci-fixture"
+NATIVE_SETUP_URL = "https://github.com/enoughtools/reporeach/blob/c4dd5bfb073ab6c469b76b99e1bf2d98e548ee2c/docs/reporeach/native-fskit.md"
+LEGACY_SETUP_URL = "https://github.com/enoughtools/reporeach/blob/main/docs/reporeach/platform-setup.md"
+PREVIEW_SETUP_URL = "https://github.com/enoughtools/reporeach/blob/codex/native-fskit/docs/reporeach/native-fskit.md"
 VOID_ELEMENTS = {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr"}
 
 
@@ -85,7 +88,8 @@ def release_fixture(backend="macfuse"):
             })
     return {"product": "RepoReach", "version": VERSION, "artifacts": artifacts,
             "filesystemBackend": backend, "minimumMacOS": "13.0",
-            "minimumMountMacOS": "26.0" if backend == "fskit" else "13.0"}
+            "minimumMountMacOS": "26.0" if backend == "fskit" else "13.0",
+            "requirements": {"setupURL": NATIVE_SETUP_URL if backend == "fskit" else LEGACY_SETUP_URL}}
 
 
 def build(output, succeeds=True):
@@ -160,6 +164,9 @@ def assert_release_page(page, fixture):
     assert normalized(page.ids["download-detail"].text()) == "Developer ID signed · Not yet notarized"
     assert VERSION in normalized(page.by_class("download-title").text())
     assert page.ids["checksums"].attrs["href"] == f"/releases/{VERSION}/SHA256SUMS"
+    setup_url = fixture["requirements"]["setupURL"]
+    assert page.ids["setup-guide"].attrs["href"] == setup_url
+    assert page.ids["requirements-setup"].attrs["href"] == setup_url
     assert ">" not in page.by_class("requirements").text(), "Stray visible markup in requirements"
     requirements = normalized(page.by_class("requirements").text())
     faq = next(normalized(node.text()) for node in page.elements
@@ -206,6 +213,7 @@ def assert_preview_page(page, expected_version="Beta in development"):
     assert "Requirements will accompany the verified download" in faq
     assert "macFUSE" not in faq and "File System Extension" not in faq
     assert "disabled" in page.ids["architecture"].attrs
+    assert page.ids["setup-guide"].attrs["href"] == PREVIEW_SETUP_URL
 
 
 def interrupted(signum, frame):
@@ -230,11 +238,15 @@ def main():
                 fixture = release_fixture()
                 manifest.write_text(json.dumps(fixture) + "\n")
                 assert_release_page(build(outputs / "release"), fixture)
-                print("PASS: legacy release requirements, enabled architecture downloads and exact signing states")
+                print("PASS: legacy release requirements and matching setup URL, architecture downloads and signing states")
                 fixture = release_fixture("fskit")
                 manifest.write_text(json.dumps(fixture) + "\n")
                 assert_release_page(build(outputs / "native"), fixture)
-                print("PASS: native macOS 26 requirements, bundled extension approval and no driver installation")
+                print("PASS: native macOS 26 requirements and source-pinned native setup URL, bundled extension approval and no driver installation")
+                fixture["requirements"]["setupURL"] = LEGACY_SETUP_URL
+                manifest.write_text(json.dumps(fixture) + "\n")
+                build(outputs / "wrong-native-setup", succeeds=False)
+                print("PASS: native download linked to legacy macFUSE instructions fails the production build")
                 fixture["artifacts"] = []
                 manifest.write_text(json.dumps(fixture) + "\n")
                 assert_preview_page(build(outputs / "empty-native"), VERSION)
