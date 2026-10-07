@@ -41,6 +41,63 @@ final class ActionRouteTests: XCTestCase {
         }
         XCTAssertNil(ActionRoute.containingApplicationURL(forFinderExtensionURL: URL(string: "https://example.com/RepoReach.app/Contents/PlugIns/Finder.appex")!))
     }
+
+    func testFinderDeliveryRequiresItsOwnRegisteredApplicationCopy() {
+        let application = URL(fileURLWithPath: "/Users/example/Applications/Repo Reach.app", isDirectory: true)
+        let extensionURL = application.appendingPathComponent("Contents/PlugIns/RepoReachFinder.appex")
+        let staged = URL(fileURLWithPath: "/not-present/stage/RepoReach.app", isDirectory: true)
+        XCTAssertEqual(ActionRoute.registeredContainingApplicationURL(
+            forFinderExtensionURL: extensionURL, extensionBundleIdentifier: ActionRoute.finderExtensionBundleIdentifier,
+            registeredApplicationURLs: [staged, application]), application)
+        for copies in [[], [staged]] {
+            XCTAssertNil(ActionRoute.registeredContainingApplicationURL(
+                forFinderExtensionURL: extensionURL, extensionBundleIdentifier: ActionRoute.finderExtensionBundleIdentifier,
+                registeredApplicationURLs: copies))
+        }
+        for identifier in [nil, ActionRoute.applicationBundleIdentifier, "com.example.foreign.finder"] {
+            XCTAssertNil(ActionRoute.registeredContainingApplicationURL(
+                forFinderExtensionURL: extensionURL, extensionBundleIdentifier: identifier,
+                registeredApplicationURLs: [application]))
+        }
+    }
+
+    func testFinderDeliveryRejectsRemoteAndAmbiguousRegisteredURLs() {
+        let application = URL(fileURLWithPath: "/not-present/RepoReach.app", isDirectory: true)
+        let extensionURL = application.appendingPathComponent("Contents/PlugIns/RepoReachFinder.appex")
+        for value in ["https://example.com/not-present/RepoReach.app", "file://remote/not-present/RepoReach.app",
+                      "file:///not-present/RepoReach.app?query=yes", "file:///not-present/RepoReach.app#fragment",
+                      "file:///not-present/Other/../RepoReach.app", "file:///not-present/RepoReach.app/child"] {
+            XCTAssertNil(ActionRoute.registeredContainingApplicationURL(
+                forFinderExtensionURL: extensionURL, extensionBundleIdentifier: ActionRoute.finderExtensionBundleIdentifier,
+                registeredApplicationURLs: [URL(string: value)!]), value)
+        }
+        for value in ["file://remote/not-present/RepoReach.app/Contents/PlugIns/RepoReachFinder.appex",
+                      "file:///not-present/RepoReach.app/Contents/PlugIns/RepoReachFinder.appex?query=yes"] {
+            XCTAssertNil(ActionRoute.registeredContainingApplicationURL(
+                forFinderExtensionURL: URL(string: value)!, extensionBundleIdentifier: ActionRoute.finderExtensionBundleIdentifier,
+                registeredApplicationURLs: [application]), value)
+        }
+    }
+
+    func testFinderDeliveryDoesNotRequireParentBundleMetadata() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let application = directory.appendingPathComponent("RepoReach.app", isDirectory: true)
+        let extensionURL = application.appendingPathComponent("Contents/PlugIns/RepoReachFinder.appex", isDirectory: true)
+        let contents = extensionURL.appendingPathComponent("Contents", isDirectory: true)
+        try FileManager.default.createDirectory(at: contents, withIntermediateDirectories: true)
+        let info = try PropertyListSerialization.data(fromPropertyList: [
+            "CFBundleIdentifier": ActionRoute.finderExtensionBundleIdentifier,
+            "CFBundlePackageType": "XPC!"
+        ], format: .xml, options: 0)
+        try info.write(to: contents.appendingPathComponent("Info.plist"))
+        let ownBundle = try XCTUnwrap(Bundle(url: extensionURL))
+        XCTAssertEqual(ownBundle.bundleIdentifier, ActionRoute.finderExtensionBundleIdentifier)
+        XCTAssertNil(Bundle(url: application)?.bundleIdentifier, "The Finder sandbox cannot rely on parent Info.plist access")
+        XCTAssertEqual(ActionRoute.registeredContainingApplicationURL(
+            forFinderExtensionURL: ownBundle.bundleURL, extensionBundleIdentifier: ownBundle.bundleIdentifier,
+            registeredApplicationURLs: [application]), application)
+    }
 }
 
 final class FinderActionDispatchTests: XCTestCase {

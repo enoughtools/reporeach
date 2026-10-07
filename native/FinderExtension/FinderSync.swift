@@ -153,11 +153,11 @@ final class FinderSync: FIFinderSync {
             actionLogger.debug("Repository action rejected: action context unavailable.")
             return
         }
-        guard let applicationURL = ActionRoute.containingApplicationURL(forFinderExtensionURL: Bundle.main.bundleURL) else {
-            actionLogger.debug("Repository action rejected: enclosing app structure invalid.")
-            return
-        }
-        guard Bundle(url: applicationURL)?.bundleIdentifier == "com.enoughtools.reporeach" else {
+        let registeredApplications = NSWorkspace.shared.urlsForApplications(withBundleIdentifier: ActionRoute.applicationBundleIdentifier)
+        guard let applicationURL = ActionRoute.registeredContainingApplicationURL(
+            forFinderExtensionURL: Bundle.main.bundleURL,
+            extensionBundleIdentifier: Bundle.main.bundleIdentifier,
+            registeredApplicationURLs: registeredApplications) else {
             actionLogger.debug("Repository action rejected: enclosing app identity unavailable.")
             return
         }

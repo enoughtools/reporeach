@@ -2,6 +2,9 @@ import Foundation
 
 /// A small, explicitly validated command surface shared by the app and Finder.
 struct ActionRoute: Equatable {
+    static let applicationBundleIdentifier = "com.enoughtools.reporeach"
+    static let finderExtensionBundleIdentifier = "com.enoughtools.reporeach.finder"
+
     enum Action: String, Codable, CaseIterable {
         case keep
         case free
@@ -66,6 +69,8 @@ struct ActionRoute: Equatable {
 
     static func containingApplicationURL(forFinderExtensionURL extensionURL: URL) -> URL? {
         guard extensionURL.isFileURL, extensionURL.pathExtension == "appex",
+              extensionURL.host?.isEmpty != false, extensionURL.user == nil, extensionURL.password == nil,
+              extensionURL.port == nil, extensionURL.query == nil, extensionURL.fragment == nil,
               !extensionURL.pathComponents.contains(where: { $0 == "." || $0 == ".." }) else { return nil }
         let plugIns = extensionURL.deletingLastPathComponent()
         let contents = plugIns.deletingLastPathComponent()
@@ -73,6 +78,26 @@ struct ActionRoute: Equatable {
         guard plugIns.lastPathComponent == "PlugIns", contents.lastPathComponent == "Contents",
               application.pathExtension == "app" else { return nil }
         return application
+    }
+
+    static func registeredContainingApplicationURL(
+        forFinderExtensionURL extensionURL: URL,
+        extensionBundleIdentifier: String?,
+        registeredApplicationURLs: [URL]
+    ) -> URL? {
+        guard extensionBundleIdentifier == finderExtensionBundleIdentifier,
+              let application = containingApplicationURL(forFinderExtensionURL: extensionURL) else { return nil }
+        // Launch Services supplies the copies registered for our compiled host
+        // identifier. Read only that metadata: the Finder sandbox need not be
+        // able to open the containing app's Info.plist.
+        let registered = registeredApplicationURLs.contains { candidate in
+            candidate.isFileURL && candidate.pathExtension == "app" && candidate.host?.isEmpty != false &&
+                candidate.user == nil && candidate.password == nil && candidate.port == nil &&
+                candidate.query == nil && candidate.fragment == nil &&
+                !candidate.pathComponents.contains(where: { $0 == "." || $0 == ".." }) &&
+                candidate.standardizedFileURL.pathComponents == application.pathComponents
+        }
+        return registered ? application : nil
     }
 
     private static func isASCIIAlphanumeric(_ byte: UInt8) -> Bool {
