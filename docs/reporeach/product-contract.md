@@ -79,7 +79,10 @@ publishes through a durable handoff journal. Current-tree hydration batches
 missing selected blobs before offline cache extraction. Export binds cached
 preview identities to the frozen writable runtime before taking inventories,
 so entering an unvisited directory cannot change the view halfway through Keep.
-Former private engine storage stays
+Native enumeration retires completed directory sessions before reaching its
+bounded session limit, preserving active partial pages and reference recovery.
+Export file descriptors acquire close-on-exec atomically. Former engine storage
+stays
 as a verified rollback copy until successful Free cleanup. Free verifies local
 state and remote recovery, moves the owned checkout aside, publishes its virtual
 link, then removes verified owned copies. Startup recovery completes or rolls
@@ -94,31 +97,30 @@ metadata. Ownership receipts and journals also protect that cleanup.
 
 ## Acceptance status
 
-The installed signed `0.1.0-local.13` build uses clean executable source
-`c805d87853cc1ba3f5276c4f3d2a38a651d4a1a7`. Ordered CLI build, vet, and full Go
-tests passed, alongside 58 native UI tests and typecheck/smoke checks. Three
-mounted fixtures passed on macOS 27.0.1 ARM64: dormant-preview Keep in 3.35 seconds,
-primary in 7.39 seconds, and cold storage in 7.49 seconds. They verified
-ordinary-folder placement, dirty adoption and native Git state, Keep, app-off
-access, safe Free refusal, full clean cleanup, and reacquisition. Final complete
-cached mount inspection found no remaining RepoReach fixture volumes.
+The installed signed local15 build uses clean executable source
+`de3610c581d32bfbd89039bfdd0c5d3e1c4701c8`. Ordered CLI build, vet, and full Go
+tests passed in 8.547, 2.305, and 159.504 seconds respectively. Three mounted
+fixtures passed on macOS 27.0.1 ARM64: expanded dormant-preview Keep in
+12.26 seconds, primary in 7.96 seconds, and cold storage in 7.67 seconds. They
+verified ordinary-folder placement, dirty adoption and native Git state, Keep, app-off
+access, safe Free refusal, full clean cleanup, and reacquisition.
 
 The dormant Keep fixture started with cached file/directory attributes and
-unvisited nested content. Accepted-operation and blocked-source progress status
-each rounded to 0 ms; Keep then materialized eight unique blobs totaling
-101 bytes, with zero requests for app-off reads. This verifies the disposable
-regression.
+unvisited nested content across 160 descendant directories. Accepted-operation
+and blocked-source progress status each rounded to 0 ms. Keep materialized
+207 regular files and one symlink, representing 208 unique blobs and 4,341 bytes,
+into an ordinary checkout readable with the app stopped and zero source requests.
+This expanded disposable regression exceeds the native directory-session budget
+and verifies repeated export inventories.
+
 A bulk Git fixture also acquired 188 selected blobs in two HTTP requests and
 extracted cached contents offline without changing native Git state.
 
-In the cold fixture, preview acquisition took 311 ms and cached listing 3 ms.
-Listing left all five blobs missing with no source requests or cached content.
-A manual-source native open requiring an unknown exact size took 494 ms and
-five requests including metadata, acquiring only the selected 20-byte blob while
-leaving the other four absent and the writable engine unprepared. Its first read
-took 2 ms with zero requests. Keep verified five unique blobs totaling 107 bytes,
-and offline reads required zero requests. These loopback fixture measurements
-do not measure Finder navigation or GitHub network latency.
+The cold fixture verifies metadata-only listing, selected 20-byte read-only
+hydration without writable preparation, five unique blobs totaling 107 bytes
+through Keep, zero-request offline reads, metadata-aware Free refusal, clean
+Free, and reacquisition. These loopback fixtures do not measure Finder navigation
+or GitHub network latency.
 
 Actual Finder checks on local12 opened an ordinary root with 14 organization
 folders, a group of four repos, a 49-entry repository, and nested directories
@@ -131,7 +133,23 @@ after thumbnail downloads, nested context menus enabled Keep, Free, and Refresh.
 No conversion action was invoked on the user's repository.
 
 These observations establish traversal, action availability, and selected-thumbnail
-hydration on the tested Mac. UI capture duration is not filesystem latency, and a
+hydration on local12. Local15 Finder callbacks now use fresh selected/targeted
+URLs, recheck action eligibility, and explicitly dispatch to the containing app.
+Live Keep through the management app also completed for an existing repository,
+with an observed accepted-to-complete interval of 10.113 seconds. Its 188 blobs
+totaling 2,491,698 bytes were already cached. The result is an ordinary checkout
+with its own `.git` directory, clean native Git status, Finder's folder/kept
+presentation, and the app's local-checkout state. After normal app shutdown,
+the app and engine were absent; native Git still reported clean status and could
+read HEAD and the README blob with lazy fetching disabled. Complete cached mount
+inspections after the fixtures and app shutdown found no RepoReach volumes.
+This is a conversion/app-off observation, not network download timing.
+
+The actual Finder Keep callback reaches its handler but local15 rejects a
+containing-app identity read under the extension sandbox. Finder dispatch remains
+pending the local16 correction; use of the management app above does not qualify
+Finder execution.
+UI capture duration is not filesystem latency, and a
 real-network cold GitHub Finder benchmark remains unqualified. macOS 26 and Intel
 runtime are also unqualified. See the [mounted acceptance record](fskit-acceptance.md)
 for precise scope. Further release qualification must cover remaining recovery,

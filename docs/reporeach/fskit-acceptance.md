@@ -6,7 +6,74 @@ The current harness tests the hybrid catalogue contract: organization folders ar
 
 This is a narrow acceptance harness, not complete native release qualification. A skipped test, a successful Go compilation, and bridge tests are not mounted FSKit evidence.
 
-Current hybrid result (2026-10-06): clean source `7d17d837b5d2bfa9186abc855969cdc7e5f06e02`, with the signed and installed local build 12 app/module (`CFBundleShortVersionString=0.1.0`, `CFBundleVersion=12`), passes the combined mounted sequence on macOS 27.0.1 ARM64. Primary acceptance completes in 7.78 seconds, including creation, native permission/readlink/content checks and removal of a new writable symlink. Cold storage acceptance completes in 7.39 seconds. Evidence: `build/fskit-evidence/local12/installed-mounted-tests.log`.
+## Local15 hybrid acceptance
+
+Installed signed local build 15, with clean executable source
+`de3610c581d32bfbd89039bfdd0c5d3e1c4701c8`, passes all three actual mounted
+fixtures on macOS 27.0.1 ARM64: `TestFSKitMountedColdKeepAcceptance` in
+12.26 seconds, `TestFSKitMountedAcceptance` in 7.96 seconds, and
+`TestFSKitMountedColdStorageAcceptance` in 7.67 seconds. Ordered CLI build,
+vet, and full Go tests also pass in 8.547, 2.305, and 159.504 seconds respectively.
+Evidence: `build/fskit-evidence/local15/installed-mounted-tests.log` and
+`build/fskit-evidence/local15/go-checks.json`. These are disposable fixture results;
+the separate live conversion below does not substitute for them.
+
+The expanded dormant Keep starts with cached native file/directory attributes,
+no writable activation, and unvisited nested contents. It spans 160 descendant
+directories with 207 regular files and one symlink: 208 unique blobs totaling
+4,341 bytes. Accepted
+operation and blocked-source progress status each round to 0 ms. Keep preserves
+the tracked index and source checkout, removes active engine/preview sources,
+and publishes an ordinary checkout. After the helper stops normally, the checkout
+remains readable with its source offline and zero requests. Native Git works
+without a GitHub account or GitHub CLI invocation.
+
+This enlarges the regression beyond the native 128-directory-session budget.
+The prior implementation retained completed EOF cookie sessions until admission
+failed on scan 129, exposing repeated-inventory failure in a live Keep attempt.
+The corrected module retires the oldest completed session under pressure while
+retaining partial pages, references, and uncertain acknowledgement cleanup.
+Separate native regressions cover those ownership and recovery rules. Export
+reads also set close-on-exec atomically before concurrent Git subprocesses.
+
+Primary acceptance retains dirty/staged/untracked data, Git state, native metadata,
+ordinary placement, symlink operations, and app-off access. Cold storage retains
+selected-blob read-only acquisition without writable preparation, five-blob/
+107-byte Keep, zero-request offline reads, local-metadata Free refusal, clean
+reclamation, and reacquisition. Its initial preview takes 227 ms, cached listing
+2 ms, and prepared names-only listing 9 ms with no source requests. The unknown-size
+native open takes 487 ms and five requests, acquiring only its selected 20-byte
+blob; first read takes 2 ms with zero requests while the other four blobs remain
+absent and the writable engine remains unprepared.
+
+An authorized Keep through the management app on `enoughtools/reporeach` also
+completes, with an observed accepted-to-complete interval of 10.113 seconds.
+All 188 blobs (2,491,698 bytes) were already cached. The selected path becomes an
+ordinary checkout with an ordinary `.git` directory and clean native Git status;
+Finder identifies it as a folder kept downloaded, and the app shows a local
+checkout. After normal GUI quit, the app and engine are absent. Git status remains
+clean, and HEAD and the README blob remain readable with `GIT_NO_LAZY_FETCH=1`.
+Evidence: `build/fskit-evidence/local15/user-keep-success.json`. This qualifies
+conversion through the app and the recorded app-off Git checks; its already
+cached contents do not measure network hydration.
+
+Finder callbacks now read current official
+selected/targeted URLs, revalidate eligibility, and explicitly dispatch to the
+containing app. The live local15 Keep callback reaches its handler but rejects
+the containing-app identity read under the extension sandbox. Actual Finder
+dispatch remains pending the local16 correction; prior menu visibility and
+management-app conversion do not prove that execution works.
+
+Normal fixture shutdown is part of the passing sequences. Independent complete
+cached global mount inspections after the fixtures and after normal GUI quit
+both report no RepoReach volumes. The latter also confirms app and engine absence
+alongside the app-off checkout checks above. These
+passes do not qualify real-network cold Finder latency, macOS 26, Intel, remaining
+failure/recovery gates, or release readiness. No release was made.
+
+## Historical local12 hybrid acceptance
+
+Historical hybrid result (2026-10-06): clean source `7d17d837b5d2bfa9186abc855969cdc7e5f06e02`, with the signed and installed local build 12 app/module (`CFBundleShortVersionString=0.1.0`, `CFBundleVersion=12`), passes the combined mounted sequence on macOS 27.0.1 ARM64. Primary acceptance completes in 7.78 seconds, including creation, native permission/readlink/content checks and removal of a new writable symlink. Cold storage acceptance completes in 7.39 seconds. Evidence: `build/fskit-evidence/local12/installed-mounted-tests.log`.
 
 The cold pass records a 199 ms initial preview phase, a 2 ms cached names-only listing and a 5 ms prepared directory listing. Ordinary organization browsing creates no writable checkout or source requests. Native traversal of the nested preview directory succeeds while all five committed blobs remain missing. The native unknown-size file open takes 431 ms and makes five source requests to acquire only its selected 20-byte blob; the first read takes 2 ms and makes zero additional source requests. The repository remains virtual with no writable engine, four unselected blobs remain absent from preview content Git, metadata-preview Git remains entirely blobless, and the canonical shared cache contains exactly one blob. Git pointer activation then leaves all five main-engine Git blobs missing; directory enumeration generates no additional source requests and adds no cached blobs.
 
@@ -113,6 +180,10 @@ go test -run '^TestFSKitMountedAcceptance$' -count=1 -v -timeout=20m .
 ```
 
 The test skips unless explicitly opted in, and skips on an older macOS version. On a supported, opted-in host, missing prerequisites or a failed mount are failures, not passing evidence. It launches its own Go desktop helper against private state and uses the installed native extension for the mount.
+
+To run all three current hybrid fixtures under the same prerequisites, replace
+the `-run` value with
+`^TestFSKitMounted(Acceptance|ColdKeepAcceptance|ColdStorageAcceptance)$`.
 
 For the approved isolated experiment, add the exact validation module selection
 to the same invocation and use its absolute app path:

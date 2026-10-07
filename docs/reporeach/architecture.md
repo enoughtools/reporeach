@@ -53,6 +53,12 @@ flowchart LR
 | `internal/gitstore` | Native Git subprocesses, filtered clones, binary content streaming, verification, and remote recovery checks. |
 | `internal/snapshot`, `internal/overlay`, `internal/registry`, `internal/meta` | Persistent tree, overlay, registration, and SQLite support. |
 
+The native transport bounds directory sessions at 128. Before rejecting a new
+scan, it retires the least recently used completed EOF session; partial pages and
+uncertain reference cleanup retain their owners. Lost release acknowledgements
+remain recoverable. This prevents completed scans from exhausting admission
+during repeated export inventories without increasing the session limit.
+
 ## Host layout and ownership
 
 The state root is normally `~/Library/Application Support/RepoReach`. `engine/`
@@ -161,7 +167,9 @@ Writes are frozen and cached catalogue preview identities are bound to the
 authoritative writable runtime before the first inventory. Fingerprints are
 rechecked, and the catalogue normally detached before publication. Inventory
 change diagnostics use hashed identities to identify changed fields without
-exposing local names. A durable journal precedes exclusive publication. Catalogue
+exposing local names. Export reads open close-on-exec file descriptors atomically,
+so concurrent Git subprocesses cannot inherit them. A durable journal precedes
+exclusive publication. Catalogue
 state records the local checkout, registration is retired, and former engine
 paths move to verified rollback storage. That retained copy uses additional space
 until successful Free cleanup. Kept files remain accessible after app quit; the
@@ -196,20 +204,31 @@ metadata-only cache, and action URLs are validated by the extension, app, and
 service. Accepted actions publish running status before remote preparation;
 progress includes unique-content and byte totals, and the Finder extension
 refreshes visible child badges. Scoped process activity remains active during
-accepted repository operations and ends when work completes. See
+accepted repository operations and ends when work completes. Finder callbacks
+read fresh official selection/target URLs, recheck route eligibility, and dispatch
+explicitly to the containing app; menu visibility alone does not prove execution.
+The live local15 callback exposes a sandbox refusal of the containing-app identity
+read, so final Finder dispatch remains pending its local16 correction. See
 [Finder extension details](../../native/FinderExtension/README.md).
 
-The installed signed local13 build at executable source `c805d87` passed ordered
-Go checks, native UI validation, and all three mounted fixtures on macOS 27.0.1
-ARM64. The new dormant-preview Keep fixture verifies cached native attributes,
-unvisited nested contents, prompt accepted/running status, and ordinary app-off
-reads; primary/cold tests cover dirty state, selective reads, safe Free, and
+The installed signed local15 build at executable source `de3610c` passed ordered
+Go checks and all three mounted fixtures on macOS 27.0.1 ARM64. Expanded dormant
+Keep covers cached native attributes and unvisited contents in 160 descendant
+directories, 207 regular files and one symlink, 208 unique blobs, prompt accepted
+status, repeated inventories, and ordinary app-off reads. Primary/cold tests cover
+dirty state, selective reads, safe Free, and
 reacquisition. Actual Finder checks on local12 verified ordinary-root and nested preview
 traversal without permission badges, selected-thumbnail hydration without writable
 preparation, and public/nested context actions. The tested repository metadata
 was already cached; fixture timings and UI capture duration do not establish
 real-network cold Finder latency or release readiness. macOS 26 and Intel runtime
-remain unqualified. See
+remain unqualified. Live Keep through the local15 management app also completed
+for an existing 188-blob repository and produced an ordinary checkout with clean
+native Git status. After normal app shutdown, Git status, HEAD, and README blob
+reads still worked with lazy fetching disabled and no app, engine, or mounted
+RepoReach volume. Its contents were already cached; the observation measures
+conversion/app-off access, not network downloads. Live Finder dispatch remains
+unqualified. See
 [the mounted record](fskit-acceptance.md),
 [the user guide](user-guide.md), and
 [Contributing](../../CONTRIBUTING.md) for visible behavior and engine invariants.
