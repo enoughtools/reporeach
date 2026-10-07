@@ -12,10 +12,11 @@ Repositories/
     shared-project/
 ```
 
-This guide describes the signed local12 development build. Mounted storage and
-actual Finder checks passed on macOS 27.0.1 ARM64, including nested traversal,
-selected-file previews without writable preparation, and context-menu actions.
-Real-network cold Finder latency and release readiness remain unqualified; see the
+This guide describes the signed local13 development build. Its three mounted
+storage fixtures and native UI checks passed on macOS 27.0.1 ARM64. Prior local12
+Finder checks verified nested traversal, selective previews, and context actions.
+Real-network cold
+Finder latency and release readiness remain unqualified; see the
 [acceptance record](fskit-acceptance.md). Historical beta.3 downloads retain their
 macFUSE installation, separate-clone adoption, and cache-based Keep behavior.
 Development changes do not alter those releases or establish release readiness.
@@ -126,6 +127,12 @@ Keep preserves staged, unstaged, and untracked work in the virtual view without
 resetting or publishing it. It copies the existing Git directory, index, and refs,
 and verifies file data and supported local metadata. A verified private rollback
 copy remains until successful Free cleanup, so conversion uses additional space.
+
+Accepted actions appear as active while preparation runs. The app shows a progress
+indicator and file/byte totals when known, and Finder refreshes badges for visible
+children. Progress counts unique file contents, so duplicate files can share one
+download. Keep batches missing downloads, and accepted operations continue in the
+background while the management window is closed.
 
 **Keep covers the current checkout, not all offline history.** Uncached historical
 blobs may still need the remote. Submodules and filters such as Git LFS are refused;

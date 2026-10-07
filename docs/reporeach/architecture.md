@@ -146,14 +146,22 @@ push.
 ## Keep and Free handoffs
 
 Keep hydrates and verifies the current committed tree, refusing submodules and
-checkout filters such as Git LFS. It stages current merged files and the complete
+checkout filters such as Git LFS. Missing selected blob identities are fetched in
+bounded batches before binary-safe cache extraction, avoiding a lazy remote fetch
+for every file. The bulk Git fixture acquired 188 selected blobs in two HTTP
+requests and extracted cached data offline while preserving native Git state;
+this is fixture evidence, not a network-performance guarantee.
+It stages current merged files and the complete
 existing private Git directory as a standalone checkout. Binary data, symlinks,
 modes, timestamps, and supported extended attributes are copied and verified;
 unsupported metadata causes refusal. Git refs and index are copied without
 checkout or reset, with the worktree path changed to the ordinary destination.
 
-Writes are frozen, fingerprints rechecked, and the catalogue normally detached
-before publication. A durable journal precedes exclusive publication. Catalogue
+Writes are frozen and cached catalogue preview identities are bound to the
+authoritative writable runtime before the first inventory. Fingerprints are
+rechecked, and the catalogue normally detached before publication. Inventory
+change diagnostics use hashed identities to identify changed fields without
+exposing local names. A durable journal precedes exclusive publication. Catalogue
 state records the local checkout, registration is retired, and former engine
 paths move to verified rollback storage. That retained copy uses additional space
 until successful Free cleanup. Kept files remain accessible after app quit; the
@@ -185,13 +193,18 @@ Closing the window leaves the app and service running without a menu-bar item.
 Quitting stops the owned service. Virtual links require reopening RepoReach;
 adopted and kept folders stay independent. Finder status is an atomic
 metadata-only cache, and action URLs are validated by the extension, app, and
-service. See [Finder extension details](../../native/FinderExtension/README.md).
+service. Accepted actions publish running status before remote preparation;
+progress includes unique-content and byte totals, and the Finder extension
+refreshes visible child badges. Scoped process activity remains active during
+accepted repository operations and ends when work completes. See
+[Finder extension details](../../native/FinderExtension/README.md).
 
-The installed signed local12 build at clean executable source `7d17d8` passed
-ordered Go validation and both mounted fixtures on macOS 27.0.1 ARM64. This
-includes read-only selected-blob acquisition without writable activation,
-dirty Git state, Keep, app-off reads, safe Free refusal, full clean reclamation,
-and reacquisition. Actual Finder checks verified ordinary-root and nested preview
+The installed signed local13 build at executable source `c805d87` passed ordered
+Go checks, native UI validation, and all three mounted fixtures on macOS 27.0.1
+ARM64. The new dormant-preview Keep fixture verifies cached native attributes,
+unvisited nested contents, prompt accepted/running status, and ordinary app-off
+reads; primary/cold tests cover dirty state, selective reads, safe Free, and
+reacquisition. Actual Finder checks on local12 verified ordinary-root and nested preview
 traversal without permission badges, selected-thumbnail hydration without writable
 preparation, and public/nested context actions. The tested repository metadata
 was already cached; fixture timings and UI capture duration do not establish
