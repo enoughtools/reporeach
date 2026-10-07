@@ -135,16 +135,10 @@ func TestNativeFSKitUnmountSettlementRechecksIdentityAfterWaiting(t *testing.T) 
 				return mounts, nil
 			}
 			err := mounted.Unmount()
-			wantDrains := 0
-			if name == "old gone replacement at root" {
-				wantDrains = 1
-				if err != nil {
-					t.Fatalf("confirmed old-session detach did not drain: %v", err)
-				}
-			} else if !errors.Is(err, errFSKitMountOwnership) {
+			if !errors.Is(err, errFSKitMountOwnership) {
 				t.Fatalf("changed or unavailable inventory error = %v; want ownership refusal", err)
 			}
-			if commands.Load() != 1 || f.bridge.closeCount() != wantDrains {
+			if commands.Load() != 1 || f.bridge.closeCount() != 0 {
 				t.Fatalf("commands=%d drains=%d; a changed inventory must prevent another unmount", commands.Load(), f.bridge.closeCount())
 			}
 		})

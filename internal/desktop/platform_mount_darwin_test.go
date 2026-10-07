@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -107,6 +108,15 @@ func newFakeFSKitMount(t *testing.T) *fakeFSKitMount {
 			f.mu.Lock()
 			defer f.mu.Unlock()
 			return append([]fsKitMountIdentity(nil), f.mounts...), f.inspectErr
+		},
+		fsids: func() ([][2]int32, error) {
+			f.mu.Lock()
+			defer f.mu.Unlock()
+			var ids [][2]int32
+			for _, mounted := range f.mounts {
+				ids = append(ids, mounted.fsid)
+			}
+			return ids, f.inspectErr
 		},
 		poll: time.Millisecond, timeout: 35 * time.Millisecond, verifyDelay: 4 * time.Millisecond,
 	}
@@ -614,6 +624,100 @@ func TestNativeFSKitJoinBridgeWakeupCannotConfirmDetachment(t *testing.T) {
 	}
 }
 
+func TestNativeFSKitDefinitivePresenceRetainsHiddenSession(t *testing.T) {
+	for _, name := range []string{"captured FSID retained", "unknown FSID retained", "direct inventory unavailable"} {
+		t.Run(name, func(t *testing.T) {
+			f := newFakeFSKitMount(t)
+			m := f.mount(t)
+			original := f.ownIdentity().fsid
+			f.setMounts() // getfsstat omits a volume during normal VFS_SYNC.
+			m.ops.fsids = func() ([][2]int32, error) {
+				switch name {
+				case "captured FSID retained":
+					return [][2]int32{original}, nil
+				case "unknown FSID retained":
+					return [][2]int32{{900, 901}}, nil
+				default:
+					return nil, errors.New("fixture: direct inventory unavailable")
+				}
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 12*time.Millisecond)
+			defer cancel()
+			if err := m.Join(ctx); !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("hidden or unknown mount lost its bridge: %v", err)
+			}
+			if err := m.Unmount(); !errors.Is(err, errFSKitMountOwnership) {
+				t.Fatalf("cached absence authorized cleanup or a path unmount: %v", err)
+			}
+			if f.bridge.closeCount() != 0 || f.commandCount() != 1 {
+				t.Fatalf("uncertainty released state: commands=%d drains=%d", f.commandCount(), f.bridge.closeCount())
+			}
+			m.ops.fsids = func() ([][2]int32, error) { return nil, nil }
+			if err := m.Unmount(); err != nil || f.bridge.closeCount() != 1 {
+				t.Fatalf("definitive detached retry did not drain: %v", err)
+			}
+		})
+	}
+}
+
+func TestNativeFSKitJoinRetainsBridgeDuringOwnNormalUnmount(t *testing.T) {
+	f := newFakeFSKitMount(t)
+	m := f.mount(t)
+	m.ops.timeout = time.Second
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var synchronizing atomic.Bool
+	originalFSIDs := m.ops.fsids
+	m.ops.fsids = func() ([][2]int32, error) {
+		if synchronizing.Load() {
+			return [][2]int32{f.ownIdentity().fsid}, nil
+		}
+		return originalFSIDs()
+	}
+	f.command = func(ctx context.Context, program string, _ ...string) error {
+		if program != "/sbin/umount" {
+			t.Errorf("unexpected command %s", program)
+		}
+		synchronizing.Store(true)
+		f.setMounts()
+		close(entered)
+		select {
+		case <-release:
+			synchronizing.Store(false)
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	unmounted := make(chan error, 1)
+	go func() { unmounted <- m.Unmount() }()
+	<-entered
+	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Millisecond)
+	defer cancel()
+	if err := m.Join(ctx); !errors.Is(err, context.DeadlineExceeded) || f.bridge.closeCount() != 0 {
+		t.Fatalf("observer released a synchronizing bridge: err=%v drains=%d", err, f.bridge.closeCount())
+	}
+	close(release)
+	if err := <-unmounted; err != nil || f.bridge.closeCount() != 1 {
+		t.Fatalf("normal unmount failed after definitive detachment: err=%v drains=%d", err, f.bridge.closeCount())
+	}
+}
+
+func TestNativeFSKitUncapturedAttachmentRequiresCompleteDirectInventory(t *testing.T) {
+	f := newFakeFSKitMount(t)
+	f.command = func(context.Context, string, ...string) error { return nil }
+	f.ops.fsids = func() ([][2]int32, error) { return [][2]int32{{900, 901}}, nil }
+	mounted, err := f.service.mountNativeFSKit(context.Background(), f.root, nil, f.ops)
+	if mounted == nil || !errors.Is(err, errFSKitMountOwnership) || f.bridge.closeCount() != 0 {
+		t.Fatalf("uncaptured hidden attachment lost its owner: mounted=%v err=%v drains=%d", mounted, err, f.bridge.closeCount())
+	}
+	m := mounted.(*nativeFSKitMount)
+	m.ops.fsids = func() ([][2]int32, error) { return nil, nil }
+	if err := m.Unmount(); err != nil || f.bridge.closeCount() != 1 {
+		t.Fatalf("confirmed uncaptured absence failed cleanup: err=%v drains=%d", err, f.bridge.closeCount())
+	}
+}
+
 func TestNativeFSKitCommandSuccessRequiresActualAttachment(t *testing.T) {
 	f := newFakeFSKitMount(t)
 	f.command = func(context.Context, string, ...string) error { return nil }
@@ -652,10 +756,10 @@ func TestNativeFSKitUnmountNeverTargetsObservedReplacement(t *testing.T) {
 		replacement.fsid = [2]int32{300, 400}
 		replacement.source = "/other/source"
 		f.setMounts(replacement)
-		if err := m.Unmount(); err != nil {
-			t.Fatal(err)
+		if err := m.Unmount(); !errors.Is(err, errFSKitMountOwnership) {
+			t.Fatalf("a replacement at the captured root must retain the uncertain session: %v", err)
 		}
-		if f.commandCount() != 1 || f.bridge.closeCount() != 1 {
+		if f.commandCount() != 1 || f.bridge.closeCount() != 0 {
 			t.Fatalf("commands=%d drains=%d", f.commandCount(), f.bridge.closeCount())
 		}
 	})

@@ -323,7 +323,7 @@ esac
 	cancel()
 	awaitGitHub(t, func() bool {
 		status = client.AuthStatus(context.Background())
-		return status.DeviceCode != ""
+		return status.DeviceCode != "" && status.AuthorizationURL != ""
 	})
 	if status.DeviceCode != "AB12-CD34" || status.AuthorizationURL != "https://github.com/login/device" || !status.Pending {
 		t.Fatalf("unexpected authorization status: %+v", status)

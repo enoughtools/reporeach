@@ -54,6 +54,7 @@ type Service struct {
 	pins                    map[string]string
 	closing                 bool
 	quitPrepared            bool
+	quitReady               chan struct{}
 	closed                  bool
 	closeMu                 sync.Mutex
 	maintenance             bool
@@ -65,6 +66,8 @@ type Service struct {
 	catalog                *catalogfs.FileSystem
 	catalogMetadata        *overlay.Store
 	mounted                fusefs.MountedFS
+	mountRecoveryAvailable bool
+	recoverMountCatalogue  func(context.Context) error
 	dependencyReady        func() bool
 	mountCatalogue         func(context.Context, string, *catalogfs.FileSystem) (fusefs.MountedFS, error)
 	closeCatalogueMetadata func(*overlay.Store) error
@@ -84,6 +87,9 @@ type Service struct {
 }
 
 func New(ctx context.Context, opts Options) (*Service, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if !filepath.IsAbs(opts.StateDir) {
 		return nil, errors.New("state directory must be absolute")
 	}
@@ -133,7 +139,18 @@ func New(ctx context.Context, opts Options) (*Service, error) {
 		}
 		cachedVirtualRoot = filepath.Join(canonicalStateDir, "native-catalogue", "volume")
 	}
-	engine, err := daemon.New(ctx, filepath.Join(opts.StateDir, "engine"), opts.Logger)
+	// Cancellation requests a normal shutdown once construction is complete.
+	// It must not independently tear down a bridge still serving open files.
+	serviceCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
+	stopStartupCancel := context.AfterFunc(ctx, cancel)
+	constructed := false
+	defer func() {
+		stopStartupCancel()
+		if !constructed {
+			cancel()
+		}
+	}()
+	engine, err := daemon.New(serviceCtx, filepath.Join(opts.StateDir, "engine"), opts.Logger)
 	if err != nil {
 		return nil, err
 	}
@@ -148,16 +165,17 @@ func New(ctx context.Context, opts Options) (*Service, error) {
 		return nil, fmt.Errorf("recover repository storage: %w", err)
 	}
 	engine.SetMountRoot(state.MountRoot)
-	serviceCtx, cancel := context.WithCancel(ctx)
 	s := &Service{
 		ctx: serviceCtx, cancel: cancel, opts: opts, logger: opts.Logger,
 		github: NewGitHub(opts.GHPath), engine: engine, state: state,
 		ops: []Operation{}, cancels: map[string]context.CancelFunc{},
 		locks: map[string]chan struct{}{}, pins: map[string]string{},
+		quitReady:       make(chan struct{}),
 		dependencyReady: platformDependencyReady, quiescentCatalogue: runtime.GOOS == "darwin",
 		hybridCatalogue: runtime.GOOS == "darwin", cachedVirtualRoot: cachedVirtualRoot,
 	}
 	s.mountCatalogue = s.platformMountCatalogue
+	s.recoverMountCatalogue = s.platformRecoverMountCatalogue
 	s.closeCatalogueMetadata = (*overlay.Store).Close
 	if err := s.recoverPreviewContentEviction(ctx); err != nil {
 		_ = engine.Close()
@@ -244,6 +262,14 @@ func New(ctx context.Context, opts Options) (*Service, error) {
 			return nil, err
 		}
 	}
+	// Stop forwarding startup cancellation before committing the independent
+	// lifetime. A cancellation that already arrived still rejects startup.
+	stopStartupCancel()
+	if err := ctx.Err(); err != nil {
+		_ = s.Close()
+		return nil, err
+	}
+	constructed = true
 	return s, nil
 }
 
@@ -329,8 +355,8 @@ func (s *Service) Status() Status {
 		virtualRoot = s.cachedVirtualRoot
 	}
 	return Status{Version: Version, MountRoot: s.state.MountRoot,
-		VirtualRoot: virtualRoot,
-		Mounted:     s.mounted != nil, DependencyReady: s.dependencyReady(),
+		VirtualRoot: virtualRoot, MountRecoveryAvailable: s.mountRecoveryAvailable,
+		Mounted: s.mounted != nil, DependencyReady: s.dependencyReady(),
 		Account: account, Repositories: repos, Operations: operations,
 		Organizations: s.organizationsLocked(), Message: strings.TrimSpace(s.message + "\n" + s.retainedCheckoutMessage)}
 }
@@ -456,11 +482,16 @@ func (s *Service) Mount(ctx context.Context) error {
 	s.lifecycle.Lock()
 	defer s.lifecycle.Unlock()
 	if err := s.mountLocked(ctx); err != nil {
+		available := s.platformMountRecoveryAvailable()
+		s.mu.Lock()
+		s.mountRecoveryAvailable = available
+		s.mu.Unlock()
 		return err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.state.MountDesired = true
+	s.mountRecoveryAvailable = false
 	s.message = ""
 	return s.persistLocked()
 }
@@ -481,6 +512,9 @@ func (s *Service) mountLocked(ctx context.Context) error {
 	}
 	root, entries := s.state.MountRoot, s.entriesLocked()
 	s.mu.Unlock()
+	if err := s.platformPreflightMountRecovery(); err != nil {
+		return err
+	}
 	if !s.dependencyReady() {
 		return errors.New(platformDependencyMessage())
 	}
@@ -631,7 +665,10 @@ func (s *Service) PrepareQuit(ctx context.Context) error {
 	// lifecycle remains held through the terminal claim. A control request
 	// cannot remount between successful preparation and helper termination.
 	s.mu.Lock()
-	s.quitPrepared = true
+	if !s.quitPrepared {
+		s.quitPrepared = true
+		close(s.quitReady)
+	}
 	s.mu.Unlock()
 	return nil
 }

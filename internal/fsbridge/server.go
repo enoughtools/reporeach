@@ -31,6 +31,8 @@ type Server struct {
 	descriptorPath string
 	socketInfo     os.FileInfo
 	descriptorInfo os.FileInfo
+	sourceInfo     os.FileInfo
+	socketDirInfo  os.FileInfo
 	lease          *os.File
 	http           *http.Server
 	handler        *Handler
@@ -151,6 +153,12 @@ func start(ctx context.Context, sourceDir, socketDir, socketName string, filesys
 		cleanup()
 		return nil, err
 	}
+	privateSocketInfo, err := os.Lstat(socket)
+	if err != nil || !os.SameFile(privateSocketInfo, socketInfo) {
+		cleanup()
+		return nil, errors.New("filesystem bridge socket changed while securing it")
+	}
+	socketInfo = privateSocketInfo
 	if err := ctx.Err(); err != nil {
 		cleanup()
 		return nil, err
@@ -161,7 +169,7 @@ func start(ctx context.Context, sourceDir, socketDir, socketName string, filesys
 		cleanup()
 		return nil, err
 	}
-	server := &Server{directory: sourceDir, socket: socket, descriptorPath: descriptorPath, socketInfo: socketInfo, descriptorInfo: descriptorInfo, lease: lease, handler: handler, done: make(chan struct{})}
+	server := &Server{directory: sourceDir, socket: socket, descriptorPath: descriptorPath, socketInfo: socketInfo, descriptorInfo: descriptorInfo, sourceInfo: sourceInfo, socketDirInfo: socketDirectoryInfo, lease: lease, handler: handler, done: make(chan struct{})}
 	lease = nil
 	server.http = &http.Server{Handler: handler, ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 2 * time.Minute, IdleTimeout: 2 * time.Minute, MaxHeaderBytes: 16 << 10}
 	go func() {

@@ -20,9 +20,11 @@ import (
 
 const requestBodyLimit = 1 << 20
 
-// Serve owns one state directory and private socket until ctx is canceled.
+// Serve owns one state directory and private socket until normal detachment.
+// Cancellation requests shutdown; a busy filesystem keeps its owner alive until
+// the user closes its files and successfully retries prepare-quit.
 // HTTP is only a local framing protocol: no TCP listener is opened.
-func Serve(ctx context.Context, opts Options) (retErr error) {
+func Serve(ctx context.Context, opts Options) error {
 	if !filepath.IsAbs(opts.StateDir) || !filepath.IsAbs(opts.Socket) {
 		return errors.New("state directory and socket paths must be absolute")
 	}
@@ -73,39 +75,68 @@ func Serve(ctx context.Context, opts Options) (retErr error) {
 	if err != nil {
 		return err
 	}
-	defer func() { retErr = errors.Join(retErr, service.Close()) }()
-	service.Restore()
+	if ctx.Err() == nil {
+		service.Restore()
+	}
+	return serveControlService(ctx, listener, service)
+}
+
+func serveControlService(ctx context.Context, listener net.Listener, service *Service) error {
 	server := &http.Server{
 		Handler: service.Handler(), ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout: 10 * time.Second, WriteTimeout: 6 * time.Minute,
 		IdleTimeout: 30 * time.Second, MaxHeaderBytes: 16 << 10,
-		BaseContext: func(net.Listener) context.Context { return ctx },
+		BaseContext: func(net.Listener) context.Context { return service.ctx },
 	}
-	stop := make(chan struct{})
-	shutdownDone := make(chan struct{})
-	defer close(stop)
+	served := make(chan error, 1)
 	go func() {
-		defer close(shutdownDone)
-		select {
-		case <-ctx.Done():
-			shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			defer cancel()
-			if err := server.Shutdown(shutdownCtx); err != nil {
-				_ = server.Close()
-			}
-		case <-stop:
-		}
+		served <- server.Serve(listener)
 	}()
-	err = server.Serve(listener)
-	if ctx.Err() != nil {
-		// Drain handlers before closing the engine they use. Shutdown is bounded
-		// and closes active transports if a handler cannot finish in time.
-		<-shutdownDone
+	var serveErr error
+	serverStopped := false
+	select {
+	case <-ctx.Done():
+	case <-service.quitReady:
+	case serveErr = <-served:
+		serverStopped = true
 	}
-	if errors.Is(err, http.ErrServerClosed) {
-		return nil
+	// Do not cancel the service, bridge, or request contexts before detachment.
+	// A signal must follow the same normal-unmount gate as the app's Quit action.
+	quitCtx, cancelQuit := context.WithTimeout(context.Background(), 45*time.Second)
+	quitErr := service.PrepareQuit(quitCtx)
+	cancelQuit()
+	if quitErr != nil {
+		service.logger.Warn("EnoughRepos is still running because its repository folder could not be detached; close open files and retry Quit", "error", safeError(quitErr))
+		if !serverStopped {
+			select {
+			case <-service.quitReady:
+			case serveErr = <-served:
+				serverStopped = true
+			}
+		}
+		if serverStopped {
+			// A fatal listener failure already closed the control transport. Keep
+			// the live filesystem owner, rather than turning it into an orphan.
+			service.logger.Error("The local control service is unavailable; the filesystem owner has been retained", "error", safeError(serveErr))
+		}
+		// One explicit successful preparation releases this wait. In
+		// particular, the already-canceled signal context is never polled.
+		<-service.quitReady
 	}
-	return err
+	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancelShutdown()
+	if err := server.Shutdown(shutdownCtx); err != nil {
+		_ = server.Close()
+	}
+	if !serverStopped {
+		serveErr = <-served
+	}
+	if errors.Is(serveErr, http.ErrServerClosed) {
+		serveErr = nil
+	}
+	// Successful preparation blocked remounts. Normal Shutdown drains handlers;
+	// the bounded fallback closes active transports before disposing stores.
+	return errors.Join(serveErr, service.Close())
 }
 
 func (s *Service) Handler() http.Handler {
@@ -173,6 +204,9 @@ func (s *Service) Handler() http.Handler {
 		case "POST /v1/mount":
 			err = s.Mount(ctx)
 			response = s.Status()
+		case "POST /v1/mount/recover":
+			err = s.RecoverMount(ctx)
+			response = s.Status()
 		case "POST /v1/unmount":
 			err = s.Unmount(ctx)
 			response = s.Status()
@@ -198,6 +232,11 @@ func (s *Service) Handler() http.Handler {
 			return
 		}
 		if err != nil {
+			if r.Method == "POST" && r.URL.Path == "/v1/mount/recover" {
+				w.WriteHeader(http.StatusBadRequest)
+				_ = json.NewEncoder(w).Encode(map[string]any{"error": safeError(err), "recoveryError": true})
+				return
+			}
 			jsonError(w, http.StatusBadRequest, err)
 			return
 		}

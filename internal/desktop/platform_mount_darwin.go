@@ -55,11 +55,13 @@ type fsKitMountOperations struct {
 	command            func(context.Context, string, ...string) error
 	rootFSID           func(string) ([2]int32, error)
 	mounts             func() ([]fsKitMountIdentity, error)
+	fsids              func() ([][2]int32, error)
 	poll               time.Duration
 	timeout            time.Duration
 	verifyDelay        time.Duration
 	unmountRetryWindow time.Duration
 	verifyRoot         func(string, *nativeMountRootReceipt) error
+	recordSession      func(fsKitMountIdentity, platformBridge, *nativeMountRootReceipt) (func() error, error)
 	hidden             bool
 }
 
@@ -80,6 +82,7 @@ func nativeFSKitOperations(logger *slog.Logger) fsKitMountOperations {
 			return stat.Fsid.Val, nil
 		},
 		mounts: cachedDarwinMounts,
+		fsids:  nativeMountFSIDs,
 		poll:   500 * time.Millisecond, timeout: fsKitMountTimeout,
 		verifyDelay:        2 * time.Second,
 		unmountRetryWindow: fsKitUnmountRetryWindow,
@@ -215,6 +218,7 @@ func (s *Service) platformMountCatalogue(ctx context.Context, root string, fs *c
 	}
 	ops := nativeFSKitOperations(s.logger)
 	ops.hidden = true
+	ops.recordSession = s.recordNativeMountSession
 	return s.mountNativeFSKit(ctx, privateRoot, fs, ops)
 }
 
@@ -295,6 +299,7 @@ func (s *Service) mountNativeFSKit(ctx context.Context, root string, fs *catalog
 		arguments = append(arguments, "-o", "nobrowse")
 	}
 	arguments = append(arguments, mounted.source, canonicalRoot)
+	mounted.mountDispatched = true
 	commandErr := ops.command(commandCtx, "/sbin/mount", arguments...)
 	mounted.pendingAttachment = commandCtx.Err() != nil || errors.Is(commandErr, context.Canceled) || errors.Is(commandErr, context.DeadlineExceeded)
 	cancel()
@@ -325,6 +330,13 @@ func (s *Service) mountNativeFSKit(ctx context.Context, root string, fs *catalog
 					// history must never orphan a kernel mount or its bridge.
 					return mounted, errors.New("the repository folder attached, but its mount history could not be saved; retry unmounting in EnoughRepos")
 				}
+				if ops.recordSession != nil {
+					retire, err := ops.recordSession(identity, bridge, preparedRoot)
+					if err != nil {
+						return mounted, errors.New("the repository folder attached, but its recovery history could not be saved; keep EnoughRepos running and retry unmounting")
+					}
+					mounted.retireSession = retire
+				}
 				return mounted, nil
 			}
 			return mounted, errFSKitMountOwnership
@@ -335,6 +347,10 @@ func (s *Service) mountNativeFSKit(ctx context.Context, root string, fs *catalog
 			return mounted, errFSKitMountOwnership
 		}
 		if !waitMountPoll(verifyCtx, ops.poll) {
+			absent, err := mounted.sessionAbsent(mounts)
+			if err != nil || !absent {
+				return mounted, errFSKitMountOwnership
+			}
 			if drainErr := mounted.drainWithTimeout(); drainErr != nil {
 				return mounted, drainErr
 			}
@@ -372,6 +388,7 @@ type nativeFSKitMount struct {
 	identity           fsKitMountIdentity
 	verified           bool
 	pendingAttachment  bool
+	mountDispatched    bool
 	bridge             platformBridge
 	ops                fsKitMountOperations
 	mu                 sync.Mutex // Protects lifecycle state only; never held across callbacks.
@@ -379,6 +396,64 @@ type nativeFSKitMount struct {
 	explicitlyDetached bool
 	drainGate          chan struct{}
 	unmountGate        chan struct{}
+	unmounting         bool
+	retireSession      func() error
+}
+
+// Cached getfsstat inventory omits mounts while normal unmount synchronizes
+// them. The direct kernel FSID list retains them until VFS_UNMOUNT succeeds.
+// An FSID not represented in cached inventory may be a hidden moved/replaced
+// resource, so uncertainty anywhere in the paired inventories retains state.
+func fsKitSessionAbsent(mounts []fsKitMountIdentity, fsids [][2]int32, identity fsKitMountIdentity, root, source string) bool {
+	for _, mounted := range mounts {
+		if mounted.fsid == identity.fsid || mounted.root == root || mountSourceMatches(mounted.source, source) {
+			return false
+		}
+	}
+	for _, fsid := range fsids {
+		if fsid == identity.fsid {
+			return false
+		}
+	}
+	return fsKitInventoryComplete(mounts, fsids)
+}
+
+func fsKitInventoryComplete(mounts []fsKitMountIdentity, fsids [][2]int32) bool {
+	for _, fsid := range fsids {
+		known := false
+		for _, mounted := range mounts {
+			if mounted.fsid == fsid {
+				known = true
+				break
+			}
+		}
+		if !known {
+			return false
+		}
+	}
+	return true
+}
+
+func (m *nativeFSKitMount) sessionAbsent(mounts []fsKitMountIdentity) (bool, error) {
+	if m.sessionPresent(mounts) {
+		return false, nil
+	}
+	identity, verified := m.verifiedIdentity()
+	if !verified && identity.fsid == ([2]int32{}) {
+		// No kernel attachment was captured after a completed mount command.
+		// Canceled/pending attachment remains present in sessionPresent.
+		if !m.mountDispatched {
+			return true, nil
+		}
+	}
+	if m.ops.fsids == nil {
+		return false, errFSKitMountOwnership
+	}
+	fsids, err := m.ops.fsids()
+	if err != nil {
+		return false, errFSKitMountOwnership
+	}
+	return fsKitSessionAbsent(mounts, fsids, identity, m.root, m.source), nil
 }
 
 // sessionPresent checks every mount-table entry: a moved volume must remain
@@ -453,6 +528,11 @@ func (m *nativeFSKitMount) drain(ctx context.Context) error {
 	if err := m.bridge.CloseDrain(ctx); err != nil {
 		return errors.New("the File System Extension connection is still draining; keep EnoughRepos running and retry")
 	}
+	if m.retireSession != nil {
+		if err := m.retireSession(); err != nil {
+			return errors.New("the repository folder detached, but its recovery history could not be retired; keep EnoughRepos running and retry")
+		}
+	}
 	m.mu.Lock()
 	m.drained = true
 	m.mu.Unlock()
@@ -475,6 +555,37 @@ func (m *nativeFSKitMount) finishUnmount(ctx context.Context) error {
 	return nil
 }
 
+func (m *nativeFSKitMount) finishConfirmedUnmount(ctx context.Context) error {
+	if !waitMountPoll(ctx, m.ops.poll) {
+		return ctx.Err()
+	}
+	mounts, err := m.ops.mounts()
+	if err != nil {
+		return errFSKitMountOwnership
+	}
+	absent, err := m.sessionAbsent(mounts)
+	if err != nil || !absent {
+		return errFSKitMountOwnership
+	}
+	return m.finishUnmount(ctx)
+}
+
+func (m *nativeFSKitMount) verifyPresent(mounts []fsKitMountIdentity, identity fsKitMountIdentity) error {
+	if m.ops.fsids == nil {
+		return errFSKitMountOwnership
+	}
+	fsids, err := m.ops.fsids()
+	if err != nil || !fsKitInventoryComplete(mounts, fsids) {
+		return errFSKitMountOwnership
+	}
+	for _, fsid := range fsids {
+		if fsid == identity.fsid {
+			return nil
+		}
+	}
+	return errFSKitMountOwnership
+}
+
 func (m *nativeFSKitMount) Unmount() error {
 	ctx, cancel := context.WithTimeout(context.Background(), m.ops.timeout)
 	defer cancel()
@@ -494,6 +605,10 @@ func (m *nativeFSKitMount) unmount(ctx context.Context) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+	m.mu.Lock()
+	m.unmounting = true
+	m.mu.Unlock()
+	defer func() { m.mu.Lock(); m.unmounting = false; m.mu.Unlock() }()
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -501,25 +616,39 @@ func (m *nativeFSKitMount) unmount(ctx context.Context) error {
 	if err != nil {
 		return errFSKitMountOwnership
 	}
-	if !m.sessionPresent(mounts) {
-		return m.finishUnmount(ctx)
+	absent, absentErr := m.sessionAbsent(mounts)
+	if absentErr != nil {
+		return absentErr
+	}
+	if absent {
+		return m.finishConfirmedUnmount(ctx)
 	}
 	current, exists := mountAtRoot(mounts, m.root)
 	identity, verified := m.verifiedIdentity()
 	if !verified || !exists || current != identity {
 		return errFSKitMountOwnership
 	}
+	if err := m.verifyPresent(mounts, identity); err != nil {
+		return err
+	}
 	inspect := func() (bool, error) {
 		mounts, err := m.ops.mounts()
 		if err != nil {
 			return false, errFSKitMountOwnership
 		}
-		if !m.sessionPresent(mounts) {
+		absent, err := m.sessionAbsent(mounts)
+		if err != nil {
+			return false, err
+		}
+		if absent {
 			return true, nil
 		}
 		current, exists := mountAtRoot(mounts, m.root)
 		if !exists || current != identity {
 			return false, errFSKitMountOwnership
+		}
+		if err := m.verifyPresent(mounts, identity); err != nil {
+			return false, err
 		}
 		return false, nil
 	}
@@ -544,7 +673,7 @@ func (m *nativeFSKitMount) unmount(ctx context.Context) error {
 			return err
 		}
 		if detached {
-			return m.finishUnmount(ctx)
+			return m.finishConfirmedUnmount(ctx)
 		}
 		if err := ctx.Err(); err != nil {
 			return err
@@ -581,7 +710,7 @@ func (m *nativeFSKitMount) unmount(ctx context.Context) error {
 			return err
 		}
 		if detached {
-			return m.finishUnmount(ctx)
+			return m.finishConfirmedUnmount(ctx)
 		}
 		if retryCtx.Err() != nil {
 			return stillMounted()
@@ -598,8 +727,14 @@ func (m *nativeFSKitMount) Join(ctx context.Context) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
+		m.mu.Lock()
+		unmounting := m.unmounting
+		m.mu.Unlock()
 		mounts, err := m.ops.mounts()
-		absent := err == nil && !m.sessionPresent(mounts)
+		absent := false
+		if err == nil && !unmounting {
+			absent, err = m.sessionAbsent(mounts)
+		}
 		if absent && absenceObserved {
 			if bridgeErr == nil {
 				bridgeErr = m.bridge.Err()

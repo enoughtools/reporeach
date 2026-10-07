@@ -212,16 +212,25 @@ application identifier and opens that app explicitly. It does not read the
 containing app's bundle identity across the sandbox boundary. See
 [Finder extension details](../../native/FinderExtension/README.md).
 
-**Recover Virtual Folders** handles an ownerless stale native session only when a
+**Recover Virtual Folders** detaches an ownerless stale native session only when a
 private durable same-boot receipt proves its exact root, source, filesystem type,
 owner UID, FSID, and backing-root identity. Under the original source lease, the
-service rechecks ownership, requests one normal unmount, and independently
-confirms absence before cleaning only receipted stale bridge files and creating a
-fresh session. Busy access or uncertain state retains recovery records and data;
-users can close applications and Finder windows using those folders, then retry.
-Legacy sessions without
-that ownership binding cannot be reclaimed through this product flow. Adopted
-ordinary checkouts are unaffected.
+service rechecks ownership, requests one normal unmount, and confirms absence in
+both cached mount records and the kernel's retained FSID list before cleaning
+only receipted stale bridge files and creating a fresh session. Cached records
+alone can temporarily omit a volume while normal unmount synchronizes it.
+After a host reboot, a receipt can authorize stale bridge-file cleanup only when
+durable volume UUID, inode, birth-time, ownership, and mode bindings still match
+and complete kernel inventories prove the session absent; it never authorizes
+unmounting a current volume through an expired boot identity.
+
+Busy access or uncertain state retains recovery records and data; users can
+close applications and Finder windows using those folders, then retry.
+Cancellation of the operating system's normal unmount is best effort: a blocked
+kernel operation can outlive the request deadline, and the service retains its
+bridge, source lease, and lifecycle ownership until that operation returns.
+Legacy sessions without that ownership binding cannot be reclaimed through
+this product flow. Adopted ordinary checkouts are unaffected.
 
 The [mounted acceptance record](fskit-acceptance.md) retains actual source/app
 identities, installed-module checks, fixture results, and observed Finder actions.

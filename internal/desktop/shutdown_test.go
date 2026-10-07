@@ -29,9 +29,17 @@ func TestParentCancellationPreservesMountOwnershipUntilClose(t *testing.T) {
 		t.Fatal(err)
 	}
 	cancel()
-	s.workers.Wait() // Observe cancellation before Close, reproducing SIGTERM order.
+	if err := s.ctx.Err(); err != nil {
+		t.Fatalf("signal cancellation stopped the live filesystem context: %v", err)
+	}
 	if !s.Status().Mounted {
-		t.Fatal("canceled Join discarded ownership of an attached kernel mount")
+		t.Fatal("signal cancellation discarded ownership of an attached kernel mount")
+	}
+	if _, err := s.catalogMetadata.HasMetadataXattrs(s.ctx); err != nil {
+		t.Fatalf("signal cancellation made live catalogue storage unavailable: %v", err)
+	}
+	if err := s.PrepareQuit(context.Background()); err != nil {
+		t.Fatal(err)
 	}
 	if err := s.Close(); err != nil {
 		t.Fatal(err)
