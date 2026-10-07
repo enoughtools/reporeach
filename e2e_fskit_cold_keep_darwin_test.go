@@ -28,6 +28,8 @@ import (
 // Keep must bind dormant preview items to the writable view before its first
 // export scan. A cached preview root and an unvisited descendant must not expose
 // different timestamp authorities halfway through an otherwise unchanged tree.
+// The descendant count also exceeds the native enumeration-session budget in
+// one walk: completed directory sessions must retire throughout repeated scans.
 func TestFSKitMountedColdKeepAcceptance(t *testing.T) {
 	if os.Getenv("AFS_RUN_FSKIT_E2E_TESTS") != "1" {
 		t.Skip("set AFS_RUN_FSKIT_E2E_TESTS=1 for real mounted FSKit dormant Keep acceptance")
@@ -81,6 +83,17 @@ func TestFSKitMountedColdKeepAcceptance(t *testing.T) {
 		"unvisited/deep/delta.bin":   {2, 253, 130, 0, 5, 6},
 		"unvisited/deep/epsilon.txt": []byte("deep epsilon\n"),
 	}
+	const descendantDirectories = 160
+	for index := range descendantDirectories {
+		directory := filepath.Join("unvisited", "deep", fmt.Sprintf("directory-%03d", index))
+		if err := os.Mkdir(filepath.Join(source, directory), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		files[filepath.Join(directory, "entry.txt")] = []byte(fmt.Sprintf("committed descendant %03d\n", index))
+		if index < 40 {
+			files[filepath.Join(directory, "binary.dat")] = []byte{0, 255, byte(index), 0, byte(index + 1), 254}
+		}
+	}
 	for name, value := range files {
 		fsKitWrite(t, filepath.Join(source, name), value, 0o644)
 	}
@@ -100,8 +113,8 @@ func TestFSKitMountedColdKeepAcceptance(t *testing.T) {
 	}
 	linkOID := strings.TrimSpace(string(fsKitStorageGit(t, source, nil, "rev-parse", "HEAD:link")))
 	unique[linkOID], blobNames[linkOID] = []byte("tracked.txt"), []string{"link"}
-	if len(unique) != 8 {
-		t.Fatalf("dormant Keep fixture needs eight unique blobs, got %d", len(unique))
+	if len(files) < 200 || len(unique) != len(files)+1 {
+		t.Fatalf("dormant Keep scale fixture needs at least 200 distinct file blobs plus its symlink: files=%d blobs=%d", len(files), len(unique))
 	}
 	selectedOID := strings.TrimSpace(string(fsKitStorageGit(t, source, nil, "rev-parse", "HEAD:tracked.txt")))
 	fsKitStorageGit(t, root, nil, "clone", "--bare", source, bare)
@@ -228,7 +241,7 @@ func TestFSKitMountedColdKeepAcceptance(t *testing.T) {
 	if _, err := os.Stat(ghSentinel); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("dormant native Git Keep invoked GitHub CLI: %v", err)
 	}
-	t.Logf("dormant Keep acceptance completed: accepted_ms=%d blocked_progress_status_ms=%d unique_blobs=%d downloaded_bytes=%d root_preview_cached=true native_file_directory_metadata_cached=true nested_contents_unvisited=true no_git_activation_before_keep=true ordinary_app_off_checkout=true offline_requests=0", acceptedDuration.Milliseconds(), statusDuration.Milliseconds(), len(unique), wantBytes)
+	t.Logf("dormant Keep acceptance completed: accepted_ms=%d blocked_progress_status_ms=%d descendant_directories=%d regular_files=%d unique_blobs=%d downloaded_bytes=%d root_preview_cached=true native_file_directory_metadata_cached=true nested_contents_unvisited=true no_git_activation_before_keep=true ordinary_app_off_checkout=true offline_requests=0", acceptedDuration.Milliseconds(), statusDuration.Milliseconds(), descendantDirectories, len(files), len(unique), wantBytes)
 }
 
 // Only this fixture's read-only Git source is gated. Register release before

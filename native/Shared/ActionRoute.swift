@@ -64,6 +64,17 @@ struct ActionRoute: Equatable {
         return true
     }
 
+    static func containingApplicationURL(forFinderExtensionURL extensionURL: URL) -> URL? {
+        guard extensionURL.isFileURL, extensionURL.pathExtension == "appex",
+              !extensionURL.pathComponents.contains(where: { $0 == "." || $0 == ".." }) else { return nil }
+        let plugIns = extensionURL.deletingLastPathComponent()
+        let contents = plugIns.deletingLastPathComponent()
+        let application = contents.deletingLastPathComponent()
+        guard plugIns.lastPathComponent == "PlugIns", contents.lastPathComponent == "Contents",
+              application.pathExtension == "app" else { return nil }
+        return application
+    }
+
     private static func isASCIIAlphanumeric(_ byte: UInt8) -> Bool {
         (48...57).contains(byte) || (65...90).contains(byte) || (97...122).contains(byte)
     }

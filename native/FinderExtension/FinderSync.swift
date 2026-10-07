@@ -64,15 +64,15 @@ final class FinderSync: FIFinderSync {
             addStatusItem("Could not finish. Open RepoReach for details.", to: menu)
             menu.addItem(.separator())
         }
-        addItem("Keep Downloaded", action: .keep, repo: repo, to: menu, enabled: !status.pinned && !status.isWorking)
-        addItem("Free Up Space", action: .free, repo: repo, to: menu, enabled: status.canFreeStorage)
+        addItem("Keep Downloaded", selector: #selector(keepDownloaded(_:)), to: menu, enabled: !status.pinned && !status.isWorking)
+        addItem("Free Up Space", selector: #selector(freeUpSpace(_:)), to: menu, enabled: status.canFreeStorage)
         if status.isAdopted {
             let retained = NSMenuItem(title: "Original checkout retained", action: nil, keyEquivalent: "")
             retained.isEnabled = false
             menu.addItem(retained)
         }
         menu.addItem(.separator())
-        addItem("Refresh Repository", action: .refresh, repo: repo, to: menu, enabled: !status.isWorking)
+        addItem("Refresh Repository", selector: #selector(refreshRepository(_:)), to: menu, enabled: !status.isWorking)
         return menu
     }
 
@@ -111,28 +111,18 @@ final class FinderSync: FIFinderSync {
 
     private func selectedRepository(in snapshot: FinderStatusSnapshot) -> String? {
         let controller = FIFinderSyncController.default()
-        let selections = controller.selectedItemURLs() ?? []
-        if !selections.isEmpty {
-            let ids = selections.compactMap { FinderStatusCache.repositoryID(for: $0, in: snapshot) }
-            // Ambiguous multi-repository selections get no destructive action.
-            guard ids.count == selections.count, Set(ids).count == 1 else { return nil }
-            return ids.first
-        }
-        guard let target = controller.targetedURL() else { return nil }
-        return FinderStatusCache.repositoryID(for: target, in: snapshot)
+        return FinderStatusCache.selectedRepositoryID(for: controller.selectedItemURLs() ?? [],
+                                                     targetedURL: controller.targetedURL(), in: snapshot)
     }
 
     private func addItem(
         _ title: String,
-        action: ActionRoute.Action,
-        repo: String,
+        selector: Selector,
         to menu: NSMenu,
         enabled: Bool = true
     ) {
-        guard let route = ActionRoute(repo: repo, action: action) else { return }
-        let item = NSMenuItem(title: title, action: #selector(performRepositoryAction(_:)), keyEquivalent: "")
+        let item = NSMenuItem(title: title, action: selector, keyEquivalent: "")
         item.target = self
-        item.representedObject = route.url
         item.isEnabled = enabled
         menu.addItem(item)
     }
@@ -143,11 +133,23 @@ final class FinderSync: FIFinderSync {
         menu.addItem(item)
     }
 
-    @objc private func performRepositoryAction(_ sender: NSMenuItem) {
-        guard let url = sender.representedObject as? URL, ActionRoute(url: url) != nil else { return }
+    @objc private func keepDownloaded(_ sender: Any?) { performRepositoryAction(.keep) }
+    @objc private func freeUpSpace(_ sender: Any?) { performRepositoryAction(.free) }
+    @objc private func refreshRepository(_ sender: Any?) { performRepositoryAction(.refresh) }
+
+    private func performRepositoryAction(_ action: ActionRoute.Action) {
+        // Finder reconstructs menu items. Its callback selection is the action
+        // context; representedObject and arbitrary sender properties are not.
+        let controller = FIFinderSyncController.default()
+        guard let snapshot = cache.read(),
+              let route = FinderStatusCache.actionRoute(for: action, selectionURLs: controller.selectedItemURLs() ?? [],
+                                                       targetedURL: controller.targetedURL(), in: snapshot),
+              let applicationURL = ActionRoute.containingApplicationURL(forFinderExtensionURL: Bundle.main.bundleURL),
+              Bundle(url: applicationURL)?.bundleIdentifier == "com.enoughtools.reporeach" else { return }
         let configuration = NSWorkspace.OpenConfiguration()
         configuration.activates = false
-        NSWorkspace.shared.open(url, configuration: configuration) { _, error in
+        configuration.allowsRunningApplicationSubstitution = false
+        NSWorkspace.shared.open([route.url], withApplicationAt: applicationURL, configuration: configuration) { _, error in
             if error != nil {
                 // The Finder extension never logs repository metadata or credentials.
                 NSLog("RepoReach could not open the repository action. Open the app and try again.")

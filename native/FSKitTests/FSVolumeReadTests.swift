@@ -622,6 +622,204 @@ final class FSVolumeReadTests: XCTestCase {
         XCTAssertTrue(fixture.failures.isEmpty)
     }
 
+    func testCompletedDirectoryScansRetireOldestReplayAtTheExistingBound() async throws {
+        let fixture = try directoryFixture(entries: [directoryEntry(0)])
+        defer { fixture.stop() }
+        let (volume, root) = try await prepareDirectory(fixture)
+        var scans: [DirectoryCapture.Value] = []
+        for _ in 0..<128 {
+            let scan = try await enumerate(volume, root: root, capacity: 1)
+            XCTAssertNil(scan.error)
+            XCTAssertEqual(scan.entries.map(\.cookie), [1])
+            scans.append(scan)
+        }
+        XCTAssertTrue(fixture.requests.filter { $0.operation == "releasedir" }.isEmpty)
+        // Replay refreshes the oldest completed scan without retiring its IDs.
+        let replay = try await enumerate(volume, root: root, verifier: scans[0].verifier, capacity: 1)
+        XCTAssertNil(replay.error)
+        XCTAssertEqual(replay.entries.map(\.name), ["file0"])
+        let admitted = try await enumerate(volume, root: root, capacity: 1)
+        XCTAssertNil(admitted.error)
+        XCTAssertEqual(fixture.requests.filter { $0.operation == "releasedir" }.map(\.handle), [102])
+        let retired = try await enumerate(volume, root: root, verifier: scans[1].verifier, capacity: 1)
+        let expected = FSError(.invalidDirectoryCookie) as NSError
+        XCTAssertEqual((retired.error as NSError?)?.domain, expected.domain)
+        XCTAssertEqual((retired.error as NSError?)?.code, expected.code)
+        XCTAssertTrue(retired.entries.isEmpty)
+        let end = try await enumerate(volume, root: root, cookie: 1, verifier: scans[0].verifier, capacity: 1)
+        XCTAssertNil(end.error)
+        XCTAssertTrue(end.entries.isEmpty)
+
+        // Three large inventories omit the optional final empty callback, as
+        // native directory walkers can. The retained handle limit stays128.
+        for _ in 0..<480 {
+            let scan = try await enumerate(volume, root: root, capacity: 1)
+            XCTAssertNil(scan.error)
+            XCTAssertEqual(scan.entries.map(\.name), ["file0"])
+        }
+        try await shutdown(volume)
+        var active: Set<UInt64> = []
+        var opened: UInt64 = 100
+        var peak = 0
+        for request in fixture.requests {
+            if request.operation == "opendir" {
+                opened += 1
+                XCTAssertTrue(active.insert(opened).inserted)
+                peak = max(peak, active.count)
+            } else if request.operation == "releasedir" {
+                XCTAssertNotNil(active.remove(try XCTUnwrap(request.handle)), "Every acknowledged handle is released once")
+            }
+        }
+        XCTAssertEqual(peak, 128)
+        XCTAssertTrue(active.isEmpty)
+        XCTAssertTrue(fixture.requests.filter { $0.operation == "forget" }.isEmpty)
+        XCTAssertTrue(fixture.failures.isEmpty)
+    }
+
+    func testDirectoryPressurePreservesPartialPageCookiesAndReferenceAggregation() async throws {
+        let fixture = try directoryFixture(entries: (0..<3).map { directoryEntry($0, inode: 7) })
+        defer { fixture.stop() }
+        let (volume, root) = try await prepareDirectory(fixture)
+        let partial = try await enumerate(volume, root: root, capacity: 1)
+        XCTAssertNil(partial.error)
+        for _ in 0..<127 {
+            let complete = try await enumerate(volume, root: root, capacity: 3)
+            XCTAssertNil(complete.error)
+        }
+        let admitted = try await enumerate(volume, root: root, capacity: 3)
+        XCTAssertNil(admitted.error)
+        XCTAssertEqual(fixture.requests.filter { $0.operation == "releasedir" }.map(\.handle), [102])
+        let fetches = fixture.requests.filter { $0.operation == "readdir" }.count
+        let batches = fixture.requests.filter { $0.operation == "batchforget" }.count
+        let replay = try await enumerate(volume, root: root, verifier: partial.verifier, capacity: 1)
+        XCTAssertNil(replay.error)
+        XCTAssertEqual(replay.entries.map(\.name), ["file0"])
+        let continued = try await enumerate(volume, root: root, cookie: 1, verifier: partial.verifier, capacity: 1)
+        XCTAssertNil(continued.error)
+        XCTAssertEqual(continued.entries.map(\.name), ["file1"])
+        let completed = try await enumerate(volume, root: root, cookie: 2, verifier: partial.verifier, capacity: 1)
+        XCTAssertNil(completed.error)
+        XCTAssertEqual(completed.entries.map(\.name), ["file2"])
+        XCTAssertEqual(fixture.requests.filter { $0.operation == "readdir" }.count, fetches)
+        XCTAssertEqual(fixture.requests.filter { $0.operation == "batchforget" }.count, batches)
+        for batch in fixture.requests.filter({ $0.operation == "batchforget" }) {
+            XCTAssertEqual(try forgetPairs(batch), [FSBridgeForget(inode: 7, n: 3)])
+        }
+        try await shutdown(volume)
+        XCTAssertTrue(fixture.requests.filter { $0.operation == "forget" }.isEmpty)
+        XCTAssertEqual(fixture.requests.filter { $0.operation == "releasedir" && $0.handle == 101 }.count, 1)
+        XCTAssertTrue(fixture.failures.isEmpty)
+    }
+
+    func testIncompleteDirectorySessionsKeepTheirBoundAndContinueAfterAdmissionRefusal() async throws {
+        let fixture = try directoryFixture(entries: (0..<3).map { directoryEntry($0) })
+        defer { fixture.stop() }
+        let (volume, root) = try await prepareDirectory(fixture)
+        let first = try await enumerate(volume, root: root, capacity: 1)
+        XCTAssertNil(first.error)
+        for _ in 1..<128 {
+            let partial = try await enumerate(volume, root: root, capacity: 1)
+            XCTAssertNil(partial.error)
+        }
+        let refused = try await enumerate(volume, root: root, capacity: 1)
+        assertPOSIX(refused.error, EMFILE)
+        XCTAssertEqual(fixture.requests.filter { $0.operation == "opendir" }.count, 128)
+        XCTAssertTrue(fixture.requests.filter { $0.operation == "releasedir" }.isEmpty)
+        let continued = try await enumerate(volume, root: root, cookie: 1, verifier: first.verifier, capacity: 1)
+        XCTAssertNil(continued.error)
+        XCTAssertEqual(continued.entries.map(\.name), ["file1"])
+        XCTAssertEqual(fixture.requests.filter { $0.operation == "readdir" }.count, 128)
+        try await shutdown(volume)
+        XCTAssertEqual(fixture.requests.filter { $0.operation == "releasedir" }.count, 128)
+        XCTAssertTrue(fixture.requests.filter { $0.operation == "forget" }.isEmpty)
+        XCTAssertTrue(fixture.failures.isEmpty)
+    }
+
+    func testDirectoryEvictionFailureRetainsHandlesAndUncertainReferencesThroughDrain() async throws {
+        let releasing = expectation(description: "Pressure eviction is awaiting release acknowledgement")
+        let allowRelease = DispatchSemaphore(value: 0)
+        let fixture = try directoryFixture(entries: (0..<3).map { directoryEntry($0) },
+            metadataFailure: { request, attempt in
+                if request.operation == "batchforget" && attempt == 1 { return EBUSY }
+                if request.operation == "releasedir" && attempt == 1 {
+                    XCTAssertEqual(request.handle, 102, "The failed page still owns its handle and references")
+                    releasing.fulfill()
+                    guard allowRelease.wait(timeout: .now() + 5) == .success else { return ETIMEDOUT }
+                    return EBUSY
+                }
+                return 0
+            })
+        defer { allowRelease.signal(); fixture.stop() }
+        let (volume, root) = try await prepareDirectory(fixture)
+        let failed = try await enumerate(volume, root: root, capacity: 3)
+        assertPOSIX(failed.error, EBUSY)
+        for _ in 0..<127 {
+            let complete = try await enumerate(volume, root: root, capacity: 3)
+            XCTAssertNil(complete.error)
+        }
+        let enumerationFinished = expectation(description: "Failed eviction replies before drain finishes")
+        let reply = DirectoryCapture(capacity: 3)
+        volume.enumerateDirectory(root, startingAt: FSDirectoryCookie(0), verifier: FSDirectoryVerifier(0),
+            attributes: directoryAttributes(), packEntry: { name, _, _, cookie, attributes in
+                reply.pack(name: name.string ?? "", cookie: cookie.rawValue, attributes: attributes)
+            }) { verifier, error in reply.finish(verifier: verifier, error: error); enumerationFinished.fulfill() }
+        await fulfillment(of: [releasing], timeout: 3)
+        let drained = CompletionFlag()
+        let drainFinished = expectation(description: "Shutdown releases all retained directory ownership")
+        Task { await volume.shutdown(); drained.complete(); drainFinished.fulfill() }
+        assertPOSIX(try await close(volume, item: root, modes: []), ENXIO)
+        XCTAssertNil(reply.value)
+        XCTAssertFalse(drained.value)
+        allowRelease.signal()
+        await fulfillment(of: [enumerationFinished, drainFinished], timeout: 3)
+        assertPOSIX(try XCTUnwrap(reply.value).error, EBUSY)
+        XCTAssertEqual(fixture.requests.filter { $0.operation == "opendir" }.count, 128)
+        let releases = fixture.requests.filter { $0.operation == "releasedir" }.compactMap(\.handle)
+        XCTAssertEqual(releases.first, 102)
+        XCTAssertEqual(releases.count, 129)
+        XCTAssertEqual(releases.filter { $0 == 102 }.count, 2)
+        XCTAssertEqual(Set(releases), Set((101...228).map(UInt64.init)))
+        XCTAssertEqual(fixture.requests.filter { $0.operation == "forget" }.compactMap(\.inode).sorted(), [7, 8, 9])
+        XCTAssertEqual(fixture.requests.filter { $0.operation == "batchforget" }.count, 128)
+        XCTAssertTrue(fixture.failures.isEmpty)
+    }
+
+    func testCompletedDirectoryRetirementRecoversAfterLostReleaseAcknowledgement() async throws {
+        let releases = DirectoryHandleCounter()
+        let fixture = try directoryFixture(entries: [directoryEntry(0)], releaseDirectory: { request in
+            switch releases.next() {
+            case 101:
+                XCTAssertEqual(request.handle, 101)
+                // The peer has removed its handle, but its acknowledgement is
+                // malformed. Local ownership must remain until a definite reply.
+                return VolumeReadFixture.binary(Data())
+            case 102:
+                XCTAssertEqual(request.handle, 101)
+                return VolumeReadFixture.error(EBADF)
+            default: return try VolumeReadFixture.metadata([:])
+            }
+        })
+        defer { fixture.stop() }
+        let (volume, root) = try await prepareDirectory(fixture)
+        for _ in 0..<128 {
+            let scan = try await enumerate(volume, root: root, capacity: 1)
+            XCTAssertNil(scan.error)
+        }
+        let uncertain = try await enumerate(volume, root: root, capacity: 1)
+        assertPOSIX(uncertain.error, EIO)
+        XCTAssertEqual(fixture.requests.filter { $0.operation == "opendir" }.count, 128)
+        let recovered = try await enumerate(volume, root: root, capacity: 1)
+        XCTAssertNil(recovered.error)
+        XCTAssertEqual(recovered.entries.map(\.name), ["file0"])
+        XCTAssertEqual(fixture.requests.filter { $0.operation == "opendir" }.count, 129)
+        XCTAssertEqual(fixture.requests.filter { $0.operation == "releasedir" }.map(\.handle), [101, 101])
+        try await shutdown(volume)
+        XCTAssertEqual(fixture.requests.filter { $0.operation == "releasedir" && $0.handle == 101 }.count, 2)
+        XCTAssertEqual(fixture.requests.filter { $0.operation == "releasedir" }.count, 130)
+        XCTAssertTrue(fixture.requests.filter { $0.operation == "forget" }.isEmpty)
+        XCTAssertTrue(fixture.failures.isEmpty)
+    }
+
     func testUnknownDirectorySizeIsInvalidUntilGetAttributesResolvesIt() async throws {
         let unresolved = VolumeReadFixture.node(inode: 7, type: "file", size: 0, sizeKnown: false)
         let entry: [String: Any] = ["name": "binary", "offset": 1, "node": unresolved]
@@ -1057,16 +1255,19 @@ final class FSVolumeReadTests: XCTestCase {
     }
 
     private func directoryFixture(entries: [[String: Any]], eof: Bool = true, lookupNode: [String: Any]? = nil,
+                                  releaseDirectory: ((VolumeReadFixture.Request) throws -> Data)? = nil,
                                   metadataFailure: @escaping (VolumeReadFixture.Request, Int) -> Int32 = { _, _ in 0 }) throws -> VolumeReadFixture {
-        try VolumeReadFixture(read: { _ in VolumeReadFixture.binary(Data()) }, metadataFailure: metadataFailure,
+        let handles = DirectoryHandleCounter()
+        return try VolumeReadFixture(read: { _ in VolumeReadFixture.binary(Data()) }, metadataFailure: metadataFailure,
             metadata: { request in
                 switch request.operation {
                 case "getattr":
                     return try VolumeReadFixture.metadata(["node": VolumeReadFixture.node(inode: request.inode ?? 1,
                         type: request.inode == 1 ? "dir" : "file")])
                 case "lookup": return try VolumeReadFixture.metadata(["node": lookupNode ?? VolumeReadFixture.node(inode: 7, type: "file")])
-                case "statfs", "batchforget", "forget", "releasedir": return try VolumeReadFixture.metadata([:])
-                case "opendir": return try VolumeReadFixture.metadata(["handle": 101])
+                case "statfs", "batchforget", "forget": return try VolumeReadFixture.metadata([:])
+                case "releasedir": return try releaseDirectory?(request) ?? VolumeReadFixture.metadata([:])
+                case "opendir": return try VolumeReadFixture.metadata(["handle": handles.next()])
                 case "readdir": return try VolumeReadFixture.metadata(["entries": request.offset == 0 ? entries : [],
                     "next_offset": entries.count, "eof": request.offset == 0 ? eof : true])
                 default: return VolumeReadFixture.error(EOPNOTSUPP)
@@ -1250,6 +1451,12 @@ final class FSVolumeReadTests: XCTestCase {
         XCTAssertEqual(value?.domain, NSPOSIXErrorDomain, file: file, line: line)
         XCTAssertEqual(value?.code, Int(code), file: file, line: line)
     }
+}
+
+private final class DirectoryHandleCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var handle: UInt64 = 100
+    func next() -> UInt64 { lock.lock(); defer { lock.unlock() }; handle += 1; return handle }
 }
 
 private final class DirectoryCapture: @unchecked Sendable {

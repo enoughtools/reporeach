@@ -1091,12 +1091,41 @@ final class RepoReachVolume: FSVolume, FSVolume.Operations,
     }
 
     private func evictOldDirectorySessions() async throws {
-        let stale = locked { directories.filter { Date().timeIntervalSince($0.value.lastUsed) > 60 } }
+        let stale = locked {
+            directories.filter {
+                Date().timeIntervalSince($0.value.lastUsed) > 60 &&
+                    $0.value.page?.cleanupFailed != true && $0.value.page?.pendingForgets.isEmpty != false
+            }
+        }
         for (id, session) in stale {
-            _ = try await client.request(FSBridgeRequest(op: "releasedir", inode: session.inode, handle: session.handle))
-            locked { _ = directories.removeValue(forKey: id) }
+            try await retireDirectorySession(id, session: session)
+        }
+        // FSKit need not ask for an empty page after a reply packed the final
+        // entries. Keep these sessions for cookie replay while space permits,
+        // then retire the oldest completed snapshot before opening another one.
+        // Incomplete pages and uncertain reference cleanup retain their owners.
+        if locked({ directories.count >= 128 }),
+           let completed = locked({
+               directories.filter { $0.value.eofOffset != nil && $0.value.page == nil }.min {
+                   $0.value.lastUsed == $1.value.lastUsed ? $0.key < $1.key : $0.value.lastUsed < $1.value.lastUsed
+               }
+           }) {
+            try await retireDirectorySession(completed.key, session: completed.value)
         }
         guard locked({ directories.count < 128 }) else { throw POSIXError(.EMFILE) }
+    }
+
+    private func retireDirectorySession(_ id: UInt64, session: DirectorySession) async throws {
+        do {
+            _ = try await client.request(FSBridgeRequest(op: "releasedir", inode: session.inode, handle: session.handle))
+        } catch FSBridgeError.filesystem(let code) where code == EBADF {
+            // A lost successful reply can leave local ownership after the
+            // broker removed this handle. Only its authenticated filesystem
+            // error establishes that fact; transport errors remain retryable.
+        }
+        // A retired verifier becomes invalid; never replay IDs after their
+        // retaining handle is released. Other failed releases remain owned.
+        locked { _ = directories.removeValue(forKey: id) }
     }
 
     private func directoryPage(sessionID: UInt64, session: DirectorySession,

@@ -311,6 +311,33 @@ struct FinderStatusCache {
         return ids.count == 1 ? ids.first : nil
     }
 
+    static func selectedRepositoryID(for selectionURLs: [URL], targetedURL: URL?, in snapshot: FinderStatusSnapshot) -> String? {
+        if !selectionURLs.isEmpty {
+            let ids = selectionURLs.compactMap { repositoryID(for: $0, in: snapshot) }
+            // An unrelated or multi-repository selection must not silently fall
+            // back to the clicked folder and dispatch a different command.
+            guard ids.count == selectionURLs.count, Set(ids).count == 1 else { return nil }
+            return ids.first
+        }
+        return targetedURL.flatMap { repositoryID(for: $0, in: snapshot) }
+    }
+
+    static func actionRoute(for action: ActionRoute.Action, selectionURLs: [URL], targetedURL: URL?,
+                            in snapshot: FinderStatusSnapshot) -> ActionRoute? {
+        guard let id = selectedRepositoryID(for: selectionURLs, targetedURL: targetedURL, in: snapshot),
+              let repository = snapshot.repositories.first(where: { $0.id == id }),
+              !repository.isWorking else { return nil }
+        switch action {
+        case .keep:
+            guard !repository.pinned else { return nil }
+        case .free:
+            guard repository.canFreeStorage else { return nil }
+        case .refresh, .prepare:
+            break
+        }
+        return ActionRoute(repo: id, action: action)
+    }
+
     private static func isValid(_ snapshot: FinderStatusSnapshot) -> Bool {
         guard mountRootURL(in: snapshot) != nil, snapshot.repositories.count <= 100_000 else { return false }
         var identifiers = Set<String>()

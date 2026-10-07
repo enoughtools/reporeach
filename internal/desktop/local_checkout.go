@@ -806,7 +806,10 @@ func copyCheckoutTree(ctx context.Context, source, destination string, omitRootG
 }
 
 func openCheckoutRegular(path string) (*os.File, error) {
-	fd, err := syscall.Open(path, syscall.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	// Export reads can overlap native Git subprocesses. Set close-on-exec in
+	// the open itself so a child cannot inherit a transient virtual-file handle
+	// and retain the source volume after the export has closed its descriptor.
+	fd, err := syscall.Open(path, syscall.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK|syscall.O_CLOEXEC, 0)
 	if err != nil {
 		return nil, err
 	}

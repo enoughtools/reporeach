@@ -29,6 +29,96 @@ final class ActionRouteTests: XCTestCase {
         XCTAssertFalse(ActionRoute.isValidRepositoryID("owner/.."))
         XCTAssertFalse(ActionRoute.isValidRepositoryID("owner/repo?token=secret"))
     }
+
+    func testFinderDeliveryLocatesOnlyAContainingApplicationBundle() {
+        let extensionURL = URL(fileURLWithPath: "/Users/example/Applications/Repo Reach.app/Contents/PlugIns/RepoReachFinder.appex")
+        XCTAssertEqual(ActionRoute.containingApplicationURL(forFinderExtensionURL: extensionURL)?.path,
+                       "/Users/example/Applications/Repo Reach.app")
+        for path in ["/tmp/RepoReachFinder.appex", "/tmp/Other/Contents/PlugIns/RepoReachFinder.appex",
+                     "/tmp/RepoReach.app/PlugIns/RepoReachFinder.appex", "/tmp/RepoReach.app/Contents/Extensions/RepoReachFinder.appex",
+                     "/tmp/RepoReach.app/Contents/PlugIns/RepoReachFinder.app", "/tmp/RepoReach.app/Contents/PlugIns/../RepoReachFinder.appex"] {
+            XCTAssertNil(ActionRoute.containingApplicationURL(forFinderExtensionURL: URL(fileURLWithPath: path)), path)
+        }
+        XCTAssertNil(ActionRoute.containingApplicationURL(forFinderExtensionURL: URL(string: "https://example.com/RepoReach.app/Contents/PlugIns/Finder.appex")!))
+    }
+}
+
+final class FinderActionDispatchTests: XCTestCase {
+    private let root = "/not-present/Repos"
+    private let virtualRoot = "/not-present/PrivateVolume"
+    private func snapshot(_ repositories: [FinderRepositoryStatus]? = nil) -> FinderStatusSnapshot {
+        FinderStatusSnapshot(mountRoot: root, repositories: repositories ?? [
+            FinderRepositoryStatus(id: "owner/first", state: "available", pinned: false),
+            FinderRepositoryStatus(id: "owner/second", state: "available", pinned: false)
+        ], virtualRoot: virtualRoot)
+    }
+    private func url(_ path: String) -> URL { URL(fileURLWithPath: path) }
+
+    func testDedicatedActionUsesOfficialCallbackSelectionWithoutMenuItemPayload() {
+        let status = snapshot()
+        // Menu construction and callback can have different contexts. The
+        // controller's official action-time context is the authority.
+        XCTAssertEqual(FinderStatusCache.selectedRepositoryID(for: [url(root + "/owner/first")], targetedURL: nil, in: status), "owner/first")
+        let route = FinderStatusCache.actionRoute(for: .keep, selectionURLs: [url(virtualRoot + "/owner/second/Sources/main.swift")],
+                                                targetedURL: nil, in: status)
+        XCTAssertEqual(route?.repo, "owner/second")
+        XCTAssertEqual(route?.action, .keep)
+        XCTAssertEqual(route.flatMap { ActionRoute(url: $0.url) }, route)
+    }
+
+    func testAmbiguousOrUnmanagedNonemptySelectionNeverFallsBackToTarget() {
+        let status = snapshot()
+        let target = url(root + "/owner/first")
+        for selections in [[target, url(root + "/owner/second")], [url("/outside/file")],
+                           [target, url("/outside/file")], [URL(string: "https://example.com/owner/first")!]] {
+            for action in [ActionRoute.Action.keep, .free, .refresh] {
+                XCTAssertNil(FinderStatusCache.actionRoute(for: action, selectionURLs: selections, targetedURL: target, in: status))
+            }
+        }
+    }
+
+    func testMultipleChildrenOfOneRepositoryAndCurrentFolderBackgroundAreSupported() {
+        let status = snapshot()
+        let selections = [url(root + "/owner/first/Sources/a.swift"), url(virtualRoot + "/owner/first/README.md")]
+        XCTAssertEqual(FinderStatusCache.actionRoute(for: .free, selectionURLs: selections, targetedURL: nil, in: status)?.repo, "owner/first")
+        XCTAssertEqual(FinderStatusCache.actionRoute(for: .refresh, selectionURLs: [], targetedURL: url(virtualRoot + "/owner/first/Sources"), in: status)?.repo, "owner/first")
+        XCTAssertNil(FinderStatusCache.actionRoute(for: .free, selectionURLs: [], targetedURL: url(root + "/owner"), in: status))
+        XCTAssertNil(FinderStatusCache.actionRoute(for: .keep, selectionURLs: [], targetedURL: nil, in: status))
+    }
+
+    func testFreshCallbackSnapshotRejectsHiddenBusyAndAdoptedFreeActions() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let cache = FinderStatusCache(fileURL: directory.appendingPathComponent("finder.json"))
+        let selection = [url(root + "/owner/first")]
+        try cache.write(snapshot())
+        XCTAssertNotNil(FinderStatusCache.actionRoute(for: .free, selectionURLs: selection, targetedURL: nil, in: try XCTUnwrap(cache.read())))
+        let operation = FinderOperationStatus(action: "keep", status: "running", completedBlobs: nil, totalBlobs: nil,
+                                             downloadedBytes: nil, totalBytes: nil, error: nil)
+        let busy = FinderRepositoryStatus(id: "owner/first", state: "available", pinned: false, operation: operation)
+        try cache.write(snapshot([busy]))
+        for action in [ActionRoute.Action.keep, .free, .refresh] {
+            XCTAssertNil(FinderStatusCache.actionRoute(for: action, selectionURLs: selection, targetedURL: nil, in: try XCTUnwrap(cache.read())))
+        }
+        try cache.write(snapshot([]))
+        XCTAssertNil(FinderStatusCache.actionRoute(for: .free, selectionURLs: selection, targetedURL: nil, in: try XCTUnwrap(cache.read())))
+        let adopted = FinderRepositoryStatus(id: "owner/first", state: "local", pinned: false, localPath: "/not-present/Original/first", localKind: "adopted")
+        try cache.write(snapshot([adopted]))
+        XCTAssertNil(FinderStatusCache.actionRoute(for: .free, selectionURLs: selection, targetedURL: nil, in: try XCTUnwrap(cache.read())))
+        XCTAssertNotNil(FinderStatusCache.actionRoute(for: .keep, selectionURLs: selection, targetedURL: nil, in: try XCTUnwrap(cache.read())))
+    }
+
+    func testCallbackEligibilityRejectsAlreadyKeptOrEmptyVirtualStorage() {
+        let selection = [url(root + "/owner/first")]
+        let pinned = FinderRepositoryStatus(id: "owner/first", state: "local", pinned: true,
+                                            localPath: root + "/owner/first", localKind: "materialized")
+        XCTAssertNil(FinderStatusCache.actionRoute(for: .keep, selectionURLs: selection, targetedURL: nil, in: snapshot([pinned])))
+        XCTAssertNotNil(FinderStatusCache.actionRoute(for: .free, selectionURLs: selection, targetedURL: nil, in: snapshot([pinned])))
+        let virtual = FinderRepositoryStatus(id: "owner/first", state: "virtual", pinned: false)
+        XCTAssertNil(FinderStatusCache.actionRoute(for: .free, selectionURLs: selection, targetedURL: nil, in: snapshot([virtual])))
+        let cached = FinderRepositoryStatus(id: virtual.id, state: virtual.state, pinned: false, downloadedBytes: 37)
+        XCTAssertNotNil(FinderStatusCache.actionRoute(for: .free, selectionURLs: selection, targetedURL: nil, in: snapshot([cached])))
+    }
 }
 
 final class FinderCacheTests: XCTestCase {
