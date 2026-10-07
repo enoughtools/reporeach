@@ -34,7 +34,7 @@ final class EngineService {
     func start(mountRoot: String) throws {
         if process?.isRunning == true { return }
         guard FileManager.default.isExecutableFile(atPath: engine.path), FileManager.default.isExecutableFile(atPath: gh.path) else {
-            throw EngineFailure(message: "The bundled repository tools are missing. Download the complete RepoReach app, or see the source build instructions.")
+            throw EngineFailure(message: "The bundled repository tools are missing. Download the complete EnoughRepos app, or see the source build instructions.")
         }
         var arguments = ["desktop", "serve", "--state-dir", stateDirectory.path, "--mount-root", mountRoot, "--socket", socket.path, "--gh", gh.path]
         #if REPOREACH_NATIVE_FSKIT

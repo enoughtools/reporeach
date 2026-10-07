@@ -243,7 +243,7 @@ func TestAdoptRejectsOwnFoldersBeforeAnyGitProbe(t *testing.T) {
 	for _, source := range []string{s.opts.StateDir, filepath.Join(s.opts.StateDir, "engine"), s.opts.MountRoot, filepath.Join(s.opts.MountRoot, "owner", "repo"), filepath.Dir(s.opts.StateDir), alias} {
 		t.Run(source, func(t *testing.T) {
 			_, err := s.Adopt(context.Background(), AdoptionRequest{RemoteURL: source, Name: "alias"})
-			if err == nil || !strings.Contains(err.Error(), "outside RepoReach") {
+			if err == nil || !strings.Contains(err.Error(), "outside EnoughRepos") {
 				t.Fatalf("own-folder source was not rejected at the path boundary: %v", err)
 			}
 		})
@@ -303,7 +303,7 @@ func TestAdoptLocalAliasesAndLinkedWorktreeMetadata(t *testing.T) {
 				}
 			}
 			before := s.Status()
-			if _, err := s.Adopt(context.Background(), AdoptionRequest{RemoteURL: outside, Name: "protected"}); err == nil || !strings.Contains(err.Error(), "outside RepoReach") {
+			if _, err := s.Adopt(context.Background(), AdoptionRequest{RemoteURL: outside, Name: "protected"}); err == nil || !strings.Contains(err.Error(), "outside EnoughRepos") {
 				t.Fatalf("protected Git metadata redirect was accepted: %v", err)
 			}
 			if !reflect.DeepEqual(before, s.Status()) {
@@ -353,7 +353,7 @@ func TestAdoptMetadataRedirectsResolveDotSegmentsAfterSymlinks(t *testing.T) {
 			case "source path":
 				source = rawTarget
 			}
-			if _, err := s.Adopt(context.Background(), AdoptionRequest{RemoteURL: source, Name: "protected"}); err == nil || !strings.Contains(err.Error(), "outside RepoReach") {
+			if _, err := s.Adopt(context.Background(), AdoptionRequest{RemoteURL: source, Name: "protected"}); err == nil || !strings.Contains(err.Error(), "outside EnoughRepos") {
 				t.Fatalf("dot-segment redirect reached protected source metadata: %v", err)
 			}
 		})
@@ -396,7 +396,7 @@ func TestAdoptDeferredPreparationRechecksChangedGitMetadata(t *testing.T) {
 	if err := os.WriteFile(gitDir, []byte("gitdir: "+filepath.Join(s.opts.StateDir, "engine")+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.ensureRepository(context.Background(), status.Repositories[0].ID); err == nil || !strings.Contains(err.Error(), "outside RepoReach") {
+	if _, err := s.ensureRepository(context.Background(), status.Repositories[0].ID); err == nil || !strings.Contains(err.Error(), "outside EnoughRepos") {
 		t.Fatalf("deferred acquisition followed changed source metadata into private storage: %v", err)
 	}
 	configs, err := s.engine.ListRepos(context.Background())
@@ -436,7 +436,7 @@ func TestAdoptRefreshRechecksSourceAndRetainsCachedCheckout(t *testing.T) {
 		return false
 	})
 	status = s.Status()
-	if status.Operations[0].Status != "failed" || !strings.Contains(status.Operations[0].Error, "outside RepoReach") {
+	if status.Operations[0].Status != "failed" || !strings.Contains(status.Operations[0].Error, "outside EnoughRepos") {
 		t.Fatalf("refresh followed changed source metadata into private storage: %+v", status.Operations)
 	}
 	if _, err := s.ensureRepository(context.Background(), repo.ID); err != nil {
@@ -503,7 +503,7 @@ func TestAdoptFreeRefusesPrivateSourceAliasAndRetainsPin(t *testing.T) {
 		return false
 	})
 	status = s.Status()
-	if last := status.Operations[len(status.Operations)-1]; last.Status != "failed" || !strings.Contains(last.Error, "outside RepoReach") {
+	if last := status.Operations[len(status.Operations)-1]; last.Status != "failed" || !strings.Contains(last.Error, "outside EnoughRepos") {
 		t.Fatalf("free accepted its own private clone as the remote recovery source: %+v", last)
 	}
 	retained := status.Repositories[0]

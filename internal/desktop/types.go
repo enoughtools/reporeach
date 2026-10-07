@@ -1,4 +1,4 @@
-// Package desktop provides RepoReach's local control plane. It never exposes
+// Package desktop provides EnoughRepos's local control plane. It never exposes
 // credentials over its API and listens only on a private Unix domain socket.
 package desktop
 

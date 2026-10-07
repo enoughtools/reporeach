@@ -49,7 +49,7 @@ func TestFetchCatalogUpdatesPreservesCheckoutAndBackgroundPolicy(t *testing.T) {
 
 func TestFreeRepositorySpaceAcceptsManagedCredentialHelper(t *testing.T) {
 	svc, cfg, _ := storageFixture(t)
-	runCmd(t, "git", "--git-dir", cfg.GitDir, "config", "--local", "credential.https://github.com.helper", "!GH_TELEMETRY=false '/Applications/RepoReach.app/Contents/Helpers/gh' auth git-credential")
+	runCmd(t, "git", "--git-dir", cfg.GitDir, "config", "--local", "credential.https://github.com.helper", "!GH_TELEMETRY=false '/Applications/EnoughRepos.app/Contents/Helpers/gh' auth git-credential")
 	if err := svc.FreeRepositorySpace(context.Background(), cfg.Name); err != nil {
 		t.Fatalf("managed helper was mistaken for custom local state: %v", err)
 	}

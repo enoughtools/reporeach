@@ -574,7 +574,7 @@ func (h *Handler) readdir(ctx context.Context, r Request) (Response, error) {
 }
 
 // Keep the general fuseutil.FileSystem protocol adapter for other filesystems;
-// RepoReach's concrete catalogue and repository adapters use typed enumeration.
+// EnoughRepos's concrete catalogue and repository adapters use typed enumeration.
 func (h *Handler) readdirByLookup(ctx context.Context, r Request) (Response, error) {
 	response := Response{Version: Version, NextOffset: r.Offset, Entries: make([]DirectoryEntry, 0)}
 	op := &fuseops.ReadDirOp{Inode: fuseops.InodeID(r.Inode), Handle: fuseops.HandleID(r.Handle), Offset: fuseops.DirOffset(r.Offset), Dst: make([]byte, DirectoryPageSize)}

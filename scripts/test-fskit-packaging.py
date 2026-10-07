@@ -267,7 +267,7 @@ class SignedCertificateExtractionTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix="reporeach-signed-fskit-test-")
         self.addCleanup(self.temporary.cleanup)
-        self.app = pathlib.Path(self.temporary.name) / "RepoReach.app"
+        self.app = pathlib.Path(self.temporary.name) / "EnoughRepos.app"
         self.module = self.app / packaging.MODULE_PATH
         (self.module / "Contents").mkdir(parents=True)
         (self.module / "Contents/embedded.provisionprofile").write_bytes(b"fixture, not a profile")
@@ -349,9 +349,9 @@ class CompiledBundleTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix="reporeach-compiled-fskit-test-")
         self.addCleanup(self.temporary.cleanup)
-        self.app = pathlib.Path(self.temporary.name) / "RepoReach.app"
+        self.app = pathlib.Path(self.temporary.name) / "EnoughRepos.app"
         self.module = self.app / packaging.MODULE_PATH
-        self.app_info = {"CFBundleIdentifier": "com.enoughtools.reporeach", "CFBundleExecutable": "RepoReach", packaging.GROUP_INFO: ".rr"}
+        self.app_info = {"CFBundleIdentifier": "com.enoughtools.reporeach", "CFBundleExecutable": "EnoughRepos", packaging.GROUP_INFO: ".rr"}
         self.module_info = {
             "CFBundleIdentifier": packaging.MODULE_ID,
             "CFBundleExecutable": "RepoReachFSKit", "LSMinimumSystemVersion": "26.0", packaging.GROUP_INFO: ".rr",
@@ -463,7 +463,7 @@ class LocalValidationArtifactTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory(prefix="reporeach-validation-export-test-")
         self.addCleanup(self.temporary.cleanup)
         self.folder = pathlib.Path(self.temporary.name)
-        self.app = self.folder / "stage/RepoReach.app"
+        self.app = self.folder / "stage/EnoughRepos.app"
         self.module = self.app / "Contents/Extensions/RepoReachFSKit.appex"
         self.module.mkdir(parents=True)
         (self.app / "Contents/Resources").mkdir()
@@ -496,7 +496,7 @@ class LocalValidationArtifactTests(unittest.TestCase):
 
     def test_metadata_hashes_the_actual_unprovisioned_app_archive(self):
         self.export()
-        metadata = json.loads((self.args.output / "RepoReach-local-validation-arm64.json").read_text())
+        metadata = json.loads((self.args.output / "EnoughRepos-local-validation-arm64.json").read_text())
         self.assertFalse(metadata["distribution"])
         self.assertFalse(metadata["extensionActivationAuthorized"])
         self.assertFalse(metadata["mountedValidationPassed"])
@@ -506,8 +506,8 @@ class LocalValidationArtifactTests(unittest.TestCase):
         self.assertEqual(metadata["artifact"]["sha256"], local_validation.digest(archive))
         self.assertEqual(metadata["artifact"]["bytes"], archive.stat().st_size)
         with zipfile.ZipFile(archive) as contents:
-            self.assertEqual(contents.read("RepoReach.app/Contents/Helpers/artifact-fs"), b"binary fixture\0\xff")
-            self.assertIn(b"not a release", contents.read("RepoReach.app/Contents/Resources/LocalValidation.txt"))
+            self.assertEqual(contents.read("EnoughRepos.app/Contents/Helpers/artifact-fs"), b"binary fixture\0\xff")
+            self.assertIn(b"not a release", contents.read("EnoughRepos.app/Contents/Resources/LocalValidation.txt"))
         with self.assertRaisesRegex(ValueError, "overwrite"):
             self.export()
 
@@ -585,7 +585,7 @@ class BuildRegistrationCleanupTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix="reporeach-registration-cleanup-test-")
         self.addCleanup(self.temporary.cleanup)
-        self.app = pathlib.Path(self.temporary.name) / "derived/Build/Products/Release/RepoReach.app"
+        self.app = pathlib.Path(self.temporary.name) / "derived/Build/Products/Release/EnoughRepos.app"
         self.app.mkdir(parents=True)
         self.module = self.app / "Contents/Extensions/RepoReachFSKit.appex"
         self.inspector = self.app.parents[3] / "inspect-built-app-registration"
@@ -654,7 +654,7 @@ class BuildRegistrationCleanupTests(unittest.TestCase):
 
     def test_parent_inventory_requires_complete_fixed_identity_and_typed_absence_report(self):
         valid = json.loads(self.parent().stdout)
-        changes = ({"ok": False}, {"bundle_identifier": "another.app"}, {"expected_app_path": "/another/RepoReach.app"},
+        changes = ({"ok": False}, {"bundle_identifier": "another.app"}, {"expected_app_path": "/another/EnoughRepos.app"},
                    {"exact_app_registered": 0}, {"application_count": True}, {"application_count": 257},
                    {"unknowns": ["unavailable"]}, {"output_truncated": True},
                    {"exact_app_registered": True, "application_count": 0})
@@ -693,16 +693,22 @@ class BuildRegistrationCleanupTests(unittest.TestCase):
         import platform
         source = pathlib.Path(__file__).resolve().parents[1] / "native/Tools/InspectBuiltAppRegistration.swift"
         subprocess.run(["xcrun", "--sdk", "macosx", "swiftc", "-parse-as-library", "-swift-version", "6", "-strict-concurrency=complete", "-warnings-as-errors", "-target", platform.machine() + "-apple-macosx13.0", "-framework", "AppKit", str(source), "-o", str(self.inspector)], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
-        result = subprocess.run([str(self.inspector), str(self.app)], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=20)
-        report = json.loads(result.stdout)
-        self.assertEqual(set(report), set(json.loads(self.parent().stdout)))
-        self.assertIs(report["ok"], True)
-        self.assertEqual(report["bundle_identifier"], "com.enoughtools.reporeach")
-        self.assertEqual(report["expected_app_path"], str(self.app))
-        self.assertIs(report["exact_app_registered"], False)
-        self.assertEqual(report["unknowns"], [])
-        self.assertIs(report["output_truncated"], False)
-        for path in ("relative/RepoReach.app", "/tmp/../RepoReach.app", "/tmp/./RepoReach.app", "/tmp//RepoReach.app", "/tmp/RepoReach.app/"):
+        # The rebrand keeps the signed identity. Inspect both the current
+        # product and a previous installed product during a local update.
+        for app_name in ("EnoughRepos.app", "RepoReach.app"):
+            expected = self.app.with_name(app_name)
+            with self.subTest(app_name=app_name):
+                result = subprocess.run([str(self.inspector), str(expected)], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=20)
+                report = json.loads(result.stdout)
+                self.assertEqual(set(report), set(json.loads(self.parent().stdout)))
+                self.assertIs(report["ok"], True)
+                self.assertEqual(report["bundle_identifier"], "com.enoughtools.reporeach")
+                self.assertEqual(report["expected_app_path"], str(expected))
+                self.assertIs(report["exact_app_registered"], False)
+                self.assertEqual(report["unknowns"], [])
+                self.assertIs(report["output_truncated"], False)
+        for path in ("relative/EnoughRepos.app", "/tmp/../EnoughRepos.app", "/tmp/./EnoughRepos.app", "/tmp//EnoughRepos.app", "/tmp/EnoughRepos.app/",
+                     "/tmp/EnoughRepos.app.backup", "/tmp/FakeEnoughRepos.app", "/tmp/enoughrepos.app", "/tmp/RepoReach.app.backup"):
             with self.subTest(path=path):
                 rejected = subprocess.run([str(self.inspector), path], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=20)
                 self.assertEqual(rejected.returncode, 1)

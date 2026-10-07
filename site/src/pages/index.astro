@@ -18,10 +18,12 @@ try {
     throw error;
   }
 }
+// Existing published downloads retain their original product name. Keep their
+// metadata valid while new builds and the visible site use EnoughRepos.
 const artifacts = release?.artifacts ?? [];
 if (
   release &&
-  (release.product !== "RepoReach" ||
+  (!["EnoughRepos", "RepoReach"].includes(release.product) ||
     typeof release.version !== "string" ||
     !/^[A-Za-z0-9.+-]+$/.test(release.version) ||
     !Array.isArray(artifacts) ||
@@ -110,7 +112,7 @@ minimums.sort((a, b) => {
 const minimumMacOS = minimums[0].join(".").replace(/(?:\.0)+$/, "");
 const requirements = firstDownload
   ? nativeDownload
-    ? `macOS ${minimumMacOS} or later and Git. Enable RepoReach's bundled File System Extension in System Settings. No separate driver installation is needed.`
+    ? `macOS ${minimumMacOS} or later and Git. Enable the bundled File System Extension in System Settings. No separate driver installation is needed.`
     : `macOS ${minimumMacOS} or later, Git, and macFUSE's kernel backend. Apple Silicon setup can require Recovery approval and Reduced Security. Review the setup guide and release notes before installing this beta.`
   : "Requirements will accompany the verified download. Check the release notes before installing a build.";
 const architectureNote =
@@ -124,27 +126,27 @@ const architectureNote =
 const faqs = [
   [
     "Do I need a GitHub account?",
-    "No. Add an HTTPS or SSH Git remote, a local bare repository, or an existing checkout path. RepoReach uses your native Git credentials or SSH setup. Connect GitHub only if you want automatic discovery of the repositories you can access.",
+    "No. Add an HTTPS or SSH Git remote, a local bare repository, or an existing checkout path. EnoughRepos uses your native Git credentials or SSH setup. Connect GitHub only if you want automatic discovery of the repositories you can access.",
   ],
   [
     "What happens to an existing checkout?",
-    "RepoReach creates a separate virtual checkout of its committed data. Your original folder, staged changes, local edits, and untracked files stay where they are. Adding it does not move or replace your working folder.",
+    "EnoughRepos adopts your existing checkout in place. Your folder, staged changes, local edits, and untracked files stay where they are, and the checkout keeps using native Git.",
   ],
   [
     "Are these real files?",
-    "They appear in Finder, your editor, and the terminal through a mounted filesystem. RepoReach downloads committed contents when needed; previews and file metadata checks can also trigger downloads. Edits live on your Mac and use ordinary Git commits and pushes.",
+    "They appear in Finder, your editor, and the terminal through a mounted filesystem. EnoughRepos downloads committed contents when needed; previews and file metadata checks can also trigger downloads. Edits live on your Mac and use ordinary Git commits and pushes.",
   ],
   [
     "What does Keep Downloaded mean?",
-    "Keep Downloaded makes the current committed tree available offline. Other branches and historical file versions may still require a connection. The beta refuses submodules and checkout filters such as Git LFS.",
+    "Keep Downloaded turns a virtual repository into a normal local Git checkout that works even when EnoughRepos is quit. Other branches and historical file versions may still require a connection. The beta refuses submodules and checkout filters such as Git LFS.",
   ],
   [
-    "Will closing RepoReach remove my folders?",
-    "Closing the management window leaves the background service running. Reopen RepoReach whenever you want to manage your repositories. You can explicitly stop the service and unmount the catalogue.",
+    "Will closing EnoughRepos remove my folders?",
+    "Closing the management window leaves the background service running. Reopen EnoughRepos whenever you want to manage your repositories. You can explicitly stop the service and unmount the catalogue.",
   ],
   [
     "Does it upload every file I save?",
-    "No. RepoReach preserves normal Git behavior. Saving a file changes your local work; committing and pushing remain explicit Git operations. Syncing or refreshing gets Git data from your chosen source; it does not automatically publish your saves.",
+    "No. EnoughRepos preserves normal Git behavior. Saving a file changes your local work; committing and pushing remain explicit Git operations. Syncing or refreshing gets Git data from your chosen source; it does not automatically publish your saves.",
   ],
   [
     "Can I choose which repositories appear?",
@@ -152,7 +154,7 @@ const faqs = [
   ],
   [
     "How does Free Up Space protect my work?",
-    "RepoReach checks for local-only work before reclaiming a repository. If it finds edits, unpushed commits, stashes, or files that could be lost, it leaves the repository in place and explains what needs attention.",
+    "EnoughRepos checks for local-only work before reclaiming a repository. If it finds edits, unpushed commits, stashes, or files that could be lost, it leaves the repository in place and explains what needs attention.",
   ],
   ["What does the beta need?", requirements],
 ];
@@ -165,10 +167,13 @@ const faqs = [
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta
       name="description"
-      content="Your Git repositories in Finder. Add a remote or local checkout, optionally discover GitHub repos, and choose what stays downloaded. RepoReach is an open-source Mac app by Enough Tools."
+      content="Your Git repositories in Finder. Add a remote or local checkout, optionally discover GitHub repos, and choose what stays downloaded. EnoughRepos is an open-source Mac app by Enough Tools."
     />
     <meta name="theme-color" content="#3b4fe4" />
-    <meta property="og:title" content="RepoReach — Every repo, within reach." />
+    <meta
+      property="og:title"
+      content="EnoughRepos — Every repo, right at home."
+    />
     <meta
       property="og:description"
       content="Your Git repositories in Finder. GitHub sign-in is optional. An open-source Mac app by Enough Tools."
@@ -184,19 +189,19 @@ const faqs = [
       type="font/woff2"
       crossorigin
     />
-    <title>RepoReach — Every repo, within reach.</title>
+    <title>EnoughRepos — Every repo, right at home.</title>
   </head>
   <body>
     <a class="skip-link" href="#main">Skip to content</a>
     <header class="site-header">
-      <a class="product-brand" href="/" aria-label="RepoReach home"
+      <a class="product-brand" href="/" aria-label="EnoughRepos home"
         ><img
           class="repo-mark"
           src="/favicon.svg"
           alt=""
           width="36"
           height="36"
-        /><span>RepoReach</span></a
+        /><span>EnoughRepos</span></a
       >
       <nav aria-label="Main navigation">
         <a href="#how-it-works">How it works</a><a href="#questions"
@@ -216,7 +221,7 @@ const faqs = [
               >Open source</Badge
             >
           </div>
-          <h1 id="hero-title">Every repo,<br /><em>within reach.</em></h1>
+          <h1 id="hero-title">Every repo,<br /><em>right at home.</em></h1>
           <p class="hero-description">
             Your Git repositories belong in Finder. Add a remote or local
             checkout, browse on demand, and keep the projects you need
@@ -242,7 +247,7 @@ const faqs = [
           <div class="demo-chrome">
             <div class="window-controls" aria-hidden="true">
               <i></i><i></i><i></i>
-            </div><span>RepoReach</span><span class="demo-label"
+            </div><span>EnoughRepos</span><span class="demo-label"
               >Interactive demo</span
             >
           </div>
@@ -269,13 +274,13 @@ const faqs = [
           <div class="demo-row">
             <span class="demo-file"
               ><span class="folder" aria-hidden="true">▰</span><span
-                >reporeach<small>The app you're looking at</small></span
+                >enoughrepos<small>The app you're looking at</small></span
               ></span
             ><button
               class="demo-action"
-              data-demo-repo="reporeach"
+              data-demo-repo="enoughrepos"
               data-pinned="true"
-              aria-label="Demonstrate freeing space for reporeach"
+              aria-label="Demonstrate freeing space for enoughrepos"
               ><span aria-hidden="true">✓</span> Downloaded</button
             >
           </div>
@@ -300,7 +305,7 @@ const faqs = [
           </div>
         </div>
       </section>
-      <section class="principles" aria-label="RepoReach principles">
+      <section class="principles" aria-label="EnoughRepos principles">
         <span>Your selected repositories</span><span>Your chosen folder</span
         ><span>Normal Git workflow</span><span>Less disk space</span>
       </section>
@@ -356,9 +361,9 @@ const faqs = [
           >
             Close the window.<br /><em>Your repos stay.</em>
           </h2><p>
-            RepoReach works quietly in the background. Finder actions handle the
-            everyday things; the app is there for adding repositories, choosing
-            what appears, and managing your catalogue.
+            EnoughRepos works quietly in the background. Finder actions handle
+            the everyday things; the app is there for adding repositories,
+            choosing what appears, and managing your catalogue.
           </p>
         </div>
         <div class="action-list">
@@ -394,7 +399,7 @@ const faqs = [
         </div>
         <div class="download-panel">
           <div class="download-title">
-            <span>RepoReach for macOS</span><Badge variant="outline"
+            <span>EnoughRepos for macOS</span><Badge variant="outline"
               >{release?.version ?? "Beta in development"}</Badge
             >
           </div>
@@ -467,8 +472,13 @@ const faqs = [
             >
           </div>
           <p class="release-note">
-            An early beta for deliberate testing. Keep backups of important
-            local work.
+            {
+              firstDownload && release.product === "RepoReach" && (
+                <>The current download was published as RepoReach. </>
+              )
+            }
+            An early beta for deliberate testing. Keep backups of important local
+            work.
           </p>
         </div>
       </section>

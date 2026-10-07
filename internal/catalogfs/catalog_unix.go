@@ -805,7 +805,7 @@ func Mount(ctx context.Context, root string, fs *FileSystem) (fusefs.MountedFS, 
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	cfg := &fuse.MountConfig{FSName: "RepoReach", Subtype: "reporeach", DisableWritebackCaching: true, UseVectoredRead: true}
+	cfg := &fuse.MountConfig{FSName: "EnoughRepos", Subtype: "reporeach", DisableWritebackCaching: true, UseVectoredRead: true}
 	if runtime.GOOS == "darwin" {
 		cfg.FuseImpl = fuse.FUSEImplMacFUSE
 	}

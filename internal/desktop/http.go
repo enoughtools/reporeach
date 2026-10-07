@@ -42,7 +42,7 @@ func Serve(ctx context.Context, opts Options) (retErr error) {
 	}
 	defer lock.Close()
 	if err := unix.Flock(int(lock.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
-		return errors.New("RepoReach is already running for this state directory")
+		return errors.New("EnoughRepos is already running for this state directory")
 	}
 	defer unix.Flock(int(lock.Fd()), unix.LOCK_UN)
 	if info, err := os.Lstat(opts.Socket); err == nil {
@@ -52,7 +52,7 @@ func Serve(ctx context.Context, opts Options) (retErr error) {
 		connection, dialErr := net.DialTimeout("unix", opts.Socket, 200*time.Millisecond)
 		if dialErr == nil {
 			_ = connection.Close()
-			return errors.New("RepoReach is already listening on this socket")
+			return errors.New("EnoughRepos is already listening on this socket")
 		}
 		if err := os.Remove(opts.Socket); err != nil {
 			return err
@@ -243,11 +243,11 @@ func Request(ctx context.Context, socket, method, path string, body []byte) ([]b
 		return nil, 0, errors.New("body must be valid JSON smaller than 1 MiB")
 	}
 	if err := privateDirectory(filepath.Dir(socket), false); err != nil {
-		return nil, 0, errors.New("RepoReach's control socket directory is not private")
+		return nil, 0, errors.New("EnoughRepos's control socket directory is not private")
 	}
 	info, err := os.Lstat(socket)
 	if err != nil || info.Mode()&os.ModeSocket == 0 || !ownedByCurrentUser(info) || info.Mode().Perm()&0o077 != 0 {
-		return nil, 0, errors.New("RepoReach's private control socket is unavailable")
+		return nil, 0, errors.New("EnoughRepos's private control socket is unavailable")
 	}
 	transport := &http.Transport{
 		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
@@ -263,7 +263,7 @@ func Request(ctx context.Context, socket, method, path string, body []byte) ([]b
 	request.Header.Set("Content-Type", "application/json")
 	response, err := client.Do(request)
 	if err != nil {
-		return nil, 0, errors.New("could not connect to RepoReach's background service")
+		return nil, 0, errors.New("could not connect to EnoughRepos's background service")
 	}
 	defer response.Body.Close()
 	data, err := io.ReadAll(io.LimitReader(response.Body, 32<<20+1))

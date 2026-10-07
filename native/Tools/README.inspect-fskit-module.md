@@ -1,7 +1,7 @@
 # Read-only FSKit module selection
 
 `inspect-fskit-module.swift` requires the public FSKit inventory visible to its
-caller to identify the selected RepoReach extension as the sole enabled
+caller to identify the selected EnoughRepos extension as the sole enabled
 filesystem with short name `reporeach`, at the exact selected bundle path. This
 is an acceptance precondition; it does not prove which extension the system
 mount dispatcher executes. It reads only module
@@ -13,7 +13,7 @@ xcrun swiftc -parse-as-library -target arm64-apple-macos15.4 \
 /absolute/temporary/inspect-fskit-module --self-test
 /absolute/temporary/inspect-fskit-module \
   com.enoughtools.reporeach.validation.fskit \
-  /absolute/RepoReach.app/Contents/Extensions/RepoReachFSKit.appex
+  /absolute/EnoughRepos.app/Contents/Extensions/RepoReachFSKit.appex
 ```
 
 Use `x86_64-apple-macos15.4` when compiling locally on Intel. The self-test runs

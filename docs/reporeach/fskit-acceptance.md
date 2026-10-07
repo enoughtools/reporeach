@@ -1,5 +1,10 @@
 # Mounted FSKit acceptance harness
 
+The app is now named EnoughRepos. Historical results below retain the RepoReach
+name and exact build identities used for those runs. The filesystem short name
+`reporeach`, module identifiers, and private state paths remain compatible. A
+rebrand does not transfer these historical passes to a newly compiled app.
+
 `TestFSKitMountedAcceptance` exercises the native macOS 26 filesystem through real mounted paths and the desktop control service. It uses private temporary state, an ordinary chosen catalogue folder, a separate hidden native volume under `state/native-catalogue/volume`, and local Git fixtures. It does not install an app, activate an extension, update the OS, or change security settings.
 
 The current harness tests the hybrid catalogue contract: organization folders are ordinary host directories, virtual repository entries are owned links to the private volume, adopted repositories retain their original checkout, and Keep publishes an ordinary checkout with its own `.git` directory. After normal quit, adopted originals and kept checkouts remain usable without the app. Cached kernel inspection captures the private volume's identity; the chosen catalogue root must never itself be mounted. These assertions now have real mounted passes on the development Mac, recorded below. Historical whole-root passes do not establish this hybrid contract.
@@ -108,7 +113,7 @@ Historical combined whole-root result: clean helper `f47c1fd` with unchanged ins
 ## Prerequisites
 
 - macOS 26 or later, with the `reporeach` FSKit module already installed and enabled in normal System Settings.
-- An installed `RepoReach.app` containing `Contents/Extensions/RepoReachFSKit.appex`, whose compiled filesystem implementation matches the verified native source under test. Record separate app and helper revisions and any validation-only bundle-metadata changes as described below. Building the extension requires Xcode 26 or later and a macOS SDK at version 26 or later; Xcode 27 with its macOS 27 SDK is a valid local toolchain while retaining the module's macOS 26 deployment target. Installation also requires the appropriate signing and FSKit entitlement authorization.
+- An installed `EnoughRepos.app` containing `Contents/Extensions/RepoReachFSKit.appex`, whose compiled filesystem implementation matches the verified native source under test. Record separate app and helper revisions and any validation-only bundle-metadata changes as described below. Building the extension requires Xcode 26 or later and a macOS SDK at version 26 or later; Xcode 27 with its macOS 27 SDK is a valid local toolchain while retaining the module's macOS 26 deployment target. Installation also requires the appropriate signing and FSKit entitlement authorization.
 - Native Git available on `PATH`, and Go 1.26.8 or toolchain download access.
 - The app, Go engine and module claim the same Team-ID-prefixed app group. `AFS_FSKIT_SIGNING_IDENTITY` names the verified local certificate SHA-1 used by that installed module. The harness signs only its disposable copied Go test helper with that identity and group, and strictly verifies it before launch. It obtains the real group container through the installed app’s headless Foundation resolver; it never constructs a Group Containers path.
 - Public FSKit discovery must identify the selected module identifier and exact module path as the sole enabled filesystem advertising `reporeach`. The read-only inspector fails on absent candidates, duplicate registrations, competing enabled modules, unreadable metadata, or incomplete output before the harness creates a fixture or asks to mount.
@@ -189,7 +194,7 @@ From the repository root:
 ```sh
 GOTOOLCHAIN=go1.26.8 \
 AFS_RUN_FSKIT_E2E_TESTS=1 \
-AFS_FSKIT_APP=/Applications/RepoReach.app \
+AFS_FSKIT_APP=/Applications/EnoughRepos.app \
 AFS_FSKIT_MODULE_CONFIRMED=1 \
 AFS_FSKIT_SIGNING_IDENTITY=VERIFIED_LOCAL_CERTIFICATE_SHA1 \
 go test -run '^TestFSKitMountedAcceptance$' -count=1 -v -timeout=20m .
@@ -207,7 +212,7 @@ to the same invocation and use its absolute app path:
 ```sh
 GOTOOLCHAIN=go1.26.8 \
 AFS_RUN_FSKIT_E2E_TESTS=1 \
-AFS_FSKIT_APP=/absolute/path/to/isolated/RepoReach.app \
+AFS_FSKIT_APP=/absolute/path/to/isolated/EnoughRepos.app \
 AFS_FSKIT_MODULE_ID=com.enoughtools.reporeach.validation.fskit \
 AFS_FSKIT_MODULE_CONFIRMED=1 \
 AFS_FSKIT_INSPECTOR=/absolute/path/to/verified/inspect-fskit-module \

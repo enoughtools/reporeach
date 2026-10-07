@@ -21,7 +21,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 FileHandle.standardOutput.write(document + Data([10]))
                 exit(EXIT_SUCCESS)
             } catch {
-                FileHandle.standardError.write(Data("RepoReach's private filesystem connection is unavailable.\n".utf8))
+                FileHandle.standardError.write(Data("The EnoughRepos private filesystem connection is unavailable.\n".utf8))
                 exit(EXIT_FAILURE)
             }
         }
@@ -69,7 +69,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private func createMainWindow() {
         guard mainWindow == nil else { return }
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1100, height: 740), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
-        window.title = "RepoReach"
+        window.title = "EnoughRepos"
         window.minSize = NSSize(width: 1040, height: 680)
         window.isReleasedWhenClosed = false
         window.delegate = self
@@ -90,7 +90,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     @objc private func showSettings() {
         if settingsWindow == nil {
             let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 690, height: 640), styleMask: [.titled, .closable], backing: .buffered, defer: false)
-            window.title = "RepoReach Settings"; window.isReleasedWhenClosed = false; window.delegate = self
+            window.title = "EnoughRepos Settings"; window.isReleasedWhenClosed = false; window.delegate = self
             window.contentView = NSHostingView(rootView: SettingsView().environmentObject(store))
             window.center(); settingsWindow = window
         }
@@ -116,7 +116,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             if self.mainWindow?.isVisible != true && self.settingsWindow?.isVisible != true { NSApp.setActivationPolicy(.accessory) }
             #if DEBUG
             if ProcessInfo.processInfo.environment["REPOREACH_LIFECYCLE_TRACE"] == "1" {
-                print("RepoReach lifecycle: visible=\(self.mainWindow?.isVisible == true || self.settingsWindow?.isVisible == true), serviceRunning=\(self.store.serviceRunning)")
+                print("EnoughRepos lifecycle: visible=\(self.mainWindow?.isVisible == true || self.settingsWindow?.isVisible == true), serviceRunning=\(self.store.serviceRunning)")
                 fflush(stdout)
             }
             #endif
@@ -141,13 +141,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let appItem = NSMenuItem(); menu.addItem(appItem)
         let applicationMenu = NSMenu()
         appItem.submenu = applicationMenu
-        applicationMenu.addItem(withTitle: "About RepoReach", action: #selector(showAbout), keyEquivalent: "")
+        applicationMenu.addItem(withTitle: "About EnoughRepos", action: #selector(showAbout), keyEquivalent: "")
         applicationMenu.addItem(.separator())
         applicationMenu.addItem(withTitle: "Settings…", action: #selector(showSettings), keyEquivalent: ",")
         applicationMenu.addItem(.separator())
-        applicationMenu.addItem(withTitle: "Hide RepoReach", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
+        applicationMenu.addItem(withTitle: "Hide EnoughRepos", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
         applicationMenu.addItem(.separator())
-        applicationMenu.addItem(withTitle: "Quit RepoReach", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        applicationMenu.addItem(withTitle: "Quit EnoughRepos", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         let editItem = NSMenuItem(title: "Edit", action: nil, keyEquivalent: ""); menu.addItem(editItem)
         let editMenu = NSMenu(title: "Edit"); editItem.submenu = editMenu
         editMenu.addItem(withTitle: "Undo", action: Selector(("undo:")), keyEquivalent: "z")
@@ -159,10 +159,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         editMenu.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
         let windowItem = NSMenuItem(title: "Window", action: nil, keyEquivalent: ""); menu.addItem(windowItem)
         let windowMenu = NSMenu(title: "Window"); windowItem.submenu = windowMenu
-        windowMenu.addItem(withTitle: "Show RepoReach", action: #selector(showMainWindow), keyEquivalent: "0")
+        windowMenu.addItem(withTitle: "Show EnoughRepos", action: #selector(showMainWindow), keyEquivalent: "0")
         let helpItem = NSMenuItem(title: "Help", action: nil, keyEquivalent: ""); menu.addItem(helpItem)
         let helpMenu = NSMenu(title: "Help"); helpItem.submenu = helpMenu
-        helpMenu.addItem(withTitle: "RepoReach Website", action: #selector(openWebsite), keyEquivalent: "")
+        helpMenu.addItem(withTitle: "EnoughRepos Website", action: #selector(openWebsite), keyEquivalent: "")
         helpMenu.addItem(withTitle: "Source & Issues", action: #selector(openSource), keyEquivalent: "")
         NSApp.mainMenu = menu; NSApp.windowsMenu = windowMenu; NSApp.helpMenu = helpMenu
     }
@@ -170,7 +170,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     @objc private func openWebsite() { NSWorkspace.shared.open(URL(string: "https://reporeach.reb.run")!) }
     @objc private func openSource() { NSWorkspace.shared.open(URL(string: "https://github.com/enoughtools/reporeach")!) }
     @objc private func showAbout() {
-        NSApp.orderFrontStandardAboutPanel(options: [.applicationName: "RepoReach", .applicationVersion: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.1.0", .credits: NSAttributedString(string: "An open source tool by Enough Tools.\nBuilt on Cloudflare ArtifactFS.")])
+        NSApp.orderFrontStandardAboutPanel(options: [.applicationName: "EnoughRepos", .applicationVersion: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.1.0", .credits: NSAttributedString(string: "An open source tool by Enough Tools.\nBuilt on Cloudflare ArtifactFS.")])
     }
 
     private func captureDemoWindow(destination: String) {

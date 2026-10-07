@@ -1,6 +1,6 @@
 //go:build !windows
 
-// Package fsbridge exposes the existing filesystem operations to RepoReach's
+// Package fsbridge exposes the existing filesystem operations to EnoughRepos's
 // native FSKit extension. File contents use bounded binary HTTP messages; JSON
 // carries only filesystem metadata. The server listens exclusively on a private
 // Unix socket and requires a fresh capability for each mount session.

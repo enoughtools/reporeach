@@ -1,6 +1,12 @@
-# RepoReach documentation
+# EnoughRepos documentation
 
-RepoReach is an [Enough Tools](https://enoughtools.com) macOS app built on [Cloudflare ArtifactFS](https://github.com/cloudflare/artifact-fs). It puts selected Git repositories in a folder you choose. Add a remote or existing local checkout without signing in, or connect GitHub for account and organization discovery. Repository contents become available on demand through a writable Git filesystem.
+EnoughRepos is an [Enough Tools](https://enoughtools.com) macOS app built on [Cloudflare ArtifactFS](https://github.com/cloudflare/artifact-fs). It puts selected Git repositories in a folder you choose. Add a remote or existing local checkout without signing in, or connect GitHub for account and organization discovery. Repository contents become available on demand through a writable Git filesystem.
+
+The app was previously named RepoReach. Its existing state directory, signing
+identifiers, FSKit short name, developer commands, source repository, website
+address, and documentation paths retain their compatibility names. Current app
+packages are named `EnoughRepos.app`; historical build evidence and releases
+retain the names used when they were produced.
 
 This documentation describes the current beta source. A packaged release's download manifest and release notes are the authority for its version, architecture, signing, and notarization status.
 

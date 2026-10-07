@@ -1,6 +1,8 @@
-# RepoReach filesystem extension
+# EnoughRepos filesystem extension
 
-This is a native FSKit module for macOS 26, packaged as an ExtensionKit extension at `RepoReach.app/Contents/Extensions/RepoReachFSKit.appex`. Its bundle identifier is `com.enoughtools.reporeach.fskit`; its filesystem type is `reporeach`.
+This is a native FSKit module for macOS 26, packaged as an ExtensionKit extension at `EnoughRepos.app/Contents/Extensions/RepoReachFSKit.appex`. Its bundle identifier is `com.enoughtools.reporeach.fskit`; its filesystem type is `reporeach`.
+
+The visible extension name is **EnoughRepos Filesystem**. Its identifier, filesystem short name, App Group, and internal module name stay compatible with existing installations and user approvals.
 
 The implementation follows Apple's documented [unary filesystem design](https://developer.apple.com/documentation/fskit/) and [passthrough sample](https://developer.apple.com/documentation/fskit/building-a-passthrough-file-system). It uses public APIs only. `FSPathURLResource` requires the real macOS 26 SDK and runtime. Core volume operation signatures can be checked against the installed SDK 15.5, but that is not a full extension build or a mount test.
 

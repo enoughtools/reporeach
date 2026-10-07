@@ -1,57 +1,76 @@
-# macOS setup for the RepoReach beta
+# macOS setup for EnoughRepos
 
-RepoReach targets macOS 13 or later, with separate Apple Silicon and Intel downloads. The current beta requires **macFUSE's kernel backend**, installed separately. The app, its Finder extension, and macFUSE have separate approval steps.
+The current native development app requires **macOS 26 or later for virtual
+repositories**, Git, and normal approval of its bundled FSKit extension. No
+separate macFUSE installation is required. The management app's macOS 13
+deployment target does not lower the filesystem requirement. Local runtime checks
+cover macOS 27.0.1 on Apple Silicon; macOS 26 and Intel runtime remain unqualified.
+See the [native acceptance record](fskit-acceptance.md).
 
-## Install and approve macFUSE
+EnoughRepos was previously called RepoReach. The app retains existing state,
+signing identifiers, and the filesystem short name `reporeach`. Keep
+`~/Library/Application Support/RepoReach` when upgrading; renaming or deleting it
+can disconnect the app from existing repository state. Historical builds and
+published downloads retain their original names.
 
-Download macFUSE from its [official website](https://macfuse.io/) or [official releases](https://github.com/macfuse/macfuse/releases), then follow the [kernel backend setup guide](https://github.com/macfuse/macfuse/wiki/Getting-Started#kernel-backend). RepoReach does not install the driver or change macOS security settings.
+## Install and enable the bundled extension
 
-- **Intel Macs:** approve the macFUSE kernel extension when macOS requests it, then restart as directed.
-- **Apple Silicon Macs:** if third-party kernel extensions are not already enabled, setup requires Recovery and Startup Security Utility. Select **Reduced Security** and **Allow user management of kernel extensions from identified developers**, then restart. Approve macFUSE when prompted and complete any further requested restart. This changes the startup disk's security policy; Apple's [instructions explain the setting](https://support.apple.com/guide/mac-help/mchl768f7291/mac).
+Copy `EnoughRepos.app` into Applications and open it. Check the build's manifest
+for its actual signing and notarization status. A Developer ID signature
+identifies the publisher and protects signed code; it does not substitute for
+notarization or extension approval.
 
-Follow the location named by the macOS approval alert: Apple documents **Privacy & Security** on earlier versions and **Login Items & Extensions** on macOS 15 or later. See [Apple's extension approval guidance](https://support.apple.com/120363). Managed Macs may require an administrator's approval.
+Enable EnoughRepos's File System Extension under **System Settings → General →
+Login Items & Extensions → File System Extensions** when requested. Enable the
+Finder extension separately for badges and repository actions. Approval of one
+extension does not approve the other. Managed Macs can require administrator
+approval. See [Apple's passthrough FSKit sample](https://developer.apple.com/documentation/fskit/building-a-passthrough-file-system)
+for the platform's extension-enablement flow.
 
-macFUSE's FSKit backend is available from macOS 15.4 and avoids the kernel extension's Recovery requirement, but **this beta does not implement that backend**. Installing or enabling only the FSKit component is insufficient. macFUSE's official setup does not require disabling Gatekeeper or System Integrity Protection.
+If macOS blocks an unnotarized app because Apple cannot check it, and you trust
+the build, follow [Apple's opening instructions](https://support.apple.com/102445):
+open **System Settings → Privacy & Security**, choose **Open Anyway** for
+EnoughRepos, and confirm. Preserve the exact warning if macOS reports damage,
+malware, or revoked authorization; those are different failures.
 
 ## Choose the repository folder
 
-Choose a dedicated, empty, writable local folder, such as `~/Repositories` or `~/code/Repositories`. RepoReach refuses a nonempty destination, and its private state directory must remain separate. The beta uses a FUSE mount and has no Apple File Provider requirement to live under `~/Library/CloudStorage`.
+Choose a writable local folder, such as `~/Repositories`, then select **Enable
+Virtual Folders**. The root and organization folders remain ordinary host
+directories. Existing files can stay there; conflicting repository names are
+refused. Keep the selected folder separate from private app storage.
 
-Use a folder on the Mac's local internal storage for the first beta. External disks, network locations, cloud-synced folders, and mounts inside another virtual filesystem have not been validated. A folder accepted by the app is not proof that the driver can mount it. If connecting fails, retain the error and check driver approval before moving repository data.
+Virtual entries link into a hidden app-managed FSKit volume. Existing checkouts
+are adopted in place, and external checkouts receive direct links to their
+original folders. **Keep Downloaded** publishes an ordinary checkout at the
+selected repository path. Adopted and kept checkouts continue working after the
+app quits. See [the user guide](user-guide.md) for storage and upgrade behavior.
 
-## Open a signed but unnotarized beta
+Use local internal storage for initial testing. External disks, network
+locations, cloud-synced folders, and paths inside another virtual filesystem
+still need qualification. A folder accepted by the app does not establish all
+filesystem or editor workflows at that location.
 
-The first beta may carry a Developer ID signature without Apple notarization. Check the download's release manifest for its actual signing and notarization status. A signature identifies the publisher and detects altered signed code; it does not substitute for notarization.
+## Check Finder integration
 
-Copy `RepoReach.app` into Applications, then try to open it. If macOS blocks it because Apple cannot check it, and you trust the downloaded release:
+Right-click one repository to check for **Keep Downloaded**, **Free Up Space**,
+and **Refresh Repository**. Eligibility depends on its current state; actions
+for ambiguous selections across repositories are absent. Active actions show
+progress, and completion updates the repository's status. A compiled or signed
+extension still needs installed-app validation of registration, permissions,
+badges, and dispatch.
 
-1. Open **System Settings → Privacy & Security**.
-2. In the Security section, choose **Open Anyway** for RepoReach.
-3. Confirm **Open** and authenticate if requested.
+Closing the management window leaves EnoughRepos running without a menu-bar
+item. Reopen the app to show the window. Explicit Quit stops its owned service
+and disconnects virtual access; ordinary local checkouts remain available.
+Launch at login is optional.
 
-This saves an exception for the app. Follow [Apple's current opening instructions](https://support.apple.com/102445); do not disable Gatekeeper globally or remove quarantine from unrelated files. If macOS reports damage, malware, or revoked authorization, stop and report the exact warning rather than treating it as the ordinary unnotarized-app prompt.
+## Historical RepoReach beta downloads
 
-## Enable Finder actions
-
-Launch the installed app, then enable its Finder extension:
-
-| macOS version | Settings location |
-| --- | --- |
-| 13 Ventura and 14 Sonoma | **System Settings → Privacy & Security → Extensions**; select RepoReach under Finder Extensions or its Finder checkbox under Added Extensions. |
-| 15 Sequoia and later | **System Settings → General → Login Items & Extensions**; open the information button for Finder or Added Extensions and enable RepoReach's Finder extension. |
-
-Apple provides version-specific instructions for [Ventura](https://support.apple.com/guide/mac-help/change-extensions-settings-mchl8baf92fe/13.0/mac/13.0), [Sonoma](https://support.apple.com/guide/mac-help/change-extensions-settings-mchl8baf92fe/14.0/mac/14.0), and [Sequoia](https://support.apple.com/guide/mac-help/mtusr003/15.0/mac/15.0). Use these paths if the app's settings shortcut does not open the expected panel. Finder extension approval does not approve the macFUSE driver.
-
-Connect the chosen folder and right-click a repository to check for Keep Downloaded, Free Up Space, and Refresh Repository. Actions for selections across different repositories are intentionally absent. A compiled or signed extension still needs installed-app validation of its registration, permissions, badges, and actions.
-
-## Background behavior
-
-Closing the management window leaves RepoReach and its service running, with no menu-bar item. Reopen RepoReach to show the window. Explicitly quitting stops its owned service and disconnects the mount. Launch at login is optional and may require approval in System Settings.
-
-## Backend evidence and validation status
-
-The reviewed source selects `fuse.FUSEImplMacFUSE` in the catalogue mount and pins `github.com/jacobsa/fuse` to `a124548f6da78ddcc3681b4e61868e1e4dadd728`. That adapter invokes `mount_macfuse` and expects the legacy device-file-descriptor transport; see its [pinned Darwin implementation](https://github.com/jacobsa/fuse/blob/a124548f6da78ddcc3681b4e61868e1e4dadd728/mount_darwin.go). It does not integrate `MFMount.framework` or request `backend=fskit`.
-
-macFUSE's [MFMount documentation](https://github.com/macfuse/macfuse/wiki/Getting-Started-%28Developer%29-%E2%80%90-MFMount.framework) states that its FSKit backend “no longer exposes a FUSE device file descriptor as the communication endpoint.” Supporting it requires adapting the mount and transport layer, not a user setting. macFUSE 5.4.0's [release notes](https://github.com/macfuse/macfuse/releases/tag/macfuse-5.4.0) describe newer FSKit support and mount-point handling; they do not establish compatibility with this beta's adapter.
-
-Sources and source configuration were reviewed on October 4, 2026. The macOS 15.4.1 development host has no macFUSE installation, so an actual macOS mount, installed Finder integration, and downloaded-app Gatekeeper flow have not been validated there. The macOS 13 deployment target is not a claim that every supported OS and architecture combination has passed runtime tests. Release notes must distinguish build/signature checks from those remaining installation tests.
+The immutable RepoReach `0.1.0-beta.3` release uses the earlier macFUSE kernel
+backend on macOS 13 or later. It requires a separately installed driver and can
+require Recovery approval on Apple Silicon. Its separate-clone adoption and
+cache-based Keep behavior differ from the native development app. Follow that
+release's retained requirements and [historical validation](validation.md);
+installing only macFUSE's FSKit component does not adapt the historical backend.
+Current EnoughRepos source does not change those existing downloads.

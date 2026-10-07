@@ -19,7 +19,7 @@ const rootMigrationFile = "rootmount-migration.json"
 
 // A failed rollback leaves the catalogue detached. Startup recovery must finish
 // before repository operations or mounts may resume.
-var errRootMigrationRecoveryNeeded = errors.New("mount folder migration requires recovery; restart RepoReach")
+var errRootMigrationRecoveryNeeded = errors.New("mount folder migration requires recovery; restart EnoughRepos")
 
 type rootMigration struct {
 	SchemaVersion int                          `json:"schemaVersion"`

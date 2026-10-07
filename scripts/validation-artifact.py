@@ -47,11 +47,11 @@ def export(args):
         require(executable.is_file(), f"Bundled {helper} helper is missing")
         require(run("lipo", "-archs", str(executable)).split() == [args.arch], f"Bundled {helper} architecture does not match the app")
     args.output.mkdir(parents=True, exist_ok=True)
-    name = f"RepoReach-local-validation-{args.arch}"
+    name = f"EnoughRepos-local-validation-{args.arch}"
     archive = args.output / f"{name}.zip"
     require(not archive.exists(), "Refusing to overwrite an existing local validation archive")
     warning = (
-        "RepoReach local validation artifact — not a release.\n"
+        "EnoughRepos local validation artifact — not a release.\n"
         "This app has no authorized FSKit provisioning profile or Developer ID signature.\n"
         "Unprovisioned local signing may require repeated user approval.\n"
         "Production distribution requires a matching FSKit profile and Developer ID signing.\n"

@@ -1,18 +1,18 @@
-# Contributing to RepoReach
+# Contributing to EnoughRepos
 
-RepoReach is an [Enough Tools](https://enoughtools.com) project built on Cloudflare ArtifactFS. Work happens at [github.com/enoughtools/reporeach](https://github.com/enoughtools/reporeach); product information lives at [reporeach.reb.run](https://reporeach.reb.run).
+EnoughRepos is an [Enough Tools](https://enoughtools.com) project built on Cloudflare ArtifactFS. Work happens at [github.com/enoughtools/reporeach](https://github.com/enoughtools/reporeach); product information lives at [reporeach.reb.run](https://reporeach.reb.run).
 
 Read [AGENTS.md](AGENTS.md), [the architecture](docs/reporeach/architecture.md), and [the beta's actual behavior](docs/reporeach/user-guide.md) before changing lifecycle, hydration, or storage release. Keep attribution and third-party license notices intact. The source uses Apache 2.0; bundled dependencies have their own licenses.
 
 ## Development requirements
 
 - Go 1.26.8 and Git for the engine. Release tooling and CI pin this patch version; `go.mod` declares the minimum language version.
-- macOS, full Xcode with command-line tools, and XcodeGen for the native app and Finder extension. The deployment target is macOS 13.
-- macFUSE on macOS, or a usable `/dev/fuse` device on Linux, for mounted filesystem tests. Ordinary package tests do not need a mount.
+- Full Xcode 26 or later with the macOS 26 SDK or later, and XcodeGen, for the native app and bundled FSKit extension. The management app deployment target is macOS 13; virtual repositories require macOS 26.
+- An installed, signed and enabled native app for [macOS FSKit acceptance](docs/reporeach/fskit-acceptance.md), or a usable `/dev/fuse` device for Linux mounted tests. Ordinary package tests do not need a mount.
 - Node.js 22.14 or later and npm for the Astro website. Use its committed lockfile.
 - Python 3 and macOS packaging tools for release scripts. [Release instructions](docs/reporeach/releasing.md) cover the bundled official GitHub CLI and signing requirements.
 
-The native project is generated from `native/project.yml`; edit that specification instead of relying on local Xcode project changes. A complete app package must include its engine, official GitHub CLI, and Finder extension. Building only the Swift target does not package those helpers.
+The native project is generated from `native/project.yml`; edit that specification instead of relying on local Xcode project changes. A complete app package must include its engine, official GitHub CLI, Finder extension, and FSKit extension. Building only the Swift target does not package those helpers. The Xcode project and schemes retain their internal `RepoReach` names; the compiled app is `EnoughRepos.app`.
 
 ## Validate a change
 

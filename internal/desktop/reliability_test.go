@@ -92,7 +92,7 @@ func TestMountPathCannotReachPrivateStateThroughSymlinkAncestor(t *testing.T) {
 }
 
 func TestGitCredentialHelperDisablesTelemetryForTerminalGit(t *testing.T) {
-	helper := githubCredentialHelper("/Applications/RepoReach.app/Contents/Helpers/gh")
+	helper := githubCredentialHelper("/Applications/EnoughRepos.app/Contents/Helpers/gh")
 	if !strings.HasPrefix(helper, "!GH_TELEMETRY=false '") || !strings.HasSuffix(helper, "' auth git-credential") {
 		t.Fatalf("unexpected managed credential helper: %q", helper)
 	}

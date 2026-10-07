@@ -86,7 +86,7 @@ final class RepositoryStore: ObservableObject {
                     if let loaded: EngineStatus = try? await service.client.request("GET", path: "/v1/status", timeout: 3) { ready = loaded; break }
                     try await Task.sleep(nanoseconds: 200_000_000)
                 }
-                guard let ready else { throw EngineFailure(message: "The repository service did not start. Reopen RepoReach, or inspect the service log in Application Support/RepoReach.") }
+                guard let ready else { throw EngineFailure(message: "The repository service did not start. Reopen EnoughRepos, or inspect the service log in Application Support/RepoReach.") }
                 apply(ready)
             }
             errorMessage = nil
@@ -230,10 +230,10 @@ final class RepositoryStore: ObservableObject {
     }
 
     func handleActionURL(_ url: URL) async {
-        guard let route = ActionRoute(url: url) else { errorMessage = "This RepoReach action is invalid."; return }
+        guard let route = ActionRoute(url: url) else { errorMessage = "This EnoughRepos action is invalid."; return }
         if status == nil || !serviceRunning { await start() }
         guard let repository = repositories.first(where: { $0.id == route.repo }), let action = RepositoryAction(rawValue: route.action.rawValue) else {
-            errorMessage = "This repository is no longer in your catalogue. Refresh your repositories in RepoReach."
+            errorMessage = "This repository is no longer in your catalogue. Refresh your repositories in EnoughRepos."
             return
         }
         await self.action(repository, action)
@@ -259,7 +259,7 @@ final class RepositoryStore: ObservableObject {
         guard !demoMode else { return }
         let panel = NSOpenPanel()
         panel.title = "Choose your repository folder"
-        panel.message = "Choose where RepoReach groups your repositories. Existing local checkouts stay in their original folders."
+        panel.message = "Choose where EnoughRepos groups your repositories. Existing local checkouts stay in their original folders."
         panel.prompt = "Use Folder"; panel.canChooseDirectories = true; panel.canChooseFiles = false
         panel.canCreateDirectories = true; panel.allowsMultipleSelection = false
         if let current = status?.mountRoot { panel.directoryURL = URL(fileURLWithPath: current).deletingLastPathComponent() }
@@ -315,7 +315,7 @@ final class RepositoryStore: ObservableObject {
             if enabled { try SMAppService.mainApp.register() } else { try await SMAppService.mainApp.unregister() }
             launchAtLogin = SMAppService.mainApp.status == .enabled
             if enabled && SMAppService.mainApp.status == .requiresApproval {
-                errorMessage = "Allow RepoReach in System Settings → General → Login Items to finish enabling startup."
+                errorMessage = "Allow EnoughRepos in System Settings → General → Login Items to finish enabling startup."
                 SMAppService.openSystemSettingsLoginItems()
             }
         } catch { show(error); launchAtLogin = SMAppService.mainApp.status == .enabled }
@@ -331,7 +331,7 @@ final class RepositoryStore: ObservableObject {
         do {
             let loaded: EngineStatus = try await service.client.request("POST", path: "/v1/prepare-quit", timeout: 45)
             apply(loaded)
-            guard !loaded.mounted else { throw EngineFailure(message: "The repository folder is still in use. Close files and terminals using it before quitting RepoReach.") }
+            guard !loaded.mounted else { throw EngineFailure(message: "The repository folder is still in use. Close files and terminals using it before quitting EnoughRepos.") }
             return true
         } catch {
             show(error)

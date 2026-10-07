@@ -30,7 +30,7 @@ SOURCE_URL = f"https://github.com/{REPOSITORY}"
 MAX_ARCHIVE = 256 * 1024 * 1024
 MAX_EXPANDED = 512 * 1024 * 1024
 MAX_MEMBERS = 50000
-MARKER = "RepoReach local validation artifact — not a release.\n"
+MARKER = "EnoughRepos local validation artifact — not a release.\n"
 
 
 def load_script(name):
@@ -109,7 +109,7 @@ def verify_metadata(args):
     require(document.get("localSigningRequired") is True and document.get("extensionActivationAuthorized") is False and document.get("mountedValidationPassed") is False, "Input makes unexpected activation or mounted-validation claims")
     artifact = document.get("artifact", {})
     require(isinstance(artifact, dict), "Validation archive metadata must be an object")
-    expected_name = f"RepoReach-local-validation-{args.arch}.zip"
+    expected_name = f"EnoughRepos-local-validation-{args.arch}.zip"
     require(args.archive.name == expected_name and artifact.get("filename") == expected_name, "Unexpected validation archive filename")
     require(args.archive.is_file() and 0 < args.archive.stat().st_size <= MAX_ARCHIVE, "Validation archive is missing or too large")
     require(type(artifact.get("bytes")) is int and artifact["bytes"] == args.archive.stat().st_size, "Archive size differs from its metadata")
@@ -128,7 +128,7 @@ def archive_entries(archive):
         require("\0" not in name and "\\" not in name and not name.startswith("/"), "Unsafe ZIP member path")
         parts = name.rstrip("/").split("/")
         require(all(part not in ("", ".", "..") for part in parts), "Unsafe ZIP member path")
-        require(parts[0] in ("RepoReach.app", "__MACOSX"), "ZIP contains an unexpected top-level entry")
+        require(parts[0] in ("EnoughRepos.app", "__MACOSX"), "ZIP contains an unexpected top-level entry")
         key = unicodedata.normalize("NFC", "/".join(parts)).casefold()
         require(key not in seen, "ZIP contains duplicate or case-colliding paths")
         for index in range(1, len(parts) + 1):
@@ -163,8 +163,8 @@ def extract_app(archive_path, destination):
                 with archive.open(item) as source, target.open("xb") as output:
                     shutil.copyfileobj(source, output, 1024 * 1024)
                 target.chmod((mode & 0o555) | 0o600)
-    app = destination / "RepoReach.app"
-    require(app.is_dir(), "ZIP has no RepoReach app")
+    app = destination / "EnoughRepos.app"
+    require(app.is_dir(), "ZIP has no EnoughRepos app")
     marker = app / "Contents/Resources/LocalValidation.txt"
     require(marker.is_file() and marker.stat().st_size <= 8192 and marker.read_text().startswith(MARKER), "App lacks its local-validation marker")
     require(not (app / packaging.MODULE_PATH / "Contents/embedded.provisionprofile").exists(), "Input validation module already contains a provisioning profile")
@@ -305,7 +305,7 @@ def sign(args):
         destination.mkdir(mode=0o700)  # Exclusive creation also refuses concurrent output.
         for path in product.iterdir():
             path.rename(destination / path.name)
-    print(f"Signed isolated validation app: {destination / 'RepoReach.app'}")
+    print(f"Signed isolated validation app: {destination / 'EnoughRepos.app'}")
     print("Extension enablement and real mounted validation remain separate steps.")
 
 

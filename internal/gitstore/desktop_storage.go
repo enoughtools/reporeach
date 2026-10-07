@@ -323,7 +323,7 @@ func verifyDisposableGitConfig(ctx context.Context, repo model.RepoConfig) error
 				return errors.New("repository has a custom Git filesystem monitor")
 			}
 		default:
-			// RepoReach installs this helper using the bundled gh binary. The
+			// EnoughRepos installs this helper using the bundled gh binary. The
 			// helper owns no secret; gh stores credentials outside this Git dir.
 			path, ok := strings.CutPrefix(value, "!GH_TELEMETRY=false '")
 			if ok {

@@ -31,7 +31,7 @@ const (
 	fsKitCommandWaitDelay   = 2 * time.Second
 )
 
-var errFSKitMountOwnership = errors.New("the repository mount could not be safely identified; keep RepoReach running and unmount that folder before retrying")
+var errFSKitMountOwnership = errors.New("the repository mount could not be safely identified; keep EnoughRepos running and unmount that folder before retrying")
 
 // The bridge's lifetime belongs to the kernel mount, rather than the context
 // used to request or observe it. The narrow interface also permits lifecycle
@@ -170,7 +170,7 @@ func supportsNativeFSKit(release string) bool {
 }
 
 func platformDependencyMessage() string {
-	return "Mounting repositories requires macOS 26 or later and the RepoReach File System Extension enabled in System Settings"
+	return "Mounting repositories requires macOS 26 or later and the EnoughRepos File System Extension enabled in System Settings"
 }
 
 // Getfsstat with NOWAIT reads the kernel's retained mount information. Statfs
@@ -223,7 +223,7 @@ func (s *Service) mountNativeFSKit(ctx context.Context, root string, fs *catalog
 		return nil, err
 	}
 	if s.opts.FSKitSocketDir == "" {
-		return nil, errors.New("the shared File System Extension connection folder is missing; start the service from the RepoReach app")
+		return nil, errors.New("the shared File System Extension connection folder is missing; start the service from the EnoughRepos app")
 	}
 	if !filepath.IsAbs(s.opts.FSKitSocketDir) || pathsLexicallyOverlap(root, s.opts.FSKitSocketDir) {
 		return nil, errors.New("the File System Extension connection folder must be absolute and outside the repository mount folder")
@@ -314,7 +314,7 @@ func (s *Service) mountNativeFSKit(ctx context.Context, root string, fs *catalog
 				identity.typeName != "" && mountSourceMatches(identity.source, mounted.source) {
 				mounted.verified, mounted.pendingAttachment = true, false
 				if commandErr != nil {
-					return mounted, errors.New("the repository folder attached, but mount setup did not finish; retry unmounting in RepoReach")
+					return mounted, errors.New("the repository folder attached, but mount setup did not finish; retry unmounting in EnoughRepos")
 				}
 				verifyRoot := ops.verifyRoot
 				if verifyRoot == nil {
@@ -323,7 +323,7 @@ func (s *Service) mountNativeFSKit(ctx context.Context, root string, fs *catalog
 				if err := verifyRoot(s.opts.StateDir, preparedRoot); err != nil {
 					// Keep the verified live owner. Failing to persist mount
 					// history must never orphan a kernel mount or its bridge.
-					return mounted, errors.New("the repository folder attached, but its mount history could not be saved; retry unmounting in RepoReach")
+					return mounted, errors.New("the repository folder attached, but its mount history could not be saved; retry unmounting in EnoughRepos")
 				}
 				return mounted, nil
 			}
@@ -338,7 +338,7 @@ func (s *Service) mountNativeFSKit(ctx context.Context, root string, fs *catalog
 			if drainErr := mounted.drainWithTimeout(); drainErr != nil {
 				return mounted, drainErr
 			}
-			return nil, errors.New("the repository folder could not be mounted; enable the RepoReach File System Extension in System Settings and try again")
+			return nil, errors.New("the repository folder could not be mounted; enable the EnoughRepos File System Extension in System Settings and try again")
 		}
 	}
 }
@@ -447,7 +447,7 @@ func (m *nativeFSKitMount) drain(ctx context.Context) error {
 		return err
 	}
 	if err := m.bridge.CloseDrain(ctx); err != nil {
-		return errors.New("the File System Extension connection is still draining; keep RepoReach running and retry")
+		return errors.New("the File System Extension connection is still draining; keep EnoughRepos running and retry")
 	}
 	m.mu.Lock()
 	m.drained = true
@@ -523,7 +523,7 @@ func (m *nativeFSKitMount) unmount(ctx context.Context) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		return errors.New("the repository folder is still mounted; close files using it and retry unmounting in RepoReach")
+		return errors.New("the repository folder is still mounted; close files using it and retry unmounting in EnoughRepos")
 	}
 	// Normal unmount only. An identity mismatch is refused above; never force
 	// detachment or close the bridge based on the command's exit status alone.

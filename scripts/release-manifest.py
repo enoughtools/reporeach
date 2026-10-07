@@ -43,7 +43,7 @@ def record(args):
     args.directory.mkdir(parents=True, exist_ok=True)
     artifacts = []
     for extension in ("dmg", "zip"):
-        filename = f"RepoReach-{args.version}-macOS-{args.arch}.{extension}"
+        filename = f"EnoughRepos-{args.version}-macOS-{args.arch}.{extension}"
         archive = args.directory / filename
         if not archive.is_file():
             raise SystemExit(f"Missing release artifact: {archive}")
@@ -105,7 +105,7 @@ def manifest(args):
         if digest(archive) != item["sha256"] or archive.stat().st_size != item["bytes"]:
             raise SystemExit(f"Artifact changed after packaging: {archive}")
     document = {
-        "product": "RepoReach", "version": args.version,
+        "product": "EnoughRepos", "version": args.version,
         "releasedAt": datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z"),
         "source": identity,
         "minimumMacOS": "13.0", "filesystemBackend": backend,
@@ -123,7 +123,7 @@ def manifest(args):
             "macFUSE": False, "fsKit": True, "fsKitModuleBundled": True,
             "git": True,
             "setupURL": setup_url,
-            "extensionEnablement": "Enable the bundled RepoReach FSKit extension in System Settings. Virtual mounts require macOS 26 or later.",
+            "extensionEnablement": "Enable the bundled EnoughRepos FSKit extension in System Settings. Virtual mounts require macOS 26 or later.",
         }
     (args.directory / "release.json").write_text(json.dumps(document, indent=2) + "\n")
     (args.directory / "SHA256SUMS").write_text("".join(f"{item['sha256']}  {item['filename']}\n" for item in artifacts))

@@ -1,4 +1,4 @@
-name: RepoReach
+name: EnoughRepos
 
 on:
   pull_request:
@@ -321,5 +321,5 @@ jobs:
           options=()
           case "$version" in *-*) options+=(--prerelease) ;; esac
           gh release create "$tag" --target "$GITHUB_SHA" \
-            --title "RepoReach $version" --generate-notes "${options[@]}" \
+            --title "EnoughRepos $version" --generate-notes "${options[@]}" \
             dist/release/*.dmg dist/release/*.zip dist/release/SHA256SUMS dist/release/release.json

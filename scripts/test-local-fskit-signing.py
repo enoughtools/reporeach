@@ -31,19 +31,19 @@ class SigningFixtures(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory(prefix="reporeach-local-signing-test-")
         self.addCleanup(self.temporary.cleanup)
         self.folder = pathlib.Path(self.temporary.name)
-        self.archive = self.folder / "RepoReach-local-validation-arm64.zip"
-        self.metadata = self.folder / "RepoReach-local-validation-arm64.json"
+        self.archive = self.folder / "EnoughRepos-local-validation-arm64.zip"
+        self.metadata = self.folder / "EnoughRepos-local-validation-arm64.json"
         self.profile = self.folder / "fixture-profile"
         self.profile.write_bytes(b"fixture bytes, not a provisioning profile")
         self.files = {
-            "RepoReach.app/Contents/Resources/LocalValidation.txt": signing.MARKER.encode(),
-            "RepoReach.app/Contents/Helpers/artifact-fs": b"engine\0\xff",
-            "RepoReach.app/Contents/Helpers/gh": b"gh\0\xff",
+            "EnoughRepos.app/Contents/Resources/LocalValidation.txt": signing.MARKER.encode(),
+            "EnoughRepos.app/Contents/Helpers/artifact-fs": b"engine\0\xff",
+            "EnoughRepos.app/Contents/Helpers/gh": b"gh\0\xff",
         }
         for prefix, identifier, name in (
-            ("RepoReach.app", "com.enoughtools.reporeach", "RepoReach"),
-            ("RepoReach.app/" + signing.packaging.MODULE_PATH, signing.packaging.MODULE_ID, "RepoReachFSKit"),
-            ("RepoReach.app/Contents/PlugIns/RepoReachFinder.appex", "com.enoughtools.reporeach.finder", "RepoReachFinder"),
+            ("EnoughRepos.app", "com.enoughtools.reporeach", "EnoughRepos"),
+            ("EnoughRepos.app/" + signing.packaging.MODULE_PATH, signing.packaging.MODULE_ID, "RepoReachFSKit"),
+            ("EnoughRepos.app/Contents/PlugIns/RepoReachFinder.appex", "com.enoughtools.reporeach.finder", "RepoReachFinder"),
         ):
             self.files[prefix + "/Contents/Info.plist"] = plistlib.dumps({
                 "CFBundleIdentifier": identifier, "CFBundleExecutable": name,
@@ -88,7 +88,7 @@ class SigningFixtures(unittest.TestCase):
 
 class ExtractionTests(SigningFixtures):
     def test_binary_bytes_and_executable_modes_survive_without_appledouble(self):
-        self.write_archive([(member("__MACOSX/RepoReach.app/._Contents"), b"resource metadata")])
+        self.write_archive([(member("__MACOSX/EnoughRepos.app/._Contents"), b"resource metadata")])
         app = self.extract()
         self.assertEqual((app / "Contents/Helpers/artifact-fs").read_bytes(), b"engine\0\xff")
         self.assertTrue((app / "Contents/Helpers/artifact-fs").stat().st_mode & 0o111)
@@ -96,11 +96,11 @@ class ExtractionTests(SigningFixtures):
 
     def test_rejects_traversal_links_devices_and_privileged_modes_before_writing(self):
         bad = (
-            member("../escaped"), member("/absolute"), member("RepoReach.app/Contents/../escaped"),
-            member("RepoReach.app\\escaped"), member("Other.app/file"),
-            member("RepoReach.app/linked", stat.S_IFLNK | 0o777),
-            member("RepoReach.app/device", stat.S_IFCHR | 0o644),
-            member("RepoReach.app/privileged", stat.S_IFREG | 0o4755),
+            member("../escaped"), member("/absolute"), member("EnoughRepos.app/Contents/../escaped"),
+            member("EnoughRepos.app\\escaped"), member("Other.app/file"),
+            member("EnoughRepos.app/linked", stat.S_IFLNK | 0o777),
+            member("EnoughRepos.app/device", stat.S_IFCHR | 0o644),
+            member("EnoughRepos.app/privileged", stat.S_IFREG | 0o4755),
         )
         for index, item in enumerate(bad):
             with self.subTest(path=item.filename):
@@ -113,9 +113,9 @@ class ExtractionTests(SigningFixtures):
 
     def test_rejects_case_unicode_and_file_parent_collisions(self):
         cases = (
-            [(member("RepoReach.app/contents/other"), b"x")],
-            [(member("RepoReach.app/Caf\u00e9/file"), b"x"), (member("RepoReach.app/Cafe\u0301/other"), b"y")],
-            [(member("RepoReach.app/parent"), b"x"), (member("RepoReach.app/parent/child"), b"y")],
+            [(member("EnoughRepos.app/contents/other"), b"x")],
+            [(member("EnoughRepos.app/Caf\u00e9/file"), b"x"), (member("EnoughRepos.app/Cafe\u0301/other"), b"y")],
+            [(member("EnoughRepos.app/parent"), b"x"), (member("EnoughRepos.app/parent/child"), b"y")],
         )
         for index, entries in enumerate(cases):
             with self.subTest(case=index):
@@ -132,7 +132,7 @@ class ExtractionTests(SigningFixtures):
         with mock.patch.object(signing, "MAX_EXPANDED", 1), self.assertRaisesRegex(ValueError, "limits"):
             signing.extract_app(self.archive, destination)
         self.assertEqual(list(destination.iterdir()), [])
-        self.files["RepoReach.app/Contents/Resources/LocalValidation.txt"] = b"regular release"
+        self.files["EnoughRepos.app/Contents/Resources/LocalValidation.txt"] = b"regular release"
         self.write_archive()
         with self.assertRaisesRegex(ValueError, "marker"):
             signing.extract_app(self.archive, destination)
@@ -267,11 +267,11 @@ class SigningBoundaryTests(SigningFixtures):
         signing.sign(self.args)
         authorize.assert_called_once_with({"fixture": True}, signing.packaging.MODULE_ID, {signing.packaging.FSMODULE: True, signing.packaging.SANDBOX: True, signing.packaging.APP_GROUPS: [self.args.team + ".rr"]}, certificate=b"fixture certificate", team=self.args.team)
         order = [pathlib.Path(call[-1]).name for call in calls if call[0] == "codesign"]
-        self.assertEqual(order, ["artifact-fs", "gh", "RepoReachFSKit.appex", "RepoReachFinder.appex", "RepoReach.app"])
+        self.assertEqual(order, ["artifact-fs", "gh", "RepoReachFSKit.appex", "RepoReachFinder.appex", "EnoughRepos.app"])
         self.assertEqual(signing.verify_signature.call_count, 5)
         group = {signing.packaging.APP_GROUPS: [self.args.team + ".rr"]}
         self.assertEqual(self.captured_claims["artifact-fs"], group)
-        self.assertEqual(self.captured_claims["RepoReach.app"], group)
+        self.assertEqual(self.captured_claims["EnoughRepos.app"], group)
         self.assertEqual(self.captured_claims["RepoReachFSKit.appex"][signing.packaging.APP_GROUPS], group[signing.packaging.APP_GROUPS])
         self.assertEqual(self.captured_claims["gh"], {})
         self.assertNotIn(signing.packaging.APP_GROUPS, self.captured_claims["RepoReachFinder.appex"])
@@ -286,12 +286,12 @@ class SigningBoundaryTests(SigningFixtures):
         self.assertFalse(metadata["extensionActivationAuthorized"])
         self.assertEqual(metadata["appGroupIdentifier"], self.args.team + ".rr")
         self.assertEqual(signing.digest(self.archive), self.args.archive_sha256)
-        module = products[0] / "RepoReach.app" / signing.packaging.MODULE_PATH
+        module = products[0] / "EnoughRepos.app" / signing.packaging.MODULE_PATH
         self.assertEqual((module / "Contents/embedded.provisionprofile").read_bytes(), self.profile.read_bytes())
-        for bundle in (products[0] / "RepoReach.app", module):
+        for bundle in (products[0] / "EnoughRepos.app", module):
             self.assertEqual(plistlib.loads((bundle / "Contents/Info.plist").read_bytes())[signing.packaging.GROUP_INFO], self.args.team + ".rr")
         with zipfile.ZipFile(self.archive) as archive:
-            self.assertEqual(plistlib.loads(archive.read("RepoReach.app/Contents/Info.plist"))[signing.packaging.GROUP_INFO], ".rr")
+            self.assertEqual(plistlib.loads(archive.read("EnoughRepos.app/Contents/Info.plist"))[signing.packaging.GROUP_INFO], ".rr")
         with self.assertRaisesRegex(ValueError, "overwrite"):
             signing.sign(self.args)
 
@@ -304,7 +304,7 @@ class SigningBoundaryTests(SigningFixtures):
         self.assertEqual(list((self.folder / "build/fskit-validation/signed").iterdir()), [])
 
     def test_input_without_group_metadata_cannot_gain_new_ipc_claims(self):
-        info_path = "RepoReach.app/" + signing.packaging.MODULE_PATH + "/Contents/Info.plist"
+        info_path = "EnoughRepos.app/" + signing.packaging.MODULE_PATH + "/Contents/Info.plist"
         info = plistlib.loads(self.files[info_path])
         del info[signing.packaging.GROUP_INFO]
         self.files[info_path] = plistlib.dumps(info)

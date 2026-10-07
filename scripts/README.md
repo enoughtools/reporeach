@@ -1,6 +1,6 @@
-# RepoReach builds and releases
+# EnoughRepos builds and releases
 
-The default build includes RepoReach's FSKit ExtensionKit module and requires
+The default build includes EnoughRepos's FSKit ExtensionKit module and requires
 Xcode 26 plus the macOS 26 SDK. The management app retains a macOS 13 deployment
 target; virtual mounts through the bundled module require macOS 26. No external
 macFUSE installation is required by the FSKit backend. The existing published
@@ -43,7 +43,7 @@ Legacy distribution packaging is disabled because the current Darwin engine
 uses the bundled FSKit module.
 
 To obtain a complete compiled app for **local validation** when the local Mac
-has macOS 26 or later but an older Xcode, dispatch the RepoReach workflow from
+has macOS 26 or later but an older Xcode, dispatch the EnoughRepos workflow from
 the selected committed branch with `validation_artifacts=true`:
 
 ```sh
@@ -76,7 +76,7 @@ scripts/build-macos.sh --local-app --arch arm64
 ```
 
 This reuses incremental build data under `build/local-macos/arm64/derived` and
-writes the verified app to `build/local-macos/arm64/stage/RepoReach.app`. It keeps
+writes the verified app to `build/local-macos/arm64/stage/EnoughRepos.app`. It keeps
 the normal profile, entitlement, signature and compiled-product registration
 checks, then stops before ZIP, DMG, notarization or release metadata. Signing
 timestamps remain enabled. The default version is `0.1.0-local.7`; set
@@ -85,6 +85,16 @@ timestamps remain enabled. The default version is `0.1.0-local.7`; set
 changes. Installation and extension registration remain explicit steps. Local
 mode cannot be combined with unsigned compilation, validation exports or
 `--notarize`; it never writes to `dist/releases`.
+
+The app package is now `EnoughRepos.app`, while signing identifiers, developer
+environment variables, and existing state retain their RepoReach compatibility
+names. Existing app-owned Git configs can reference the bundled GitHub CLI under
+`build/latest/RepoReach.app/Contents/Helpers/gh`. The local managed installation
+keeps a relative `build/latest/RepoReach.app` alias to `EnoughRepos.app`; do not
+remove that alias until saved helper references have been safely migrated or no
+longer need it. This preserves existing configuration without rewriting it.
+It is a local installation compatibility measure, not a general installer
+migration guarantee. Historical releases and build records remain unchanged.
 
 After real backend validation and source freeze, distribution packaging requires
 an existing Developer ID identity and the actual extension-specific Developer
@@ -101,7 +111,7 @@ python3 scripts/release-manifest.py stage \
   --directory "dist/releases/$VERSION" --version "$VERSION"
 ```
 
-RepoReach's production guard requires the profile embedded in the FSKit module's
+EnoughRepos's production guard requires the profile embedded in the FSKit module's
 own `Contents/embedded.provisionprofile` before signing. It authenticates the CMS
 signature using public macOS Security APIs, explicit Apple roots from the system
 keychain, the profile-authority and WWDR certificate markers, certificate
@@ -153,7 +163,7 @@ key file must already exist locally. Never commit signing keys or credentials.
 Signing without notarization is supported and represented accurately by
 `signature: developer-id` and `notarized: false`.
 
-The RepoReach workflow validates Go, native tests, the Swift client's control
+The EnoughRepos workflow validates Go, native tests, the Swift client's control
 contract against the real Go engine with synthetic authentication, website
 formatting and builds, Linux FUSE behavior, and bundled FSKit source compilation.
 Both Mac ARM jobs also exercise the real Go filesystem bridge with the Swift

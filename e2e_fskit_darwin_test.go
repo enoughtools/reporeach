@@ -449,7 +449,7 @@ func fsKitAcceptanceModule(t *testing.T) fsKitAcceptancePrerequisites {
 	}
 	app := os.Getenv("AFS_FSKIT_APP")
 	if os.Getenv("AFS_FSKIT_MODULE_CONFIRMED") != "1" || !filepath.IsAbs(app) {
-		t.Fatal("prerequisite: AFS_FSKIT_APP must name the installed matching RepoReach.app and AFS_FSKIT_MODULE_CONFIRMED=1 must confirm its matching native module is already enabled; see docs/reporeach/fskit-acceptance.md")
+		t.Fatal("prerequisite: AFS_FSKIT_APP must name the installed matching EnoughRepos.app and AFS_FSKIT_MODULE_CONFIRMED=1 must confirm its matching native module is already enabled; see docs/reporeach/fskit-acceptance.md")
 	}
 	app, err = filepath.EvalSymlinks(app)
 	if err != nil {

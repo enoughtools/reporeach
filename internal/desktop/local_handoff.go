@@ -22,7 +22,7 @@ import (
 
 const localHandoffJournalName = "local-handoff.json"
 
-var errLocalHandoffRecoveryNeeded = errors.New("local checkout data was retained; restart RepoReach to recover the interrupted storage handoff")
+var errLocalHandoffRecoveryNeeded = errors.New("local checkout data was retained; restart EnoughRepos to recover the interrupted storage handoff")
 
 // The catalogue is the transaction commit record. No private engine data is
 // removed during Keep. A later Free may remove the retired copy only if this
@@ -185,7 +185,7 @@ func (s *Service) freeMaterializedCheckout(ctx context.Context, id string) error
 	repo, exists := s.repositoryLocked(id)
 	s.mu.Unlock()
 	if !exists || repo.LocalKind != "materialized" || repo.LocalPath == "" {
-		return errors.New("adopted checkouts belong to you and are never removed by RepoReach")
+		return errors.New("adopted checkouts belong to you and are never removed by EnoughRepos")
 	}
 	if err := s.requireNoLocalHandoff(); err != nil {
 		return err
@@ -281,7 +281,7 @@ func (s *Service) freeMaterializedCheckout(ctx context.Context, id string) error
 func (s *Service) markLocalHandoffRecovery(cause error) error {
 	s.mu.Lock()
 	s.maintenance, s.recoveryRequired = true, true
-	s.message = "Local checkout data was retained. Restart RepoReach to recover the storage handoff."
+	s.message = "Local checkout data was retained. Restart EnoughRepos to recover the storage handoff."
 	s.mu.Unlock()
 	return errors.Join(cause, errLocalHandoffRecoveryNeeded)
 }

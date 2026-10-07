@@ -102,7 +102,7 @@ struct AdoptionView: View {
             VStack(alignment: .leading, spacing: 7) {
                 Text("Your local checkout stays where it is.")
                     .font(.system(size: 13, weight: .semibold))
-                Text("RepoReach adds your existing checkout to the catalogue without moving or copying it. Your staged changes, uncommitted work, untracked files, and Git settings stay intact. Adding a remote creates an on-demand repository instead.")
+                Text("EnoughRepos adds your existing checkout to the catalogue without moving or copying it. Your staged changes, uncommitted work, untracked files, and Git settings stay intact. Adding a remote creates an on-demand repository instead.")
                     .font(.system(size: 12))
                     .foregroundStyle(ReachTheme.muted)
                     .fixedSize(horizontal: false, vertical: true)

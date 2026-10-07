@@ -74,11 +74,11 @@ def normalized(text):
     return " ".join(text.split())
 
 
-def release_fixture(backend="macfuse"):
+def release_fixture(backend="macfuse", product="RepoReach"):
     artifacts = []
     for architecture in ("arm64", "x86_64"):
         for extension in ("dmg", "zip"):
-            filename = f"RepoReach-{VERSION}-macOS-{architecture}.{extension}"
+            filename = f"{product}-{VERSION}-macOS-{architecture}.{extension}"
             artifacts.append({
                 "architecture": architecture, "format": extension,
                 "filename": filename,
@@ -86,7 +86,7 @@ def release_fixture(backend="macfuse"):
                 "signature": "developer-id" if backend == "fskit" or architecture == "arm64" else "ad-hoc",
                 "notarized": False, "sha256": "0" * 64, "bytes": 1234,
             })
-    return {"product": "RepoReach", "version": VERSION, "artifacts": artifacts,
+    return {"product": product, "version": VERSION, "artifacts": artifacts,
             "filesystemBackend": backend, "minimumMacOS": "13.0",
             "minimumMountMacOS": "26.0" if backend == "fskit" else "13.0",
             "requirements": {"setupURL": NATIVE_SETUP_URL if backend == "fskit" else LEGACY_SETUP_URL}}
@@ -152,7 +152,16 @@ process.stdout.write(JSON.stringify(states));
 """
 
 
+def assert_brand(page):
+    title = next(node for node in page.elements if node.tag == "title")
+    assert normalized(title.text()) == "EnoughRepos — Every repo, right at home."
+    brand = page.by_class("product-brand")
+    assert normalized(brand.text()) == "EnoughRepos"
+    assert brand.attrs.get("aria-label") == "EnoughRepos home"
+
+
 def assert_release_page(page, fixture):
+    assert_brand(page)
     expected = {(item["architecture"], item["format"]): item["url"] for item in fixture["artifacts"]}
     button = page.ids["download-button"]
     assert button.tag == "a", "Download must be a rendered link"
@@ -163,6 +172,9 @@ def assert_release_page(page, fixture):
     assert page.ids["zip-download"].attrs["href"] == expected[("arm64", "zip")]
     assert normalized(page.ids["download-detail"].text()) == "Developer ID signed · Not yet notarized"
     assert VERSION in normalized(page.by_class("download-title").text())
+    assert "EnoughRepos for macOS" in normalized(page.by_class("download-title").text())
+    legacy_notice = "The current download was published as RepoReach."
+    assert (legacy_notice in normalized(page.by_class("release-note").text())) == (fixture["product"] == "RepoReach")
     assert page.ids["checksums"].attrs["href"] == f"/releases/{VERSION}/SHA256SUMS"
     setup_url = fixture["requirements"]["setupURL"]
     assert page.ids["setup-guide"].attrs["href"] == setup_url
@@ -203,6 +215,7 @@ def assert_release_page(page, fixture):
 
 
 def assert_preview_page(page, expected_version="Beta in development"):
+    assert_brand(page)
     assert page.ids["download-button"].attrs.get("aria-disabled") == "true"
     assert normalized(page.ids["download-button"].text()) == "Build being prepared"
     assert expected_version in normalized(page.by_class("download-title").text())
@@ -243,6 +256,15 @@ def main():
                 manifest.write_text(json.dumps(fixture) + "\n")
                 assert_release_page(build(outputs / "native"), fixture)
                 print("PASS: native macOS 26 requirements and source-pinned native setup URL, bundled extension approval and no driver installation")
+                fixture = release_fixture("fskit", product="EnoughRepos")
+                manifest.write_text(json.dumps(fixture) + "\n")
+                assert_release_page(build(outputs / "enoughrepos-native"), fixture)
+                print("PASS: EnoughRepos branding and native artifact filenames work for both architectures; historical RepoReach downloads remain supported")
+                fixture["product"] = "UnrecognizedProduct"
+                manifest.write_text(json.dumps(fixture) + "\n")
+                build(outputs / "unknown-product", succeeds=False)
+                print("PASS: accepting the new product name does not admit unknown release products")
+                fixture["product"] = "EnoughRepos"
                 fixture["requirements"]["setupURL"] = LEGACY_SETUP_URL
                 manifest.write_text(json.dumps(fixture) + "\n")
                 build(outputs / "wrong-native-setup", succeeds=False)

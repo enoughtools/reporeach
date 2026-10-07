@@ -45,7 +45,7 @@ final class RepoReachFileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations 
                 guard response.node?.inode == 1, response.node?.attributes.type == .dir else {
                     throw POSIXError(.ENODEV)
                 }
-                result = .success(FSProbeResult.usable(name: "RepoReach", containerID:
+                result = .success(FSProbeResult.usable(name: "EnoughRepos", containerID:
                     FSContainerIdentifier(uuid: Self.identifier(for: pathResource.url))))
             } catch {
                 result = .failure(Self.posixError(error))

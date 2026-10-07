@@ -185,7 +185,7 @@ func New(ctx context.Context, opts Options) (*Service, error) {
 			if _, err := validateAdoptionLocalSource(repo.LocalPath, opts.StateDir, opts.StateDir); err != nil {
 				_ = engine.Close()
 				cancel()
-				return nil, errors.New("the local checkout overlaps RepoReach's private storage")
+				return nil, errors.New("the local checkout overlaps EnoughRepos's private storage")
 			}
 			continue
 		}
@@ -473,7 +473,7 @@ func (s *Service) mountLocked(ctx context.Context) error {
 	}
 	if s.recoveryRequired {
 		s.mu.Unlock()
-		return errors.New("restart RepoReach to recover an interrupted storage operation")
+		return errors.New("restart EnoughRepos to recover an interrupted storage operation")
 	}
 	if s.mounted != nil {
 		s.mu.Unlock()
@@ -570,7 +570,7 @@ func (s *Service) mountLocked(ctx context.Context) error {
 		// Retain ownership until Close can unmount it after parent cancellation.
 		if s.mounted == mounted && !s.closing && s.ctx.Err() == nil && err == nil {
 			s.mounted = nil
-			s.message = "The repository folder was unmounted. Open RepoReach to mount it again."
+			s.message = "The repository folder was unmounted. Open EnoughRepos to mount it again."
 			s.mu.Unlock()
 			if closeErr := s.closeCatalogueStoreLocked(); closeErr != nil {
 				s.mu.Lock()
@@ -1120,7 +1120,7 @@ func (s *Service) freeRepository(ctx context.Context, id string) error {
 		if recoveryErr != nil {
 			s.mu.Lock()
 			s.maintenance, s.recoveryRequired = true, true
-			s.message = "Restart RepoReach to recover retained repository data: " + safeError(recoveryErr)
+			s.message = "Restart EnoughRepos to recover retained repository data: " + safeError(recoveryErr)
 			s.mu.Unlock()
 			return errors.Join(err, recoveryErr)
 		}
@@ -1303,7 +1303,7 @@ func safeMountDirectory(root string) error {
 		return err
 	}
 	if len(entries) != 0 {
-		return errors.New("choose an empty folder so RepoReach does not hide existing files")
+		return errors.New("choose an empty folder so EnoughRepos does not hide existing files")
 	}
 	return nil
 }
@@ -1311,7 +1311,7 @@ func safeMountDirectory(root string) error {
 func shellQuote(value string) string { return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'" }
 
 func configureRepositoryAuth(ctx context.Context, gitDir, ghPath string) error {
-	// This configuration belongs only to RepoReach's private clone. Git commands
+	// This configuration belongs only to EnoughRepos's private clone. Git commands
 	// launched by an editor can then use the same official Keychain-backed helper.
 	return gitstore.ConfigureCredentialHelper(ctx, model.RepoConfig{
 		GitDir: gitDir, RemoteURL: "https://github.com/", CredentialHelper: githubCredentialHelper(ghPath),

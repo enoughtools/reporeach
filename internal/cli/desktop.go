@@ -30,7 +30,7 @@ func desktopCommand(ctx context.Context, stdout, stderr io.Writer) ucli.Command 
 		return &desktopJSONError{cause: err}
 	}
 	return ucli.Command{
-		Name: "desktop", Usage: "RepoReach's private desktop control service",
+		Name: "desktop", Usage: "EnoughRepos's private desktop control service",
 		Subcommands: []ucli.Command{
 			{
 				Name: "serve", Usage: "run the background service",

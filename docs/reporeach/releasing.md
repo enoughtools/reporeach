@@ -1,10 +1,26 @@
-# Building and releasing RepoReach
+# Building and releasing EnoughRepos
 
-The current native backend bundles RepoReach's FSKit module and requires **macOS 26 or later for virtual repositories**. The management app retains a macOS 13 deployment target; that does not lower the filesystem requirement. A complete package contains the app, Finder extension, FSKit module, ArtifactFS engine, official GitHub CLI, and license notices. Git remains a system dependency. Native releases require normal approval of the bundled File System Extension, with no separate macFUSE installation.
+The current native backend bundles EnoughRepos's FSKit module and requires **macOS 26 or later for virtual repositories**. The management app retains a macOS 13 deployment target; that does not lower the filesystem requirement. A complete package contains the app, Finder extension, FSKit module, ArtifactFS engine, official GitHub CLI, and license notices. Git remains a system dependency. Native releases require normal approval of the bundled File System Extension, with no separate macFUSE installation.
 
 The published `0.1.0-beta.3` is a historical macOS 13+ release requiring separately installed macFUSE's kernel backend. Preserve its original assets, manifest, source tag, and requirements. Current source supports legacy compilation only; it cannot recreate that release through the native packaging path. See [platform setup](platform-setup.md) and the download's actual manifest.
 
 Use Go 1.26.8, **full Xcode 26 or later with the macOS 26 SDK or later**, Python 3, and standard macOS packaging tools. The scripts select Go 1.26.8 and download checksum-verified XcodeGen 2.46.0. Native development also supports an existing XcodeGen installation. The website requires Node.js 22.14 or later. Start with [CONTRIBUTING.md](../../CONTRIBUTING.md).
+
+## Rebrand and upgrade compatibility
+
+Current products are named `EnoughRepos.app` and `EnoughRepos-*`. The Xcode
+project, schemes, Swift module name, signing and app-group identifiers, FSKit
+short name `reporeach`, developer environment variables, and existing state under
+`~/Library/Application Support/RepoReach` retain their compatibility names.
+Historical releases and build evidence keep their actual RepoReach names.
+
+Existing app-owned Git configuration can contain absolute paths to the bundled
+GitHub CLI beneath `RepoReach.app`. An upgrade must preserve those legacy helper
+paths through a compatible app alias, or explicitly migrate verified app-owned
+configuration before removing the old path. The local managed `build/latest`
+installation retains a relative `RepoReach.app` alias to `EnoughRepos.app` for
+this purpose. This local link migration does not establish a general installer
+or every historical installation layout; qualify those separately before release.
 
 ## Local validation products
 
@@ -15,7 +31,7 @@ scripts/build-macos.sh --backend fskit --arch arm64 --compile-only --unsigned
 scripts/build-macos.sh --backend fskit --arch x86_64 --compile-only --unsigned
 ```
 
-Compiled apps are in `build/native/fskit/<arch>/Build/Products/Release/RepoReach.app`; these commands create no release archives. To export a complete unsigned ARM64 validation app with helpers and notices, use a fresh generation:
+Compiled apps are in `build/native/fskit/<arch>/Build/Products/Release/EnoughRepos.app`; these commands create no release archives. To export a complete unsigned ARM64 validation app with helpers and notices, use a fresh generation:
 
 ```sh
 validation_root="$PWD/build/fskit-validation/generations/local-arm64-$(date -u +%Y%m%dT%H%M%SZ)"
@@ -23,7 +39,7 @@ scripts/build-macos.sh --backend fskit --arch arm64 --validation-artifact \
   --validation-root "$validation_root" --unsigned
 ```
 
-This exports `stage/arm64/RepoReach.app` and `products/arm64/RepoReach-local-validation-arm64.zip` beneath that directory, with local source evidence. It cannot sign, notarize, or publish. Activation needs appropriate authorized local signing and a matching profile; a device-bound development profile is never a distribution profile. Preserve validation generations until their evidence and runtime state have been reviewed.
+This exports `stage/arm64/EnoughRepos.app` and `products/arm64/EnoughRepos-local-validation-arm64.zip` beneath that directory, with local source evidence. It cannot sign, notarize, or publish. Activation needs appropriate authorized local signing and a matching profile; a device-bound development profile is never a distribution profile. Preserve validation generations until their evidence and runtime state have been reviewed.
 
 ## Complete Developer ID packages
 
@@ -43,7 +59,7 @@ python3 scripts/release-manifest.py manifest \
   --directory "dist/releases/$release_version" --version "$release_version"
 ```
 
-Run architecture builds sequentially. Complete apps stage in `build/package/fskit/<arch>/RepoReach.app`; intermediates are in `build/native/fskit/<arch>`. Outputs are `dist/releases/<version>/RepoReach-<version>-macOS-<arch>.dmg` and `.zip`, per-build `.metadata-<arch>.json`, `release.json`, and `SHA256SUMS`.
+Run architecture builds sequentially. Complete apps stage in `build/package/fskit/<arch>/EnoughRepos.app`; intermediates are in `build/native/fskit/<arch>`. Outputs are `dist/releases/<version>/EnoughRepos-<version>-macOS-<arch>.dmg` and `.zip`, per-build `.metadata-<arch>.json`, `release.json`, and `SHA256SUMS`.
 
 The script signs the engine, GitHub CLI, Finder extension, FSKit module, and app with hardened runtime and timestamps, resolves authorized app-group claims, and verifies nested signatures and module authorization. Existing release filenames cannot be overwritten. Any source change after packaging requires new builds from the final clean revision. Confirm both architectures and formats, matching source revision/content hashes, profile hashes, and `source.dirty: false`; manifest generation does not independently require every architecture or a clean source tree.
 

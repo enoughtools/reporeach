@@ -35,7 +35,7 @@ func (s *Service) runLocalAction(ctx context.Context, op Operation, repo Reposit
 		return nil
 	case "free":
 		if repo.LocalKind == "adopted" {
-			return errors.New("adopted checkouts stay in their original folder; RepoReach never deletes them")
+			return errors.New("adopted checkouts stay in their original folder; EnoughRepos never deletes them")
 		}
 		s.lifecycle.Lock()
 		defer s.lifecycle.Unlock()

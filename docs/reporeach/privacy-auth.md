@@ -1,18 +1,18 @@
 # Privacy and authentication
 
-RepoReach is an Enough Tools desktop app. Its catalogue and repository service run on your Mac. The implementation has no Enough Tools account service or application analytics backend. GitHub sign-in is optional. Manual sources use your native Git credentials or SSH setup and can point to another Git host or local storage. Optional GitHub discovery uses GitHub and the official CLI; opening product/help links uses your browser.
+EnoughRepos is an Enough Tools desktop app. Its catalogue and repository service run on your Mac. The implementation has no Enough Tools account service or application analytics backend. GitHub sign-in is optional. Manual sources use your native Git credentials or SSH setup and can point to another Git host or local storage. Optional GitHub discovery uses GitHub and the official CLI; opening product/help links uses your browser.
 
 ## Manual sources
 
 Adding a Git remote or local checkout does not require the GitHub CLI's OAuth authorization. HTTPS, SSH, and SSH-style addresses use native Git authentication for that source. Local paths are accessed through Git. An HTTP URL containing a password or token is refused; configure your normal credential helper or SSH access instead.
 
-Source URLs and local paths are stored as catalogue metadata and can be private even when there is no GitHub privacy flag. RepoReach does not upload them to an Enough Tools discovery service. Adding a source records metadata; file/clone acquisition waits for entry, Prepare, or Keep Downloaded. Resolving a remote's default branch can contact that remote without acquiring its full checkout.
+Source URLs and local paths are stored as catalogue metadata and can be private even when there is no GitHub privacy flag. EnoughRepos does not upload them to an Enough Tools discovery service. Adding a source records metadata; file/clone acquisition waits for entry, Prepare, or Keep Downloaded. Resolving a remote's default branch can contact that remote without acquiring its full checkout.
 
 An existing local checkout supplies committed data to a separate managed virtual checkout. Registration/preparation leaves the original folder, index, staged changes, edits, and untracked files untouched. Source inspection is not a backup of dirty work. Explicit pushes, hooks, and commands that you run afterwards follow ordinary Git behavior and can change their configured destination.
 
 ## GitHub permissions
 
-Optional account discovery signs in through the bundled official GitHub CLI using its browser/device authorization flow for `github.com`. Manual sources do not require these OAuth scopes. RepoReach adds no scopes to the CLI's default login. In the pinned CLI version `2.102.0`, a new OAuth login requests:
+Optional account discovery signs in through the bundled official GitHub CLI using its browser/device authorization flow for `github.com`. Manual sources do not require these OAuth scopes. EnoughRepos adds no scopes to the CLI's default login. In the pinned CLI version `2.102.0`, a new OAuth login requests:
 
 | Scope | Meaning |
 | --- | --- |
@@ -20,17 +20,17 @@ Optional account discovery signs in through the bundled official GitHub CLI usin
 | `read:org` | Read access to organization and team membership information. |
 | `gist` | Read and write access to gists. |
 
-This is **not a read-only authorization**. The broad scopes come from the official CLI's login flow, even though RepoReach's discovery and download actions primarily read data. Ordinary Git commands inside mounted repos can push work when your account has permission. See [the pinned CLI auth flow](https://github.com/cli/cli/blob/v2.102.0/internal/authflow/flow.go), [GitHub CLI login](https://cli.github.com/manual/gh_auth_login), and [GitHub's scope definitions](https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/scopes-for-oauth-apps).
+This is **not a read-only authorization**. The broad scopes come from the official CLI's login flow, even though EnoughRepos's discovery and download actions primarily read data. Ordinary Git commands inside mounted repos can push work when your account has permission. See [the pinned CLI auth flow](https://github.com/cli/cli/blob/v2.102.0/internal/authflow/flow.go), [GitHub CLI login](https://cli.github.com/manual/gh_auth_login), and [GitHub's scope definitions](https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/scopes-for-oauth-apps).
 
-Existing GitHub CLI authentication is reused when available. RepoReach does not create an isolated CLI configuration directory. A new sign-in uses the GitHub CLI OAuth app and sets the CLI's `github.com` Git protocol to HTTPS. Existing credentials may have different permissions. Inherited `GH_TOKEN` or `GITHUB_TOKEN` can override stored credentials and determine the account and access; `GH_TOKEN` takes precedence. See [GitHub CLI environment variables](https://cli.github.com/manual/gh_help_environment).
+Existing GitHub CLI authentication is reused when available. EnoughRepos does not create an isolated CLI configuration directory. A new sign-in uses the GitHub CLI OAuth app and sets the CLI's `github.com` Git protocol to HTTPS. Existing credentials may have different permissions. Inherited `GH_TOKEN` or `GITHUB_TOKEN` can override stored credentials and determine the account and access; `GH_TOKEN` takes precedence. See [GitHub CLI environment variables](https://cli.github.com/manual/gh_help_environment).
 
-Discovery requests repositories the credential can access as owner, collaborator, or organization member. It groups them by owner. An organization's OAuth app restrictions, SAML SSO requirements, or an existing token's restrictions can prevent some repos from appearing. RepoReach cannot bypass those controls. See [the repository listing API](https://docs.github.com/en/rest/repos/repos#list-repositories-for-the-authenticated-user) and [organization OAuth restrictions](https://docs.github.com/en/organizations/managing-oauth-access-to-your-organizations-data/about-oauth-app-access-restrictions).
+Discovery requests repositories the credential can access as owner, collaborator, or organization member. It groups them by owner. An organization's OAuth app restrictions, SAML SSO requirements, or an existing token's restrictions can prevent some repos from appearing. EnoughRepos cannot bypass those controls. See [the repository listing API](https://docs.github.com/en/rest/repos/repos#list-repositories-for-the-authenticated-user) and [organization OAuth restrictions](https://docs.github.com/en/organizations/managing-oauth-access-to-your-organizations-data/about-oauth-app-access-restrictions).
 
 ## Credentials
 
-The official CLI handles token storage. It normally uses macOS Keychain but can fall back to a plaintext configuration file when the system credential store is unavailable. Accordingly, RepoReach does not promise Keychain-only storage. The CLI's usual configuration location is `~/.config/gh`, subject to its environment/configuration rules. Check the official login documentation for your environment; do not paste token output into an issue.
+The official CLI handles token storage. It normally uses macOS Keychain but can fall back to a plaintext configuration file when the system credential store is unavailable. Accordingly, EnoughRepos does not promise Keychain-only storage. The CLI's usual configuration location is `~/.config/gh`, subject to its environment/configuration rules. Check the official login documentation for your environment; do not paste token output into an issue.
 
-RepoReach does not request `gh auth token`, put access tokens into catalogue records, or return them through its desktop API. Sign-in output is reduced to a recognized one-time device code and GitHub's verification URL. Raw GitHub CLI diagnostics are not returned to the UI.
+EnoughRepos does not request `gh auth token`, put access tokens into catalogue records, or return them through its desktop API. Sign-in output is reduced to a recognized one-time device code and GitHub's verification URL. Raw GitHub CLI diagnostics are not returned to the UI.
 
 GitHub-discovered clones use the official CLI's Git credential helper. This is scoped to those managed clones, rather than installed as a new global Git helper. Manual clones use native Git credential helpers or SSH authentication, including when their URL happens to point to GitHub. Git wrappers keep inline credentials out of subprocess URL arguments and redact credential-like error content. Avoid embedding credentials in remote URLs yourself.
 
@@ -58,9 +58,9 @@ Optional account lookup and discovery contact GitHub's API, and browser authoriz
 
 Repository and owner switches retain local data while hiding entries, preventing new preparation, and pausing background pin downloads. They do not revoke credentials or prevent existing open files from hydrating content. They are not an offline switch or network access control.
 
-The bundled GitHub CLI has its own [upstream telemetry settings](https://docs.github.com/en/github-cli/github-cli/github-cli-telemetry). RepoReach explicitly sets `GH_TELEMETRY=false` for its GitHub CLI subprocesses and managed Git credential-helper environment, overriding inherited telemetry settings. This does not change telemetry preferences for independently launched GitHub CLI commands or other tools.
+The bundled GitHub CLI has its own [upstream telemetry settings](https://docs.github.com/en/github-cli/github-cli/github-cli-telemetry). EnoughRepos explicitly sets `GH_TELEMETRY=false` for its GitHub CLI subprocesses and managed Git credential-helper environment, overriding inherited telemetry settings. This does not change telemetry preferences for independently launched GitHub CLI commands or other tools.
 
-Repository content is not sent to an Enough Tools repository-storage service. Your chosen Git source receives the normal Git requests needed for its operations; GitHub receives account/discovery requests when you use those features. User-configured Git hooks, filters, helpers, or build tools can make additional network requests outside RepoReach's own operations.
+Repository content is not sent to an Enough Tools repository-storage service. Your chosen Git source receives the normal Git requests needed for its operations; GitHub receives account/discovery requests when you use those features. User-configured Git hooks, filters, helpers, or build tools can make additional network requests outside EnoughRepos's own operations.
 
 ## Diagnostics and removal
 

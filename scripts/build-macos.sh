@@ -100,7 +100,7 @@ if [ "$VALIDATION_ARTIFACT" = true ]; then
   VALIDATION_ROOT="${VALIDATION_ROOT:-$ROOT/build/fskit-validation}"
   OUTPUT="$VALIDATION_ROOT/products/$ARCH"
   STAGE="$VALIDATION_ROOT/stage/$ARCH"
-  BASENAME="RepoReach-local-validation-$ARCH"
+  BASENAME="EnoughRepos-local-validation-$ARCH"
   if [ -e "$OUTPUT/$BASENAME.zip" ]; then
     echo "Local validation archive already exists; refusing to overwrite it: $OUTPUT/$BASENAME.zip" >&2
     exit 1
@@ -109,7 +109,7 @@ if [ "$VALIDATION_ARTIFACT" = true ]; then
   python3 "$ROOT/scripts/release-manifest.py" source --output "$STAGE/source.json"
 fi
 if [ "$COMPILE_ONLY" = false ] && [ "$LOCAL_APP" = false ]; then
-  BASENAME="RepoReach-${VERSION}-macOS-${ARCH}"
+  BASENAME="EnoughRepos-${VERSION}-macOS-${ARCH}"
   if [ -e "$OUTPUT/$BASENAME.zip" ] || [ -e "$OUTPUT/$BASENAME.dmg" ]; then
     echo "Release archives already exist for this version and architecture; refusing to overwrite them. Choose a new release version." >&2
     exit 1
@@ -133,7 +133,7 @@ xcodebuild -project "$ROOT/native/RepoReach.xcodeproj" -scheme "$SCHEME" \
 # Xcode registers macOS app products during a successful build. Retire only
 # this build's unsigned product before packaging or returning compile output.
 # Do not clean up a pre-existing derived product after a failed build.
-python3 - "$DERIVED/Build/Products/Release/RepoReach.app" "$BACKEND" "$REGISTRATION_INSPECTOR" <<'PY_REGISTRATION'
+python3 - "$DERIVED/Build/Products/Release/EnoughRepos.app" "$BACKEND" "$REGISTRATION_INSPECTOR" <<'PY_REGISTRATION'
 import json, pathlib, re, subprocess, sys
 
 app = pathlib.Path(sys.argv[1])
@@ -201,18 +201,18 @@ PY_REGISTRATION
 if [ "$COMPILE_ONLY" = true ]; then
   if [ "$BACKEND" = fskit ]; then
     python3 "$ROOT/scripts/validate-fskit-bundle.py" compile \
-      --app "$DERIVED/Build/Products/Release/RepoReach.app" --arch "$ARCH" \
+      --app "$DERIVED/Build/Products/Release/EnoughRepos.app" --arch "$ARCH" \
       --entitlements "$ROOT/native/FSKitExtension/FSKit.entitlements"
   fi
   if [ "$VALIDATION_ARTIFACT" = false ]; then
-    echo "Compiled $BACKEND $ARCH without release archives: $DERIVED/Build/Products/Release/RepoReach.app"
+    echo "Compiled $BACKEND $ARCH without release archives: $DERIVED/Build/Products/Release/EnoughRepos.app"
     exit 0
   fi
 fi
 GH_CACHE="$("$ROOT/scripts/vendor-gh.sh" "$ARCH")"
-APP="$STAGE/RepoReach.app"
+APP="$STAGE/EnoughRepos.app"
 rm -rf "$APP"
-ditto "$DERIVED/Build/Products/Release/RepoReach.app" "$APP"
+ditto "$DERIVED/Build/Products/Release/EnoughRepos.app" "$APP"
 mkdir -p "$APP/Contents/Helpers" "$APP/Contents/Resources/Licenses"
 (
   cd "$ROOT"
@@ -226,14 +226,14 @@ python3 "$ROOT/scripts/bundle-go-licenses.py" "$APP/Contents/Resources/Licenses/
 python3 "$ROOT/scripts/bundle-gh-licenses.py" --binary "$APP/Contents/Helpers/gh" \
   --destination "$APP/Contents/Resources/Licenses/GitHubCLI-Dependencies"
 cat > "$APP/Contents/Resources/Licenses/NOTICE.txt" <<'NOTICE'
-RepoReach is an Enough Tools project built on Cloudflare ArtifactFS.
-ArtifactFS and RepoReach source: https://github.com/enoughtools/reporeach
+EnoughRepos is an Enough Tools project built on Cloudflare ArtifactFS.
+ArtifactFS and EnoughRepos source: https://github.com/enoughtools/reporeach
 Upstream ArtifactFS: https://github.com/cloudflare/artifact-fs (Apache-2.0)
 Bundled official GitHub CLI: https://github.com/cli/cli (MIT)
 GitHub CLI version: 2.102.0. GitHub is a trademark of GitHub, Inc.
 NOTICE
 if [ "$BACKEND" = fskit ]; then
-  echo "FSKit is supplied by macOS. RepoReach's FSKit module is included in this app." >> "$APP/Contents/Resources/Licenses/NOTICE.txt"
+  echo "FSKit is supplied by macOS. EnoughRepos's FSKit module is included in this app." >> "$APP/Contents/Resources/Licenses/NOTICE.txt"
 else
   echo "macFUSE is a separately installed dependency and is not redistributed here." >> "$APP/Contents/Resources/Licenses/NOTICE.txt"
 fi
@@ -348,10 +348,10 @@ rm -f "$ZIP" "$DMG"
 ditto -c -k --sequesterRsrc --keepParent "$APP" "$ZIP"
 DMG_STAGE="$STAGE/dmg"
 mkdir -p "$DMG_STAGE"
-rm -rf "$DMG_STAGE/RepoReach.app"
-ditto "$APP" "$DMG_STAGE/RepoReach.app"
+rm -rf "$DMG_STAGE/EnoughRepos.app" "$DMG_STAGE/RepoReach.app"
+ditto "$APP" "$DMG_STAGE/EnoughRepos.app"
 ln -sfn /Applications "$DMG_STAGE/Applications"
-hdiutil create -volname RepoReach -srcfolder "$DMG_STAGE" -ov -format UDZO \
+hdiutil create -volname EnoughRepos -srcfolder "$DMG_STAGE" -ov -format UDZO \
   -imagekey zlib-level=9 "$DMG"
 if [ -n "$SIGN_IDENTITY" ]; then codesign --force --timestamp --sign "$SIGN_IDENTITY" "$DMG"; fi
 if [ "$NOTARIZED" = true ]; then

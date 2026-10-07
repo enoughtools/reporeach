@@ -1,10 +1,10 @@
 # Security policy
 
-RepoReach is an Enough Tools beta built on Cloudflare ArtifactFS. Security fixes are developed on the current source and latest beta; there is no promised support window for older prerelease versions.
+EnoughRepos is an Enough Tools beta built on Cloudflare ArtifactFS. Security fixes are developed on the current source and latest beta; there is no promised support window for older prerelease versions.
 
 ## Report a vulnerability
 
-Use GitHub's [private vulnerability reporting form](https://github.com/enoughtools/reporeach/security/advisories/new). Include the source revision or release version, macOS and macFUSE versions, reproducible steps using a disposable repository, the affected boundary, and any data-loss or credential-exposure impact. Do not include real credentials, private source code, or unredacted logs.
+Use GitHub's [private vulnerability reporting form](https://github.com/enoughtools/reporeach/security/advisories/new). Include the source revision or release version, macOS version, filesystem backend, reproducible steps using a disposable repository, the affected boundary, and any data-loss or credential-exposure impact. Include the macFUSE version for historical builds that use it. Do not include real credentials, private source code, or unredacted logs.
 
 If the private form becomes unavailable, open an issue asking a maintainer for a private reporting channel without including exploit details or sensitive data. There is no published response-time commitment.
 
@@ -12,7 +12,7 @@ Routine reproducible UI bugs can be reported as [GitHub issues](https://github.c
 
 ## Boundaries and sensitive data
 
-- RepoReach delegates GitHub authorization and credential storage to the official GitHub CLI. Its browser login normally uses the system credential store; the CLI can fall back to a plaintext configuration file if secure storage is unavailable. Environment-provided tokens and existing GitHub CLI account configuration can affect authentication.
+- EnoughRepos delegates GitHub authorization and credential storage to the official GitHub CLI. Its browser login normally uses the system credential store; the CLI can fall back to a plaintext configuration file if secure storage is unavailable. Environment-provided tokens and existing GitHub CLI account configuration can affect authentication.
 - The app uses a local service and private Unix socket. The desktop catalogue/control API is not a hosted Enough Tools API. The containing macOS app is not sandboxed; it launches Git and the bundled helper tools as the current user.
 - Repository content, downloaded blobs, overlays, Git objects, metadata, and logs are stored locally. Permission restrictions are not encryption. Use the host's ordinary disk encryption and backup controls as needed.
 - Finder receives repository identity, status, errors, and the mount root through a metadata-only file. Action URLs are validated and routed back to the app; they do not grant a trusted channel from arbitrary applications.

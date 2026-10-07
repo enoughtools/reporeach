@@ -80,7 +80,7 @@ struct ContentView: View {
             }
             Button("Cancel", role: .cancel) { freeCandidate = nil }
         } message: {
-            Text("RepoReach checks for local changes and unpushed work before reclaiming downloads. If local work exists, the operation will stop. The repository will remain in your catalogue.")
+            Text("EnoughRepos checks for local changes and unpushed work before reclaiming downloads. If local work exists, the operation will stop. The repository will remain in your catalogue.")
         }
     }
 
@@ -89,7 +89,7 @@ struct ContentView: View {
             HStack(spacing: 11) {
                 ReachMark()
                 VStack(alignment: .leading, spacing: 3) {
-                    Text("RepoReach").font(.system(size: 18, weight: .semibold))
+                    Text("EnoughRepos").font(.system(size: 18, weight: .semibold))
                     Text("BY ENOUGH TOOLS").font(.system(size: 9, weight: .medium)).tracking(1.3).foregroundStyle(ReachTheme.muted)
                 }
             }
@@ -319,7 +319,7 @@ struct ContentView: View {
                     ReachEyebrow(text: "How it works")
                     Text("Repositories stay in your catalogue. File contents download as you use them.")
                         .font(.system(size: 12)).foregroundStyle(ReachTheme.muted).lineSpacing(4)
-                    Text("Keep Downloaded creates an ordinary local checkout that stays available when RepoReach quits. Git history may still need a connection.")
+                    Text("Keep Downloaded creates an ordinary local checkout that stays available when EnoughRepos quits. Git history may still need a connection.")
                         .font(.system(size: 12)).foregroundStyle(ReachTheme.muted).lineSpacing(4)
                 }
             }
@@ -412,7 +412,7 @@ struct ContentView: View {
             .buttonStyle(ReachButtonStyle())
             .disabled(!repo.canFreeStorage || store.isRepositoryWorking(repo) || store.isBusy || store.demoMode)
             .accessibilityIdentifier("free-repository")
-            .help(repo.isAdopted ? "Your original checkout is retained. RepoReach never removes an adopted folder." : "Return a safely recoverable checkout to an on-demand repository")
+            .help(repo.isAdopted ? "Your original checkout is retained. EnoughRepos never removes an adopted folder." : "Return a safely recoverable checkout to an on-demand repository")
 
             Button {
                 Task { await store.action(repo, .refresh) }
@@ -424,7 +424,7 @@ struct ContentView: View {
             .disabled(store.isRepositoryWorking(repo) || store.isBusy || store.demoMode || !store.isRepositoryEnabled(repo))
             .padding(.leading, -11)
         }
-        Text(repo.isAdopted ? "Your original checkout is retained, including local work. It stays available when RepoReach quits." : repo.isLocal ? "This ordinary local checkout stays available when RepoReach quits." : "Opening files downloads their contents as needed. Keep Downloaded creates a local checkout.")
+        Text(repo.isAdopted ? "Your original checkout is retained, including local work. It stays available when EnoughRepos quits." : repo.isLocal ? "This ordinary local checkout stays available when EnoughRepos quits." : "Opening files downloads their contents as needed. Keep Downloaded creates a local checkout.")
             .font(.system(size: 11)).foregroundStyle(ReachTheme.muted).lineSpacing(3)
         if let url = URL(string: repo.htmlURL), url.scheme == "https" {
             Link(destination: url) {
@@ -485,7 +485,7 @@ struct ContentView: View {
                 Image(systemName: "folder.badge.plus").font(.system(size: 42, weight: .ultraLight)).foregroundStyle(ReachTheme.accent)
                 VStack(alignment: .leading, spacing: 12) {
                     Text("Your projects, without the pile-up.").font(ReachTheme.heading(31))
-                    Text("Add a Git remote or existing checkout, or connect GitHub to discover repositories. RepoReach puts them in a folder you choose, ready when you need them.")
+                    Text("Add a Git remote or existing checkout, or connect GitHub to discover repositories. EnoughRepos puts them in a folder you choose, ready when you need them.")
                         .font(.system(size: 13)).foregroundStyle(ReachTheme.muted).lineSpacing(5).frame(maxWidth: 480, alignment: .leading)
                 }
                 VStack(alignment: .leading, spacing: 18) {
@@ -508,7 +508,7 @@ struct ContentView: View {
                         Button("Choose Folder") { store.chooseMountFolder() }
                             .buttonStyle(ReachButtonStyle(compact: true)).disabled(store.isBusy || store.demoMode)
                     }
-                    setupStep(number: "03", title: "Make room for your work", detail: "Opening files downloads them. Keep Downloaded creates a local checkout that works without RepoReach.") {
+                    setupStep(number: "03", title: "Make room for your work", detail: "Opening files downloads them. Keep Downloaded creates a local checkout that works without EnoughRepos.") {
                         Button("Open Settings") { store.showSettings() }
                             .buttonStyle(ReachButtonStyle(compact: true))
                     }
@@ -598,7 +598,7 @@ struct ContentView: View {
         notice(symbol: "externaldrive", color: ReachTheme.ink) {
             VStack(alignment: .leading, spacing: 4) {
                 Text("Virtual folders require macOS 26.").font(.system(size: 12, weight: .semibold))
-                Text("You can manage repositories here. On macOS 26, enable RepoReach's bundled filesystem extension to show them in Finder.").font(.system(size: 11)).foregroundStyle(ReachTheme.muted)
+                Text("You can manage repositories here. On macOS 26, enable the bundled EnoughRepos filesystem extension to show them in Finder.").font(.system(size: 11)).foregroundStyle(ReachTheme.muted)
             }
             Spacer(minLength: 8)
             Button("Filesystem Settings") { store.showFilesystemExtensionSettings() }
@@ -646,7 +646,7 @@ struct ContentView: View {
                     }
                     .font(.system(size: 11))
                 } else {
-                    Text("Authorize RepoReach in your browser. This window will update when you're connected.")
+                    Text("Authorize EnoughRepos in your browser. This window will update when you're connected.")
                         .font(.system(size: 11)).foregroundStyle(ReachTheme.muted)
                 }
             }
@@ -699,14 +699,14 @@ struct SettingsView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 26) {
                 VStack(alignment: .leading, spacing: 8) {
-                    ReachEyebrow(text: "RepoReach / Preferences")
+                    ReachEyebrow(text: "EnoughRepos / Preferences")
                     Text("Make yourself at home.").font(ReachTheme.heading(29))
-                    Text("Choose where your projects live and how RepoReach runs.").foregroundStyle(ReachTheme.muted)
+                    Text("Choose where your projects live and how EnoughRepos runs.").foregroundStyle(ReachTheme.muted)
                 }
                 settingSection("Repository folder", symbol: "folder") {
                     Text(store.status?.mountRoot ?? "Loading folder location…")
                         .font(.system(size: 12)).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
-                    Text("RepoReach groups repositories by owner inside this folder. Existing checkouts stay in their original locations; kept repositories become ordinary local checkouts.")
+                    Text("EnoughRepos groups repositories by owner inside this folder. Existing checkouts stay in their original locations; kept repositories become ordinary local checkouts.")
                         .font(.system(size: 12)).foregroundStyle(ReachTheme.muted).lineSpacing(3)
                     HStack(spacing: 10) {
                         Button("Choose Folder…") { store.chooseMountFolder() }
@@ -731,13 +731,13 @@ struct SettingsView: View {
                     }
                 }
                 settingSection("Background & startup", symbol: "power") {
-                    Toggle("Open RepoReach at login", isOn: Binding(get: { store.launchAtLogin }, set: { enabled in Task { await store.setLaunchAtLogin(enabled) } }))
+                    Toggle("Open EnoughRepos at login", isOn: Binding(get: { store.launchAtLogin }, set: { enabled in Task { await store.setLaunchAtLogin(enabled) } }))
                         .toggleStyle(.checkbox).disabled(store.demoMode)
-                    Text("Closing the window keeps virtual folders available. Reopen RepoReach from Applications. Quitting stops virtual folders; adopted and kept local checkouts stay available.")
+                    Text("Closing the window keeps virtual folders available. Reopen EnoughRepos from Applications. Quitting stops virtual folders; adopted and kept local checkouts stay available.")
                         .font(.system(size: 12)).foregroundStyle(ReachTheme.muted).lineSpacing(3)
                 }
                 settingSection("Finder actions", symbol: "macwindow") {
-                    Text("Enable RepoReach's Finder extension to use Keep Downloaded and Free Up Space from a repository's context menu.")
+                    Text("Enable the EnoughRepos Finder extension to use Keep Downloaded and Free Up Space from a repository's context menu.")
                         .font(.system(size: 12)).foregroundStyle(ReachTheme.muted).lineSpacing(3)
                     Button("Open Extension Settings") { store.showFinderExtensionSettings() }
                         .buttonStyle(ReachButtonStyle(compact: true)).disabled(store.demoMode)
@@ -747,7 +747,7 @@ struct SettingsView: View {
                         Circle().fill(store.status?.dependencyReady == true ? ReachTheme.success : ReachTheme.muted).frame(width: 6, height: 6)
                         Text(store.status?.dependencyReady == true ? "macOS 26 filesystem support available" : "Virtual folders require macOS 26").font(.system(size: 12, weight: .semibold))
                     }
-                    Text("Enable RepoReach in System Settings → General → Login Items & Extensions → File System Extensions, then choose Enable Virtual Folders. The filesystem extension is included in the app.")
+                    Text("Enable EnoughRepos in System Settings → General → Login Items & Extensions → File System Extensions, then choose Enable Virtual Folders. The filesystem extension is included in the app.")
                         .font(.system(size: 12)).foregroundStyle(ReachTheme.muted).lineSpacing(3)
                     Button("Open Filesystem Extension Settings") { store.showFilesystemExtensionSettings() }
                         .buttonStyle(ReachButtonStyle(compact: true))
@@ -761,7 +761,7 @@ struct SettingsView: View {
                 ReachDivider()
                 HStack(alignment: .top) {
                     VStack(alignment: .leading, spacing: 6) {
-                        Text("RepoReach").font(.system(size: 13, weight: .semibold))
+                        Text("EnoughRepos").font(.system(size: 13, weight: .semibold))
                         Text("An open source tool by Enough Tools.").font(.system(size: 11)).foregroundStyle(ReachTheme.muted)
                         if let version = store.status?.version {
                             Text("Filesystem engine \(version)").font(.system(size: 10)).foregroundStyle(ReachTheme.muted)

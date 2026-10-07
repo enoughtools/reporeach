@@ -72,7 +72,7 @@ func (s *Service) Adopt(ctx context.Context, request AdoptionRequest) (status St
 		if err == nil {
 			remote.localPath, remote.url = resolved, resolved
 		} else {
-			err = errors.New("could not validate the local Git source outside RepoReach's mount and private storage folders")
+			err = errors.New("could not validate the local Git source outside EnoughRepos's mount and private storage folders")
 		}
 	}
 	s.mu.Unlock()
@@ -219,10 +219,10 @@ func (s *Service) adoptionSourceAllowedLocked(remote adoptionRemote) error {
 		protectedRoot = s.opts.StateDir
 	}
 	if pathsLexicallyOverlap(remote.localPath, protectedRoot) || pathsLexicallyOverlap(remote.localPath, s.opts.StateDir) {
-		return errors.New("choose a Git folder outside RepoReach's mount and private storage folders")
+		return errors.New("choose a Git folder outside EnoughRepos's mount and private storage folders")
 	}
 	if _, err := validateAdoptionLocalSource(remote.localPath, protectedRoot, s.opts.StateDir); err != nil {
-		return errors.New("choose a Git folder outside RepoReach's mount and private storage folders")
+		return errors.New("choose a Git folder outside EnoughRepos's mount and private storage folders")
 	}
 	return nil
 }
@@ -232,7 +232,7 @@ func (s *Service) adoptionSourceAllowedLocked(remote adoptionRemote) error {
 func validateManualSourceLocation(repo Repository, mountRoot, stateDir string) error {
 	if repo.LocalPath != "" {
 		if _, err := validateAdoptionLocalSource(repo.LocalPath, stateDir, stateDir); err != nil {
-			return errors.New("the local checkout must stay outside RepoReach's private storage")
+			return errors.New("the local checkout must stay outside EnoughRepos's private storage")
 		}
 		return nil
 	}
@@ -244,7 +244,7 @@ func validateManualSourceLocation(repo Repository, mountRoot, stateDir string) e
 		return nil
 	}
 	if _, err := validateAdoptionLocalSource(remote.localPath, mountRoot, stateDir); err != nil {
-		return errors.New("choose a Git source outside RepoReach's mount and private storage folders")
+		return errors.New("choose a Git source outside EnoughRepos's mount and private storage folders")
 	}
 	return nil
 }
@@ -358,7 +358,7 @@ func resolveAdoptionSource(source, mountRoot, stateDir string) (string, error) {
 	}
 	for _, root := range protected {
 		if pathsLexicallyOverlap(source, root) {
-			return "", errors.New("source overlaps RepoReach storage")
+			return "", errors.New("source overlaps EnoughRepos storage")
 		}
 	}
 	// Preserve redirect components until previous symlinks have been resolved.
@@ -380,7 +380,7 @@ func resolveAdoptionSource(source, mountRoot, stateDir string) (string, error) {
 		for _, root := range protected {
 			rel, err := filepath.Rel(root, candidate)
 			if err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
-				return "", errors.New("source traverses RepoReach storage")
+				return "", errors.New("source traverses EnoughRepos storage")
 			}
 		}
 		info, err := os.Lstat(candidate)
@@ -394,7 +394,7 @@ func resolveAdoptionSource(source, mountRoot, stateDir string) (string, error) {
 		}
 		for _, protectedInfo := range protectedInfos {
 			if os.SameFile(info, protectedInfo) {
-				return "", errors.New("source traverses RepoReach storage")
+				return "", errors.New("source traverses EnoughRepos storage")
 			}
 		}
 		if info.Mode()&os.ModeSymlink == 0 {
@@ -416,7 +416,7 @@ func resolveAdoptionSource(source, mountRoot, stateDir string) (string, error) {
 	}
 	for _, root := range protected {
 		if pathsLexicallyOverlap(current, root) {
-			return "", errors.New("source overlaps RepoReach storage")
+			return "", errors.New("source overlaps EnoughRepos storage")
 		}
 	}
 	return current, nil

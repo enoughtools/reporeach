@@ -1,6 +1,6 @@
-# Using RepoReach
+# Using EnoughRepos
 
-RepoReach groups repositories under a folder you choose. GitHub sign-in is
+EnoughRepos groups repositories under a folder you choose. GitHub sign-in is
 optional: add a remote, adopt an existing checkout, or connect GitHub to discover
 accessible repositories.
 
@@ -12,7 +12,10 @@ Repositories/
     shared-project/
 ```
 
-This guide describes the signed local16 development build. Actual Finder Refresh
+This guide describes the native implementation validated by the signed local16
+development build, produced under the previous RepoReach name. Existing state and
+repositories carry forward under EnoughRepos; rebranded builds need their own
+packaging and installed-app checks. Actual Finder Refresh
 launched the stopped app/service, completed, and preserved the existing local
 checkout's HEAD and clean Git status. Its unchanged Go/FSKit implementation retains
 local15's three mounted fixture passes on macOS 27.0.1 ARM64, including Keep across 160 descendant
@@ -32,7 +35,7 @@ Development changes do not alter those releases or establish release readiness.
 1. Use the native build for macOS 26 or later. Its FSKit extension is bundled;
    no separate macFUSE installation is required. Consult the build manifest for
    signing and notarization status.
-2. Open RepoReach and enable its File System Extension in macOS settings when
+2. Open EnoughRepos and enable its File System Extension in macOS settings when
    requested. Enable the Finder extension separately for badges and actions.
 3. Choose your repository folder, then **Enable Virtual Folders**. Existing files
    can stay there: the root and organization folders are ordinary directories.
@@ -61,7 +64,7 @@ server access in Git first. Credentials embedded in HTTP URLs are refused.
 
 An existing nonbare checkout is adopted in place. Its branch or detached HEAD,
 staged and unstaged changes, untracked files, index, and configuration are retained.
-RepoReach neither moves it nor creates a separate managed clone. A checkout
+EnoughRepos neither moves it nor creates a separate managed clone. A checkout
 already inside the chosen catalogue stays there; an external one receives a direct
 catalogue link. Adopted originals work after app quit and cannot be removed by
 Free Up Space. Change their branches through normal Git operations.
@@ -90,7 +93,7 @@ credentials or prevent all existing processes from accessing data.
 ## Browse and work
 
 Root and organization listings use saved metadata. Within a dormant GitHub repo,
-RepoReach acquires tree metadata in batches and loads deeper trees as needed,
+EnoughRepos acquires tree metadata in batches and loads deeper trees as needed,
 without preparing every writable checkout or downloading file bodies. Complete
 cached trees are available offline. Manual sources use separate shallow filtered
 Git previews. A server ignoring filters can transfer more objects; an exact-size
@@ -113,7 +116,7 @@ does not automatically rebuild the visible tree. Test branch changes and your
 editor/build workflow before relying on it for important work.
 
 Adopted and kept checkouts are ordinary Git folders; files, index, and branch
-changes are independent of the virtual service. RepoReach does not automatically
+changes are independent of the virtual service. EnoughRepos does not automatically
 commit or push changes in either kind of repo.
 
 ## Repository actions
@@ -158,7 +161,7 @@ file access. A fresh remote check must prove recoverability. Failed or canceled
 checks retain the checkout; network failure can prevent freeing it.
 
 Preserve local data and publish work you intend to recover before retrying.
-RepoReach does not upload ignored files, force a push, or discard work to make Free
+EnoughRepos does not upload ignored files, force a push, or discard work to make Free
 succeed. Adopted originals are always retained; manage their space through your
 normal backup and Git workflow.
 
@@ -173,7 +176,7 @@ important work.
 
 ## Lifecycle and upgrades
 
-Closing the window leaves RepoReach running without a menu-bar item. **Pause
+Closing the window leaves EnoughRepos running without a menu-bar item. **Pause
 Virtual Folders** disconnects virtual access. Quitting stops the owned service;
 reopen the app to restore virtual links. Ordinary adopted and kept checkouts remain
 usable. Launch at login is optional.

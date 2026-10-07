@@ -13,7 +13,7 @@ struct FSBridgeContainer: Sendable {
         case unavailable
 
         var errorDescription: String? {
-            "RepoReach's private filesystem connection is unavailable. Reinstall the complete signed app."
+            "The EnoughRepos private filesystem connection is unavailable. Reinstall the complete signed app."
         }
     }
 

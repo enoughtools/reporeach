@@ -202,7 +202,7 @@ final class RepoReachVolume: FSVolume, FSVolume.Operations,
         self.client = client
         self.loadReadOnly = readOnly
         super.init(volumeID: FSVolume.Identifier(uuid: identifier),
-                   volumeName: FSFileName(string: "RepoReach"))
+                   volumeName: FSFileName(string: "EnoughRepos"))
     }
 
     var maximumLinkCount: Int { 1 }

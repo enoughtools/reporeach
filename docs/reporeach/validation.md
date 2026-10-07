@@ -1,4 +1,9 @@
-# Beta validation record
+# Historical RepoReach beta validation record
+
+The current app is named EnoughRepos. This record retains the original names,
+requirements, and results of the published RepoReach betas; see the
+[current setup guide](user-guide.md) and [native acceptance record](fskit-acceptance.md)
+for subsequent local development.
 
 This record describes the checks performed for RepoReach 0.1.0-beta.1 on October 4, 2026. It distinguishes source, integration, and packaging checks from installation acceptance. The release manifest records the exact source revision, toolchains, artifact hashes, and signing status.
 

@@ -18,7 +18,7 @@ import (
 
 const nativeRootReceiptVersion = 1
 
-var errMountRootNotEmpty = errors.New("choose an empty folder so RepoReach does not hide existing files")
+var errMountRootNotEmpty = errors.New("choose an empty folder so EnoughRepos does not hide existing files")
 var errNativeRootChanged = errors.New("the repository folder changed while its backing directory was checked")
 
 // The volume UUID, inode and birth time identify an object across host boots.

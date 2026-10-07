@@ -31,21 +31,21 @@ final class ActionRouteTests: XCTestCase {
     }
 
     func testFinderDeliveryLocatesOnlyAContainingApplicationBundle() {
-        let extensionURL = URL(fileURLWithPath: "/Users/example/Applications/Repo Reach.app/Contents/PlugIns/RepoReachFinder.appex")
+        let extensionURL = URL(fileURLWithPath: "/Users/example/Applications/Enough Repos.app/Contents/PlugIns/RepoReachFinder.appex")
         XCTAssertEqual(ActionRoute.containingApplicationURL(forFinderExtensionURL: extensionURL)?.path,
-                       "/Users/example/Applications/Repo Reach.app")
+                       "/Users/example/Applications/Enough Repos.app")
         for path in ["/tmp/RepoReachFinder.appex", "/tmp/Other/Contents/PlugIns/RepoReachFinder.appex",
-                     "/tmp/RepoReach.app/PlugIns/RepoReachFinder.appex", "/tmp/RepoReach.app/Contents/Extensions/RepoReachFinder.appex",
-                     "/tmp/RepoReach.app/Contents/PlugIns/RepoReachFinder.app", "/tmp/RepoReach.app/Contents/PlugIns/../RepoReachFinder.appex"] {
+                     "/tmp/EnoughRepos.app/PlugIns/RepoReachFinder.appex", "/tmp/EnoughRepos.app/Contents/Extensions/RepoReachFinder.appex",
+                     "/tmp/EnoughRepos.app/Contents/PlugIns/RepoReachFinder.app", "/tmp/EnoughRepos.app/Contents/PlugIns/../RepoReachFinder.appex"] {
             XCTAssertNil(ActionRoute.containingApplicationURL(forFinderExtensionURL: URL(fileURLWithPath: path)), path)
         }
-        XCTAssertNil(ActionRoute.containingApplicationURL(forFinderExtensionURL: URL(string: "https://example.com/RepoReach.app/Contents/PlugIns/Finder.appex")!))
+        XCTAssertNil(ActionRoute.containingApplicationURL(forFinderExtensionURL: URL(string: "https://example.com/EnoughRepos.app/Contents/PlugIns/Finder.appex")!))
     }
 
     func testFinderDeliveryRequiresItsOwnRegisteredApplicationCopy() {
-        let application = URL(fileURLWithPath: "/Users/example/Applications/Repo Reach.app", isDirectory: true)
+        let application = URL(fileURLWithPath: "/Users/example/Applications/Enough Repos.app", isDirectory: true)
         let extensionURL = application.appendingPathComponent("Contents/PlugIns/RepoReachFinder.appex")
-        let staged = URL(fileURLWithPath: "/not-present/stage/RepoReach.app", isDirectory: true)
+        let staged = URL(fileURLWithPath: "/not-present/stage/EnoughRepos.app", isDirectory: true)
         XCTAssertEqual(ActionRoute.registeredContainingApplicationURL(
             forFinderExtensionURL: extensionURL, extensionBundleIdentifier: ActionRoute.finderExtensionBundleIdentifier,
             registeredApplicationURLs: [staged, application]), application)
@@ -62,17 +62,17 @@ final class ActionRouteTests: XCTestCase {
     }
 
     func testFinderDeliveryRejectsRemoteAndAmbiguousRegisteredURLs() {
-        let application = URL(fileURLWithPath: "/not-present/RepoReach.app", isDirectory: true)
+        let application = URL(fileURLWithPath: "/not-present/EnoughRepos.app", isDirectory: true)
         let extensionURL = application.appendingPathComponent("Contents/PlugIns/RepoReachFinder.appex")
-        for value in ["https://example.com/not-present/RepoReach.app", "file://remote/not-present/RepoReach.app",
-                      "file:///not-present/RepoReach.app?query=yes", "file:///not-present/RepoReach.app#fragment",
-                      "file:///not-present/Other/../RepoReach.app", "file:///not-present/RepoReach.app/child"] {
+        for value in ["https://example.com/not-present/EnoughRepos.app", "file://remote/not-present/EnoughRepos.app",
+                      "file:///not-present/EnoughRepos.app?query=yes", "file:///not-present/EnoughRepos.app#fragment",
+                      "file:///not-present/Other/../EnoughRepos.app", "file:///not-present/EnoughRepos.app/child"] {
             XCTAssertNil(ActionRoute.registeredContainingApplicationURL(
                 forFinderExtensionURL: extensionURL, extensionBundleIdentifier: ActionRoute.finderExtensionBundleIdentifier,
                 registeredApplicationURLs: [URL(string: value)!]), value)
         }
-        for value in ["file://remote/not-present/RepoReach.app/Contents/PlugIns/RepoReachFinder.appex",
-                      "file:///not-present/RepoReach.app/Contents/PlugIns/RepoReachFinder.appex?query=yes"] {
+        for value in ["file://remote/not-present/EnoughRepos.app/Contents/PlugIns/RepoReachFinder.appex",
+                      "file:///not-present/EnoughRepos.app/Contents/PlugIns/RepoReachFinder.appex?query=yes"] {
             XCTAssertNil(ActionRoute.registeredContainingApplicationURL(
                 forFinderExtensionURL: URL(string: value)!, extensionBundleIdentifier: ActionRoute.finderExtensionBundleIdentifier,
                 registeredApplicationURLs: [application]), value)
@@ -82,7 +82,7 @@ final class ActionRouteTests: XCTestCase {
     func testFinderDeliveryDoesNotRequireParentBundleMetadata() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
-        let application = directory.appendingPathComponent("RepoReach.app", isDirectory: true)
+        let application = directory.appendingPathComponent("EnoughRepos.app", isDirectory: true)
         let extensionURL = application.appendingPathComponent("Contents/PlugIns/RepoReachFinder.appex", isDirectory: true)
         let contents = extensionURL.appendingPathComponent("Contents", isDirectory: true)
         try FileManager.default.createDirectory(at: contents, withIntermediateDirectories: true)
@@ -542,7 +542,7 @@ final class EngineContractTests: XCTestCase {
     func testInvalidSuccessfulResponseIsActionable() {
         let response = CommandResult(status: 0, output: Data("not json".utf8), errorOutput: Data())
         XCTAssertThrowsError(try EngineClient.decode(response) as EngineStatus) { error in
-            XCTAssertTrue(error.localizedDescription.contains("Update RepoReach"))
+            XCTAssertTrue(error.localizedDescription.contains("Update EnoughRepos"))
         }
     }
 

@@ -188,7 +188,7 @@ func TestNativeFSKitRejectsUnavailableOrOverlappingSocketDirectoryBeforeStartup(
 }
 
 func TestNativeFSKitSourceIdentity(t *testing.T) {
-	path := "/Users/example/Library/Application Support/RepoReach #1?check/FSKit"
+	path := "/Users/example/Library/Application Support/EnoughRepos #1?check/FSKit"
 	fileURL := (&url.URL{Scheme: "file", Path: path}).String()
 	for _, test := range []struct {
 		name, source string
@@ -225,8 +225,8 @@ func TestNativeFSKitSourceIdentity(t *testing.T) {
 		{"opaque file URL", "file:opaque", false},
 		{"malformed escape", fileURL + "%zz", false},
 		{"prefix substring", "unrelated " + fileURL, false},
-		{"unverified FSKit source decoration", "RepoReach -- " + fileURL, false},
-		{"decorated directory URL", "RepoReach -- " + fileURL + "/", false},
+		{"unverified FSKit source decoration", "EnoughRepos -- " + fileURL, false},
+		{"decorated directory URL", "EnoughRepos -- " + fileURL + "/", false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			if got := mountSourceMatches(test.source, path); got != test.want {
@@ -240,7 +240,7 @@ func TestNativeFSKitURLSourceOwnsNormalLifecycle(t *testing.T) {
 	for _, suffix := range []string{"", "/"} {
 		t.Run("URL suffix "+suffix, func(t *testing.T) {
 			f := newFakeFSKitMount(t)
-			f.service.opts.StateDir = filepath.Join(f.service.opts.StateDir, "RepoReach #1?check")
+			f.service.opts.StateDir = filepath.Join(f.service.opts.StateDir, "EnoughRepos #1?check")
 			f.command = func(_ context.Context, program string, _ ...string) error {
 				if program == "/sbin/mount" {
 					identity := f.ownIdentity()

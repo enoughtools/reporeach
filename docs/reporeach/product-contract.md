@@ -1,6 +1,6 @@
-# RepoReach product contract
+# EnoughRepos product contract
 
-Cold browsing is the main product requirement. RepoReach should make repositories
+Cold browsing is the main product requirement. EnoughRepos should make repositories
 visible in the user's chosen folder without downloading their file contents.
 Release work is deferred until the local experience meets these requirements.
 
@@ -24,14 +24,14 @@ Release work is deferred until the local experience meets these requirements.
    Adding a remote as a new virtual repo is a separate operation. Neither needs
    GitHub sign-in.
 5. **Keep locally.** Keep Downloaded creates an ordinary checkout at its catalogue
-   path, accessible after RepoReach quits. Conversion preserves the existing
+   path, accessible after EnoughRepos quits. Conversion preserves the existing
    private Git directory and current visible files without resetting or publishing
    work. Complete offline history, LFS, and submodule availability require explicit
    support.
 6. **Free space without losing work.** Returning an app-created checkout to a
    virtual entry requires proof that its data is recoverable. Unpushed history,
    edits, untracked or ignored files, local metadata, and active access can prevent
-   removal. RepoReach never removes an adopted original.
+   removal. EnoughRepos never removes an adopted original.
 7. **Independent visibility controls.** Organization and repository choices
    persist independently. Hiding a group retains each repo's choice and local
    data. Ordinary directories stay on disk; hiding changes only owned catalogue

@@ -213,7 +213,7 @@ func stageLocalCheckout(ctx context.Context, cfg model.RepoConfig, visibleRoot, 
 		return nil, errors.New("the local checkout copy did not preserve Git metadata")
 	}
 	if _, err := localCheckoutGit(ctx, stage.Path, "config", "--local", "core.worktree", destination); err != nil {
-		return nil, errors.New("cannot make the kept checkout independent of RepoReach")
+		return nil, errors.New("cannot make the kept checkout independent of EnoughRepos")
 	}
 	monitor, monitorErr := localCheckoutGit(ctx, stage.Path, "config", "--local", "--get", "core.fsmonitor")
 	if monitorErr == nil && monitor == filepath.Join(cfg.GitDir, "hooks", "artifact-fs-fsmonitor") {

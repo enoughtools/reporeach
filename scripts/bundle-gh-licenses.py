@@ -184,7 +184,7 @@ def main():
             standard_library.append({"source_path": str(relative), "path": str(bundled),
                                      "sha256": hashlib.sha256(target.read_bytes()).hexdigest()})
         manifest = {"binary_sha256": hashlib.sha256(binary.read_bytes()).hexdigest(),
-                    "binary_hash_scope": "Official input executable before RepoReach code signing",
+                    "binary_hash_scope": "Official input executable before EnoughRepos code signing",
                     "toolchain": toolchain, "checksum_database": "sum.golang.org",
                     "verification": VERIFICATION,
                     "notice_resource_format": "Exact upstream bytes with .txt suffix; source_path retains original relative path",

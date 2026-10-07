@@ -1,6 +1,6 @@
-# RepoReach architecture
+# EnoughRepos architecture
 
-RepoReach combines a macOS management app with a Git-backed filesystem. Enough
+EnoughRepos combines a macOS management app with a Git-backed filesystem. Enough
 Tools owns the desktop product; its engine comes from Cloudflare ArtifactFS and
 retains `github.com/cloudflare/artifact-fs` as its Go module path. The
 [product contract](product-contract.md) makes cold browsing and ordinary local
@@ -146,7 +146,7 @@ Visibility changes drain the native catalogue and fail if detachment is unsafe.
 They do not revoke credentials or provide a network firewall.
 
 Local checkout Refresh fetches its own remotes without resetting files or index.
-Publishing remains an explicit Git operation; RepoReach does not auto-commit or
+Publishing remains an explicit Git operation; EnoughRepos does not auto-commit or
 push.
 
 ## Keep and Free handoffs
@@ -198,7 +198,7 @@ after a partial verified deletion without demanding already removed files.
 ## Lifecycle and acceptance
 
 Closing the window leaves the app and service running without a menu-bar item.
-Quitting stops the owned service. Virtual links require reopening RepoReach;
+Quitting stops the owned service. Virtual links require reopening EnoughRepos;
 adopted and kept folders stay independent. Finder status is an atomic
 metadata-only cache, and action URLs are validated by the extension, app, and
 service. Accepted actions publish running status before remote preparation;
@@ -213,7 +213,8 @@ that app. Live Finder Refresh has verified this dispatch with the app/service
 initially stopped. See
 [Finder extension details](../../native/FinderExtension/README.md).
 
-The installed signed local16 build at executable source `aa8021b` passed signed
+The installed signed local16 build, produced under the previous RepoReach name,
+at executable source `aa8021b` passed signed
 packaging, 67 native UI tests, and production Finder typechecking. Live Finder
 Refresh launched the stopped app/service and preserved checkout state, proving
 shared dispatch. Keep used the local15 app button; no extra Finder Keep/Free cycle

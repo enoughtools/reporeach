@@ -44,7 +44,7 @@ def validate_app_groups(requested, team, allowed):
     if APP_GROUPS not in requested:
         return
     groups = requested[APP_GROUPS]
-    require(isinstance(groups, list) and len(groups) == 1 and isinstance(groups[0], str), "RepoReach must claim exactly one app group identifier")
+    require(isinstance(groups, list) and len(groups) == 1 and isinstance(groups[0], str), "EnoughRepos must claim exactly one app group identifier")
     group = groups[0]
     if group.startswith("group."):
         require(re.fullmatch(r"group\.[A-Za-z0-9]+(?:[.-][A-Za-z0-9]+)*", group), "Invalid modern app group identifier")
@@ -54,7 +54,7 @@ def validate_app_groups(requested, team, allowed):
         # macOS Team-prefix groups are code-signature claims; they are not
         # restricted capabilities requiring a profile or portal registration.
         # The prefix comes from the signing team, never an older App ID prefix.
-        require(group == app_group_identifier(team), "RepoReach app group must match the actual signing team and rr identifier")
+        require(group == app_group_identifier(team), "EnoughRepos app group must match the actual signing team and rr identifier")
 
 
 def check_group_metadata(app, team=None, allow_unresolved=False):
@@ -248,7 +248,7 @@ def check_bundle(app, arch, expected_entitlements, allow_unresolved=True):
     attributes = info.get("EXAppExtensionAttributes", {})
     require(isinstance(attributes, dict) and attributes.get("EXExtensionPointIdentifier") == "com.apple.fskit.fsmodule", "FSKit extension point is not configured")
     # mount's FSKit dispatcher advertises activation from this dictionary. Its
-    # common -o syntax propagates resource read/write mount flags; RepoReach
+    # common -o syntax propagates resource read/write mount flags; EnoughRepos
     # implements no additional activation, checking or formatting switches.
     require(attributes.get("FSActivateOptionSyntax") == {"shortOptions": "o:"}, "FSKit mount activation requires the supported common -o option syntax")
     require("FSCheckOptionSyntax" not in attributes and "FSFormatOptionSyntax" not in attributes, "FSKit module must not advertise unsupported checking or formatting operations")

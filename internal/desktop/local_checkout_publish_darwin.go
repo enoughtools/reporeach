@@ -88,7 +88,7 @@ func checkoutMountedViewMetadataValidator(mounted fusefs.MountedFS, root string)
 		if err := checkoutValidateMountSnapshot(identity, path, cachedDarwinMounts); err != nil {
 			return err
 		}
-		// This RepoReach backend stores POSIX mode/owner and named xattrs, and
+		// This EnoughRepos backend stores POSIX mode/owner and named xattrs, and
 		// implements no ACL operation or ACL storage. Only its captured exact
 		// mount, with disabled extended-security capability, may attest that
 		// ENOTSUP or EINVAL means this mandatory ACL request is unsupported. Successful

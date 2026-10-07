@@ -100,10 +100,10 @@ struct EngineClient {
                 throw EngineFailure(message: redact(message))
             }
             let detail = String(data: response.errorOutput, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            throw EngineFailure(message: detail.isEmpty ? "The repository service is unavailable. Reopen RepoReach to start it again." : redact(detail))
+            throw EngineFailure(message: detail.isEmpty ? "The repository service is unavailable. Reopen EnoughRepos to start it again." : redact(detail))
         }
         do { return try JSONDecoder().decode(T.self, from: response.output) }
-        catch { throw EngineFailure(message: "The repository service returned an unreadable response. Update RepoReach and try again.") }
+        catch { throw EngineFailure(message: "The repository service returned an unreadable response. Update EnoughRepos and try again.") }
     }
 
     static func redact(_ value: String, limit: Int = 1800, redactUserInfo: Bool = true) -> String {

@@ -1,31 +1,40 @@
 # Bundled native FSKit backend for macOS 26
 
-RepoReach is developing its own FSKit filesystem extension for **macOS 26 or later**. The target setup is: install the app, enable RepoReach's File System Extension once in normal System Settings, and choose the folder where repositories appear. The app bundles the extension; this path requires no separate macFUSE installer, kernel extension, Recovery visit, or Reduced Security setting.
+EnoughRepos is developing its own FSKit filesystem extension for **macOS 26 or later**. The target setup is: install the app, enable EnoughRepos's File System Extension once in normal System Settings, and choose the folder where repositories appear. The app bundles the extension; this path requires no separate macFUSE installer, kernel extension, Recovery visit, or Reduced Security setting.
 
 This is an implementation and acceptance record, not a claim that a production FSKit backend is available. The immutable beta.3 release and its [historical validation](validation.md) still describe the earlier FUSE transport. Its Linux mounts do not validate Apple's FSKit runtime.
 
-The latest combined mounted run uses clean Go helper `f47c1fd` with the unchanged installed beta.5 native app from `6c77f89`, on macOS 27.0.1 ARM64. Primary acceptance passes in 6.04 seconds and cold storage in 3.38 seconds, covering normal receipt-based remount, cold Keep, offline restart and clean Free/reacquisition as well as the primary Git/metadata sequence. Independent complete cached inspection confirms all seven disposable mount identities and four helpers absent, while the separate GUI catalogue remains live. This is not qualification of the upcoming beta.6 directory-performance changes or final native app. macOS 26 and Intel mounted runtime remain unqualified.
+The historical whole-root combined mounted run used clean Go helper `f47c1fd` with the unchanged installed beta.5 native app from `6c77f89`, on macOS 27.0.1 ARM64. Primary acceptance passes in 6.04 seconds and cold storage in 3.38 seconds, covering normal receipt-based remount, cold Keep, offline restart and clean Free/reacquisition as well as the primary Git/metadata sequence. Independent complete cached inspection confirms all seven disposable mount identities and four helpers absent, while the separate GUI catalogue remains live. This is not qualification of the upcoming beta.6 directory-performance changes or final native app. macOS 26 and Intel mounted runtime remain unqualified.
+
+The current hybrid catalogue uses ordinary root/organization directories and a
+hidden private FSKit volume. See the [architecture](architecture.md) and
+[current acceptance record](fskit-acceptance.md) for subsequent implementation
+and local runtime results. Historical records below retain their original app
+names and source identities.
 
 ## Decision and folder placement
 
-Apple delivers FSKit modules as app extensions that run in user space and integrate with the system's mount tools. RepoReach will retain its Git/storage engine behind a native adapter rather than add an external filesystem runtime to the app. See [Apple's FSKit overview](https://developer.apple.com/documentation/fskit).
+Apple delivers FSKit modules as app extensions that run in user space and integrate with the system's mount tools. EnoughRepos will retain its Git/storage engine behind a native adapter rather than add an external filesystem runtime to the app. See [Apple's FSKit overview](https://developer.apple.com/documentation/fskit).
 
 The selected minimum is macOS 26 because the URL-based resource APIs used by this design, [FSGenericURLResource](https://developer.apple.com/documentation/fskit/fsgenericurlresource) and [FSPathURLResource](https://developer.apple.com/documentation/fskit/fspathurlresource), begin at 26.0. The framework's existence on earlier macOS versions does not establish support for this design there.
 
-Apple's [passthrough sample](https://developer.apple.com/documentation/fskit/building-a-passthrough-file-system) also requires macOS 26 and Xcode 26. It enables the extension in **Settings > General > Login Items & Extensions > File System Extensions**, then mounts `~/Documents` at a separately created `~/passthrough-fs` folder. That is evidence that FSKit can mount at a chosen local path rather than only under `/Volumes`. RepoReach's own empty-folder checks, source/storage separation, permissions, and supported-location tests still apply. The sample is evidence for the platform mechanism, not a mounted RepoReach test.
+Apple's [passthrough sample](https://developer.apple.com/documentation/fskit/building-a-passthrough-file-system) also requires macOS 26 and Xcode 26. It enables the extension in **Settings > General > Login Items & Extensions > File System Extensions**, then mounts `~/Documents` at a separately created `~/passthrough-fs` folder. That is evidence that FSKit can mount at a chosen local path rather than only under `/Volumes`. EnoughRepos keeps its native mount in private app storage and exposes repositories under an ordinary chosen folder. Private backing-folder checks, source/storage separation, permissions, and supported-location tests still apply. The sample is evidence for the platform mechanism, not a mounted EnoughRepos test.
 
 Source `f47c1fd` adds a private backing-folder receipt. Reuse can accept a sole OS-created `.fseventsd` only after an empty-folder inspection was followed by a successful native mount, with matching saved folder/volume identity and strict ownership, permission and system-directory checks. The name alone grants no exception; other entries or changed identity are refused without deleting their contents. Empty-folder support does not depend on persistent backing-volume identity.
 
 ## Engine and transport boundary
 
-The intended path is:
+The native transport path is:
 
 ```mermaid
 flowchart LR
-    App[RepoReach app] --> Service[Go desktop service]
+    App[EnoughRepos app] --> Service[Go desktop service]
     Service --> Catalogue[Owner and repository catalogue]
     Extension[Bundled FSKit app extension] <-->|Private Unix socket bridge| Catalogue
-    Extension --> Mount[Chosen mount folder]
+    Extension --> Mount[Hidden private FSKit volume]
+    Service --> Root[Ordinary chosen root and organization folders]
+    Root -->|Owned virtual links| Mount
+    Root --> Local[Adopted and kept ordinary checkouts]
     Catalogue --> Engine[ArtifactFS resolver and writable engine]
     Engine --> Stores[Snapshots, overlay, verified cache and private Git clones]
 ```
@@ -42,7 +51,7 @@ Implementation must preserve these boundaries:
 
 The extension, bridge, and desktop mount integration are under development. Exact wire operations and lifecycle behavior must be reviewed against the final source and tested together; this document does not turn an unimplemented operation into a supported feature.
 
-The current [native project](../../native/project.yml) embeds an `extensionkit-extension` target named `RepoReachFSKit`, with identifier `com.enoughtools.reporeach.fskit` and deployment target 26.0, at `Contents/Extensions/RepoReachFSKit.appex`. The management app's older deployment target does not lower the filesystem backend's requirement. Its [module declaration](../../native/FSKitExtension/Info.plist) uses filesystem short name `reporeach`, advertises security-scoped path-URL resources, and excludes block resources. `FSActivateOptionSyntax` declares the common `-o` syntax used for read/write mount flags. Checking and formatting are not advertised because RepoReach does not implement them. The compiled-bundle validator rejects missing or unsupported activation syntax before signing or distribution.
+The current [native project](../../native/project.yml) embeds an `extensionkit-extension` target named `RepoReachFSKit`, with identifier `com.enoughtools.reporeach.fskit` and deployment target 26.0, at `Contents/Extensions/RepoReachFSKit.appex`. The management app's older deployment target does not lower the filesystem backend's requirement. Its [module declaration](../../native/FSKitExtension/Info.plist) uses filesystem short name `reporeach`, advertises security-scoped path-URL resources, and excludes block resources. `FSActivateOptionSyntax` declares the common `-o` syntax used for read/write mount flags. Checking and formatting are not advertised because EnoughRepos does not implement them. The compiled-bundle validator rejects missing or unsupported activation syntax before signing or distribution.
 
 The resource points to a private connection directory, not a repository checkout. [Bridge configuration parsing](../../native/FSKitExtension/BridgeConfiguration.swift) reads `connection.json`, version 1 metadata containing the Unix socket path and a local bearer secret. It requires an owned regular file with mode `0600`, rejects symlinks, bounds the file to 16 KiB, and redacts the secret from its debug description. The socket is a separate direct child of the module’s entitled macOS app-group container; the resource directory and repository storage stay in their existing locations. The [module lifecycle](../../native/FSKitExtension/RepoReachFileSystem.swift) holds the resource's security scope while loaded and releases it after volume shutdown drains. The Go mount helper selects filesystem type `reporeach` and supplies that resource directory and the chosen target path to the system mount tool. These are source contracts, not proof of installed authorization or a working mount.
 

@@ -181,11 +181,11 @@ enum FSBridgeError: Error, LocalizedError, Equatable, Sendable {
 
     var errorDescription: String? {
         switch self {
-        case .invalidConfiguration: return "RepoReach's private filesystem connection is invalid."
+        case .invalidConfiguration: return "The EnoughRepos private filesystem connection is invalid."
         case .invalidRequest: return "The filesystem request is invalid."
         case .malformedResponse: return "The filesystem service returned an invalid response."
         case .responseTooLarge: return "The filesystem service exceeded the response limit."
-        case .unavailable: return "The RepoReach filesystem service is unavailable."
+        case .unavailable: return "The EnoughRepos filesystem service is unavailable."
         case .filesystem(let code): return "The filesystem operation failed (error \(code))."
         case .timedOut: return "The filesystem operation timed out."
         case .cancelled: return "The filesystem operation was cancelled."

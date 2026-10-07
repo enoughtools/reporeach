@@ -57,13 +57,13 @@ final class FinderSync: FIFinderSync {
               let status = snapshot.repositories.first(where: { $0.id == repo })
         else { return nil }
 
-        let menu = NSMenu(title: "RepoReach")
+        let menu = NSMenu(title: "EnoughRepos")
         if status.isWorking {
             addStatusItem(status.operation?.stageDescription ?? "Working", to: menu)
             if let detail = status.operation?.progressDescription { addStatusItem(detail, to: menu) }
             menu.addItem(.separator())
         } else if status.error?.isEmpty == false || status.operation?.error?.isEmpty == false {
-            addStatusItem("Could not finish. Open RepoReach for details.", to: menu)
+            addStatusItem("Could not finish. Open EnoughRepos for details.", to: menu)
             menu.addItem(.separator())
         }
         addItem("Keep Downloaded", selector: #selector(keepDownloaded(_:)), to: menu, enabled: !status.pinned && !status.isWorking)
@@ -185,7 +185,7 @@ final class FinderSync: FIFinderSync {
             ("local", "Local checkout", "checkmark.circle.fill", .systemGreen),
             ("pinned", "Kept downloaded", "checkmark.circle.fill", .systemGreen),
             ("downloading", "Downloading repository", "arrow.down.circle.fill", .systemBlue),
-            ("error", "RepoReach needs attention", "exclamationmark.circle.fill", .systemOrange)
+            ("error", "EnoughRepos needs attention", "exclamationmark.circle.fill", .systemOrange)
         ]
         let controller = FIFinderSyncController.default()
         for (identifier, label, symbolName, color) in badges {

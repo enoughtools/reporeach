@@ -26,8 +26,8 @@ Run from the repository root after recording the independently verified values:
 
 ```sh
 python3 scripts/sign-fskit-validation.py \
-  --archive build/fskit-validation/download/RepoReach-local-validation-arm64.zip \
-  --metadata build/fskit-validation/download/RepoReach-local-validation-arm64.json \
+  --archive build/fskit-validation/download/EnoughRepos-local-validation-arm64.zip \
+  --metadata build/fskit-validation/download/EnoughRepos-local-validation-arm64.json \
   --archive-sha256 "$EXPECTED_ARCHIVE_SHA256" \
   --source-revision "$EXPECTED_CI_REVISION" \
   --source-sha256 "$EXPECTED_SOURCE_SHA256" \

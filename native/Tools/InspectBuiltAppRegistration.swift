@@ -33,7 +33,7 @@ private struct InspectBuiltAppRegistration {
         var unknowns: [String] = []
         var found: Bool?
         var count: Int?
-        if !hasCanonicalAbsoluteSyntax(expected, maximumBytes: 4096) || !expected.hasSuffix("/RepoReach.app") {
+        if !hasCanonicalAbsoluteSyntax(expected, maximumBytes: 4096) || !(expected.hasSuffix("/EnoughRepos.app") || expected.hasSuffix("/RepoReach.app")) {
             unknowns.append("invalid_expected_app_path")
         } else {
             // AppKit documents this as all copies, with an empty array when
