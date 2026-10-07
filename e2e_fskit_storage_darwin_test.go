@@ -5,6 +5,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -505,10 +506,13 @@ type fsKitStorageTransport struct {
 }
 
 type fsKitStorageRequestTrace struct {
-	Method string   `json:"method"`
-	Path   string   `json:"path"`
-	Wants  []string `json:"wants,omitempty"`
-	Depth  []string `json:"depth,omitempty"`
+	Method       string   `json:"method"`
+	Path         string   `json:"path"`
+	Encoding     string   `json:"encoding,omitempty"`
+	EncodedBytes int      `json:"encodedBytes,omitempty"`
+	DecodedBytes int      `json:"decodedBytes,omitempty"`
+	Wants        []string `json:"wants,omitempty"`
+	Depth        []string `json:"depth,omitempty"`
 }
 
 func (s *fsKitStorageTransport) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -536,7 +540,33 @@ func (s *fsKitStorageTransport) ServeHTTP(w http.ResponseWriter, r *http.Request
 			http.Error(w, "fixture Git request metadata exceeds bound", http.StatusBadRequest)
 			return
 		}
+		trace.EncodedBytes = len(body)
+		switch strings.ToLower(strings.TrimSpace(r.Header.Get("Content-Encoding"))) {
+		case "", "identity":
+		case "gzip":
+			// Git compresses large want lists. Decode as a smart-HTTP web
+			// server does before passing request bytes to its CGI backend.
+			compressed, err := gzip.NewReader(bytes.NewReader(body))
+			if err != nil {
+				http.Error(w, "fixture Git request has invalid gzip metadata", http.StatusBadRequest)
+				return
+			}
+			body, err = io.ReadAll(io.LimitReader(compressed, (1<<20)+1))
+			closeErr := compressed.Close()
+			if err != nil || closeErr != nil || len(body) > 1<<20 {
+				http.Error(w, "fixture decoded Git request metadata exceeds bound or is invalid", http.StatusBadRequest)
+				return
+			}
+			trace.Encoding = "gzip"
+		default:
+			http.Error(w, "fixture Git request encoding is unsupported", http.StatusUnsupportedMediaType)
+			return
+		}
+		trace.DecodedBytes = len(body)
 		r.Body = io.NopCloser(bytes.NewReader(body))
+		r.ContentLength = int64(len(body))
+		r.Header.Del("Content-Encoding")
+		r.Header.Set("Content-Length", strconv.Itoa(len(body)))
 		trace.Wants, trace.Depth = fsKitStorageProtocolTrace(body)
 	}
 	s.traceMu.Lock()
@@ -1050,6 +1080,163 @@ func TestFSKitColdHTTPGate(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestFSKitColdCompressedRequests(t *testing.T) {
+	packet := func(line string) []byte { return []byte(fmt.Sprintf("%04x%s", len(line)+4, line)) }
+	body := append(packet("command=fetch\n"), []byte("0001")...)
+	var expectedWants []string
+	for index := range 208 {
+		oid := fmt.Sprintf("%040x", index+1)
+		body = append(body, packet("want "+oid+"\n")...)
+		if index < 128 { // Diagnostics retain a bounded prefix of object IDs.
+			expectedWants = append(expectedWants, oid)
+		}
+	}
+	body = append(body, []byte("0000")...)
+	compressed := fsKitStorageGzipFixture(t, body)
+	for _, test := range []struct {
+		name, encoding string
+		request        []byte
+	}{
+		{"uncompressed", "", body},
+		{"compressed many-object request", "gzip", compressed},
+		{"case-insensitive encoding", "GZip", compressed},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			called := false
+			transport := &fsKitStorageTransport{backend: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				called = true
+				decoded, err := io.ReadAll(r.Body)
+				if err != nil || !bytes.Equal(decoded, body) || r.ContentLength != int64(len(body)) || r.Header.Get("Content-Length") != strconv.Itoa(len(body)) || r.Header.Get("Content-Encoding") != "" {
+					t.Fatal("Git CGI did not receive exact decoded request bytes and matching length/header metadata")
+				}
+				w.WriteHeader(http.StatusNoContent)
+			})}
+			transport.online.Store(true)
+			request := httptest.NewRequest(http.MethodPost, "/remote.git/git-upload-pack", bytes.NewReader(test.request))
+			request.Header.Set("Content-Encoding", test.encoding)
+			recorder := httptest.NewRecorder()
+			transport.ServeHTTP(recorder, request)
+			if !called || recorder.Code != http.StatusNoContent || len(transport.trace) != 1 {
+				t.Fatalf("valid Git request backend=%v status=%d trace_count=%d", called, recorder.Code, len(transport.trace))
+			}
+			trace := transport.trace[0]
+			wantEncoding := ""
+			if test.encoding != "" {
+				wantEncoding = "gzip"
+			}
+			if trace.Encoding != wantEncoding || trace.EncodedBytes != len(test.request) || trace.DecodedBytes != len(body) || !reflect.DeepEqual(trace.Wants, expectedWants) {
+				t.Fatalf("bounded decoded Git request evidence disagrees: %+v", trace)
+			}
+		})
+	}
+}
+
+func TestFSKitColdCompressedRequestBounds(t *testing.T) {
+	valid := fsKitStorageGzipFixture(t, []byte("bounded request metadata"))
+	corrupt := append([]byte(nil), valid...)
+	corrupt[len(corrupt)-8] ^= 0xff // CRC mismatch must never reach Git CGI.
+	for _, test := range []struct {
+		name, encoding string
+		body           []byte
+		status         int
+	}{
+		{"invalid gzip header", "gzip", []byte("not gzip"), http.StatusBadRequest},
+		{"truncated gzip", "gzip", valid[:len(valid)-2], http.StatusBadRequest},
+		{"corrupt gzip checksum", "gzip", corrupt, http.StatusBadRequest},
+		{"encoded request exceeds bound", "", bytes.Repeat([]byte{'x'}, (1<<20)+1), http.StatusBadRequest},
+		{"decoded request exceeds bound", "gzip", fsKitStorageGzipFixture(t, bytes.Repeat([]byte{'x'}, (1<<20)+1)), http.StatusBadRequest},
+		{"unsupported encoding", "br", valid, http.StatusUnsupportedMediaType},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			called := false
+			transport := &fsKitStorageTransport{backend: http.HandlerFunc(func(http.ResponseWriter, *http.Request) { called = true })}
+			transport.online.Store(true)
+			request := httptest.NewRequest(http.MethodPost, "/remote.git/git-upload-pack", bytes.NewReader(test.body))
+			request.Header.Set("Content-Encoding", test.encoding)
+			recorder := httptest.NewRecorder()
+			transport.ServeHTTP(recorder, request)
+			if called || recorder.Code != test.status || len(transport.trace) != 0 {
+				t.Fatalf("invalid encoded request backend=%v status=%d want=%d trace_count=%d", called, recorder.Code, test.status, len(transport.trace))
+			}
+		})
+	}
+}
+
+// Exercise real Git's automatic request compression through the same bounded
+// CGI transport used by mounted tests. This needs no app, signing or mount.
+func TestFSKitColdHTTPBulkGit(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("GIT_CONFIG_GLOBAL", filepath.Join(root, "global-config"))
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	t.Setenv("GIT_OPTIONAL_LOCKS", "0")
+	for _, name := range []string{"HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"} {
+		t.Setenv(name, "")
+	}
+	t.Setenv("NO_PROXY", "127.0.0.1,localhost,::1")
+	t.Setenv("no_proxy", "127.0.0.1,localhost,::1")
+	source, bare := filepath.Join(root, "original"), filepath.Join(root, "remote.git")
+	if err := os.Mkdir(source, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	fsKitStorageGit(t, source, nil, "init", "--initial-branch=trunk")
+	fsKitStorageGit(t, source, nil, "config", "user.name", "Bulk HTTP fixture")
+	fsKitStorageGit(t, source, nil, "config", "user.email", "fixture@example.invalid")
+	for index := range 208 {
+		fsKitWrite(t, filepath.Join(source, fmt.Sprintf("file-%03d.txt", index)), []byte(fmt.Sprintf("unique bulk fixture content %03d\n", index)), 0o644)
+	}
+	fsKitStorageGit(t, source, nil, "add", ".")
+	fsKitStorageGit(t, source, nil, "commit", "-m", "compressed bulk source")
+	oids := strings.Fields(string(fsKitStorageGit(t, source, nil, "ls-tree", "-r", "--format=%(objectname)", "HEAD")))
+	if len(oids) != 208 {
+		t.Fatalf("bulk HTTP fixture needs 208 blob IDs, got %d", len(oids))
+	}
+	fsKitStorageGit(t, root, nil, "clone", "--bare", source, bare)
+	fsKitStorageGit(t, bare, nil, "config", "uploadpack.allowFilter", "true")
+	transport := fsKitStorageHTTP(t, &fsKitAcceptanceHarness{root: root})
+	consumer := filepath.Join(root, "consumer.git")
+	fsKitStorageGit(t, root, nil, "clone", "--bare", "--filter=blob:none", transport.URL+"/remote.git", consumer)
+	input := []byte(strings.Join(oids, "\n") + "\n")
+	if err := fsKitStorageRequireMissing(fsKitStorageGitNoFetch(t, root, input, "--git-dir", consumer, "cat-file", "--batch-check"), oids); err != nil {
+		t.Fatalf("bulk HTTP prerequisite is not blobless: %v", err)
+	}
+	fsKitStorageGitOutput(t, consumer, input, []string{"GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=fetch.negotiationAlgorithm", "GIT_CONFIG_VALUE_0=noop"},
+		"fetch", "--no-tags", "--no-write-fetch-head", "--recurse-submodules=no", "--refmap=", "--no-prune", "--no-prune-tags", "--no-auto-maintenance", "--no-write-commit-graph", "--stdin", "origin")
+	metadata := fsKitStorageGitNoFetch(t, root, input, "--git-dir", consumer, "cat-file", "--batch-check=%(objectname) %(objecttype)")
+	lines := bytes.Split(bytes.TrimSuffix(metadata, []byte("\n")), []byte("\n"))
+	if len(lines) != len(oids) {
+		t.Fatalf("bulk HTTP returned %d object records for %d requested blobs", len(lines), len(oids))
+	}
+	for index, oid := range oids {
+		if !bytes.Equal(lines[index], []byte(oid+" blob")) {
+			t.Fatalf("compressed bulk fetch did not acquire selected blob %s", oid)
+		}
+	}
+	transport.traceMu.Lock()
+	defer transport.traceMu.Unlock()
+	foundCompressed := false
+	for _, request := range transport.trace {
+		if request.Encoding == "gzip" && request.DecodedBytes > len(oids)*40 && request.EncodedBytes < request.DecodedBytes && len(request.Wants) == 128 {
+			foundCompressed = true
+		}
+	}
+	if !foundCompressed {
+		t.Fatal("real Git did not exercise the bounded gzip CGI path for its large want list")
+	}
+}
+
+func fsKitStorageGzipFixture(t *testing.T, body []byte) []byte {
+	t.Helper()
+	var compressed bytes.Buffer
+	writer := gzip.NewWriter(&compressed)
+	if _, err := writer.Write(body); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return compressed.Bytes()
 }
 
 func TestFSKitColdProtocolTrace(t *testing.T) {

@@ -1,9 +1,11 @@
 import AppKit
 import FinderSync
+import OSLog
 
 /// Adds repository actions to Finder without reading or hydrating repo contents.
 final class FinderSync: FIFinderSync {
     private let cache = FinderStatusCache()
+    private let actionLogger = Logger(subsystem: "com.enoughtools.reporeach.finder", category: "actions")
     private let lock = NSLock()
     private var snapshot: FinderStatusSnapshot?
     private var badgeTracking = FinderBadgeTracking()
@@ -140,19 +142,38 @@ final class FinderSync: FIFinderSync {
     private func performRepositoryAction(_ action: ActionRoute.Action) {
         // Finder reconstructs menu items. Its callback selection is the action
         // context; representedObject and arbitrary sender properties are not.
+        actionLogger.debug("Repository action callback entered.")
         let controller = FIFinderSyncController.default()
-        guard let snapshot = cache.read(),
-              let route = FinderStatusCache.actionRoute(for: action, selectionURLs: controller.selectedItemURLs() ?? [],
-                                                       targetedURL: controller.targetedURL(), in: snapshot),
-              let applicationURL = ActionRoute.containingApplicationURL(forFinderExtensionURL: Bundle.main.bundleURL),
-              Bundle(url: applicationURL)?.bundleIdentifier == "com.enoughtools.reporeach" else { return }
+        guard let snapshot = cache.read() else {
+            actionLogger.debug("Repository action rejected: cache unavailable.")
+            return
+        }
+        guard let route = FinderStatusCache.actionRoute(for: action, selectionURLs: controller.selectedItemURLs() ?? [],
+                                                       targetedURL: controller.targetedURL(), in: snapshot) else {
+            actionLogger.debug("Repository action rejected: action context unavailable.")
+            return
+        }
+        guard let applicationURL = ActionRoute.containingApplicationURL(forFinderExtensionURL: Bundle.main.bundleURL) else {
+            actionLogger.debug("Repository action rejected: enclosing app structure invalid.")
+            return
+        }
+        guard Bundle(url: applicationURL)?.bundleIdentifier == "com.enoughtools.reporeach" else {
+            actionLogger.debug("Repository action rejected: enclosing app identity unavailable.")
+            return
+        }
         let configuration = NSWorkspace.OpenConfiguration()
         configuration.activates = false
         configuration.allowsRunningApplicationSubstitution = false
+        let logger = actionLogger
+        logger.debug("Repository action dispatch starting.")
         NSWorkspace.shared.open([route.url], withApplicationAt: applicationURL, configuration: configuration) { _, error in
-            if error != nil {
-                // The Finder extension never logs repository metadata or credentials.
-                NSLog("RepoReach could not open the repository action. Open the app and try again.")
+            if let error = error as NSError? {
+                // Keep diagnostics bounded and exclude descriptions, which may
+                // contain repository paths, URLs, or credentials.
+                let domain = String(decoding: error.domain.utf8.prefix(128), as: UTF8.self)
+                logger.error("Repository action dispatch failed: domain=\(domain, privacy: .public), code=\(error.code, privacy: .public).")
+            } else {
+                logger.debug("Repository action dispatch completed.")
             }
         }
     }
