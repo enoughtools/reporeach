@@ -1,3 +1,8 @@
+> Retained upstream CLI documentation from Cloudflare ArtifactFS `1.0.0-rc.10`
+> (`2b87a486`). Enough Tools relocated this document and adjusted its local links;
+> the desktop app has separate [native setup](../reporeach/platform-setup.md) and
+> [source provenance](../../UPSTREAM.md) documentation.
+
 <p align="center">
   <img src="../../artifact-fs.png" alt="ArtifactFS" width="720">
 </p>

@@ -41,6 +41,8 @@ struct ContentView: View {
                 if let auth = store.authSession, auth.pending { authorizationBanner(auth) }
                 if let status = store.status, !status.dependencyReady, !store.demoMode {
                     dependencyBanner
+                } else if store.filesystemExtension.needsSetup, store.status?.mounted != true, !store.demoMode {
+                    filesystemSetupBanner
                 } else if let status = store.status, !status.mounted,
                           let message = status.message, !message.isEmpty,
                           store.errorMessage == nil, !store.demoMode {
@@ -598,17 +600,32 @@ struct ContentView: View {
         notice(symbol: "externaldrive", color: ReachTheme.ink) {
             VStack(alignment: .leading, spacing: 4) {
                 Text("Virtual folders require macOS 26.").font(.system(size: 12, weight: .semibold))
-                Text("You can manage repositories here. On macOS 26, enable the bundled EnoughRepos filesystem extension to show them in Finder.").font(.system(size: 11)).foregroundStyle(ReachTheme.muted)
+                NoticeMessage(message: FilesystemExtensionAvailability.unsupported.instructions).font(.system(size: 11)).foregroundStyle(ReachTheme.muted)
+            }
+        }
+    }
+
+    private var filesystemSetupBanner: some View {
+        notice(symbol: "externaldrive.badge.exclamationmark", color: ReachTheme.accent) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(store.filesystemExtension.title).font(.system(size: 12, weight: .semibold))
+                NoticeMessage(message: store.filesystemExtension.instructions)
+                    .font(.system(size: 11)).foregroundStyle(ReachTheme.muted)
+                    .accessibilityIdentifier("filesystem-setup-instructions")
             }
             Spacer(minLength: 8)
-            Button("Filesystem Settings") { store.showFilesystemExtensionSettings() }
-                .buttonStyle(ReachButtonStyle(compact: true))
+            Button("Open System Settings") { store.showFilesystemExtensionSettings() }
+                .buttonStyle(ReachButtonStyle(compact: true)).disabled(store.isBusy)
+                .accessibilityIdentifier("filesystem-setup-settings")
+            Button("Check Again") { Task { await store.mount() } }
+                .buttonStyle(ReachButtonStyle(compact: true)).disabled(store.isBusy)
+                .accessibilityIdentifier("filesystem-setup-retry")
         }
     }
 
     private func errorBanner(_ message: String) -> some View {
         notice(symbol: "exclamationmark.circle", color: ReachTheme.danger) {
-            Text(message).font(.system(size: 12)).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+            NoticeMessage(message: message).font(.system(size: 12))
             Spacer(minLength: 8)
             Button { Task { await store.refreshStatus() } } label: {
                 Text("Check Again")
@@ -623,7 +640,8 @@ struct ContentView: View {
         notice(symbol: "folder.badge.questionmark", color: ReachTheme.danger) {
             VStack(alignment: .leading, spacing: 4) {
                 Text("Repository folders need attention").font(.system(size: 12, weight: .semibold))
-                Text(message).font(.system(size: 11)).foregroundStyle(ReachTheme.muted).textSelection(.enabled)
+                NoticeMessage(message: message).font(.system(size: 11)).foregroundStyle(ReachTheme.muted)
+                    .accessibilityIdentifier("mount-notice-message")
             }
             Spacer(minLength: 8)
             Button("Try Again") { Task { await store.mount() } }
@@ -744,13 +762,13 @@ struct SettingsView: View {
                 }
                 settingSection("Filesystem support", symbol: "externaldrive") {
                     HStack(spacing: 7) {
-                        Circle().fill(store.status?.dependencyReady == true ? ReachTheme.success : ReachTheme.muted).frame(width: 6, height: 6)
-                        Text(store.status?.dependencyReady == true ? "macOS 26 filesystem support available" : "Virtual folders require macOS 26").font(.system(size: 12, weight: .semibold))
+                        Circle().fill(store.filesystemExtension == .enabled ? ReachTheme.success : ReachTheme.muted).frame(width: 6, height: 6)
+                        Text(store.filesystemExtension.title).font(.system(size: 12, weight: .semibold))
                     }
-                    Text("Enable EnoughRepos in System Settings → General → Login Items & Extensions → File System Extensions, then choose Enable Virtual Folders. The filesystem extension is included in the app.")
+                    NoticeMessage(message: store.filesystemExtension == .enabled ? "The bundled filesystem is approved. Use Enable Virtual Folders in the main window when you want to browse repositories in Finder." : store.filesystemExtension.instructions)
                         .font(.system(size: 12)).foregroundStyle(ReachTheme.muted).lineSpacing(3)
                     Button("Open Filesystem Extension Settings") { store.showFilesystemExtensionSettings() }
-                        .buttonStyle(ReachButtonStyle(compact: true))
+                        .buttonStyle(ReachButtonStyle(compact: true)).disabled(store.demoMode)
                 }
                 settingSection("Private by design", symbol: "lock") {
                     Text("GitHub's official CLI handles credentials using macOS Keychain when available. Repositories use Git directly with your existing Git and SSH credentials. Your repository contents are not sent to Enough Tools.")

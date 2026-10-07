@@ -83,6 +83,24 @@ struct ReachDivider: View {
     }
 }
 
+/// Avoid AppKit-backed selectable text in conditional status banners, the
+/// rendering path implicated by the reported inverted subtitle. Copy remains
+/// available without introducing that extra text view.
+struct NoticeMessage: View {
+    let message: String
+
+    var body: some View {
+        Text(verbatim: message)
+            .fixedSize(horizontal: false, vertical: true)
+            .contextMenu {
+                Button("Copy Message") {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(message, forType: .string)
+                }
+            }
+    }
+}
+
 struct ReachMark: View {
     var size: CGFloat = 36
 

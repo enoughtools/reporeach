@@ -100,6 +100,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
+    func applicationDidBecomeActive(_ notification: Notification) {
+        // Returning from System Settings refreshes approval without mounting or
+        // changing the user's extensions. Check Again remains explicit.
+        if let store { Task { await store.checkFilesystemExtension() } }
+    }
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         showMainWindow(); return false
     }

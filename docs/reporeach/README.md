@@ -12,12 +12,13 @@ This documentation describes the current beta source. A packaged release's downl
 
 - [Product contract and current gaps](product-contract.md): cold browsing first, chosen-folder behavior, adoption of existing checkouts, and ordinary local storage requirements for the native development build.
 - [Using the beta](user-guide.md): setup, virtual folders, Git work, offline downloads, and freeing space.
-- [Platform setup](platform-setup.md): macFUSE's kernel backend, signing, security approval, and Finder extension settings.
+- [Platform setup](platform-setup.md): bundled FSKit approval, signing, Finder extension settings, and historical macFUSE requirements.
 - [Architecture](architecture.md): the native app, local service, catalogue filesystem, and ArtifactFS storage.
-- [Native FSKit development](native-fskit.md): the selected macOS 26 backend, bundled-extension goal, and outstanding build, provisioning, and mounted coherence proof.
+- [Native FSKit development](native-fskit.md): the bundled transport, entitlement and activation requirements, and mounted cache-coherence qualification.
 - [Privacy and authentication](privacy-auth.md): GitHub permissions, local credentials, stored data, and network requests.
 - [Building and releasing](releasing.md): packaging, signing, notarization, and the release validation checklist.
 - [Beta validation](validation.md): tested environments, recorded checks, and remaining installation acceptance.
 - [Contributing](../../CONTRIBUTING.md) and [security reporting](../../SECURITY.md).
+- [ArtifactFS provenance](../../UPSTREAM.md): the upstream revision, shared engine, desktop additions, and maintenance boundary.
 
 Source: [github.com/enoughtools/reporeach](https://github.com/enoughtools/reporeach). Product and downloads: [reporeach.reb.run](https://reporeach.reb.run).

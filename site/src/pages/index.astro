@@ -141,10 +141,6 @@ const faqs = [
     "Keep Downloaded turns a virtual repository into a normal local Git checkout that works even when EnoughRepos is quit. Other branches and historical file versions may still require a connection. The beta refuses submodules and checkout filters such as Git LFS.",
   ],
   [
-    "Will closing EnoughRepos remove my folders?",
-    "Closing the management window leaves the background service running. Reopen EnoughRepos whenever you want to manage your repositories. You can explicitly stop the service and unmount the catalogue.",
-  ],
-  [
     "Does it upload every file I save?",
     "No. EnoughRepos preserves normal Git behavior. Saving a file changes your local work; committing and pushing remain explicit Git operations. Syncing or refreshing gets Git data from your chosen source; it does not automatically publish your saves.",
   ],
@@ -178,9 +174,9 @@ const faqs = [
       property="og:description"
       content="Your Git repositories in Finder. GitHub sign-in is optional. An open-source Mac app by Enough Tools."
     />
-    <meta property="og:url" content="https://reporeach.reb.run" />
+    <meta property="og:url" content="https://enoughrepos.reb.run" />
     <meta property="og:type" content="website" />
-    <link rel="canonical" href="https://reporeach.reb.run" />
+    <link rel="canonical" href="https://enoughrepos.reb.run" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <link
       rel="preload"
@@ -217,15 +213,13 @@ const faqs = [
       <section class="hero" aria-labelledby="hero-title">
         <div class="hero-copy">
           <div class="eyebrow">
-            <span>A Mac app by Enough Tools</span><Badge variant="outline"
-              >Open source</Badge
-            >
+            <span>A Mac app by Enough Tools</span>
           </div>
           <h1 id="hero-title">Every repo,<br /><em>right at home.</em></h1>
           <p class="hero-description">
-            Your Git repositories belong in Finder. Add a remote or local
-            checkout, browse on demand, and keep the projects you need
-            downloaded.
+            You've got more Git repositories than ever. Keep them in sight
+            without keeping them all on your Mac. Add a remote or local
+            checkout, browse on demand, and download the projects you need.
           </p>
           <div class="hero-actions">
             <Button href="#download" variant="accent" size="lg"
@@ -247,9 +241,7 @@ const faqs = [
           <div class="demo-chrome">
             <div class="window-controls" aria-hidden="true">
               <i></i><i></i><i></i>
-            </div><span>EnoughRepos</span><span class="demo-label"
-              >Interactive demo</span
-            >
+            </div><span>EnoughRepos</span>
           </div>
           <div class="demo-path">
             <span aria-hidden="true">▱</span> Home / Code / Repositories
@@ -299,15 +291,14 @@ const faqs = [
             >
           </div>
           <div class="demo-bottom">
-            <span id="demo-status" aria-live="polite"
-              >Try keeping a repository downloaded.</span
-            ><span>3 repositories</span>
+            <span id="demo-status" class="sr-only" aria-live="polite"
+            ></span><span>3 repositories</span>
           </div>
         </div>
       </section>
       <section class="principles" aria-label="EnoughRepos principles">
         <span>Your selected repositories</span><span>Your chosen folder</span
-        ><span>Normal Git workflow</span><span>Less disk space</span>
+        ><span>Normal Git workflow</span><span>Free up space</span>
       </section>
       <section
         class="workflow section"
@@ -354,33 +345,65 @@ const faqs = [
           >
         </div>
       </section>
-      <section class="quiet section" aria-labelledby="quiet-title">
-        <div>
-          <p class="eyebrow">A little app. A useful background service.</p><h2
-            id="quiet-title"
+      <section class="app-preview section" aria-labelledby="app-preview-title">
+        <div class="section-heading">
+          <p class="eyebrow">Your catalogue, your choices</p><h2
+            id="app-preview-title"
           >
-            Close the window.<br /><em>Your repos stay.</em>
+            Everything in view.<br /><em>Only what you need on disk.</em>
           </h2><p>
-            EnoughRepos works quietly in the background. Finder actions handle
-            the everyday things; the app is there for adding repositories,
-            choosing what appears, and managing your catalogue.
+            Choose which organizations and repositories appear in your folder,
+            and see what you've kept downloaded.
           </p>
         </div>
-        <div class="action-list">
-          <div>
-            <span>Keep Downloaded</span><span
-              >Make this checkout available offline</span
-            >
-          </div><div>
-            <span>Free Up Space</span><span
-              >Reclaim recoverable repository data</span
-            >
-          </div><div>
-            <span>Refresh</span><span
-              >Fetch updates from your repository source</span
-            >
-          </div><p>Available from a repository's Finder context menu.</p>
+        <figure class="app-screenshot">
+          <img
+            src="/screenshots/enoughrepos-app.png"
+            alt="EnoughRepos showing repository visibility controls and downloaded status in the catalogue."
+            width="2200"
+            height="1544"
+            loading="lazy"
+            decoding="async"
+          />
+          <figcaption>Sample repositories shown.</figcaption>
+        </figure>
+      </section>
+      <section class="finder section" aria-labelledby="finder-title">
+        <div class="finder-copy">
+          <p class="eyebrow">Right where your repos are</p><h2
+            id="finder-title"
+          >
+            Take care of it<br /><em>in Finder.</em>
+          </h2><p>
+            Right-click a repository to download it, free up space, or refresh
+            it from its source. No need to open the app.
+          </p>
+          <div class="action-list">
+            <div>
+              <span>Keep Downloaded</span><span
+                >Make this checkout available offline</span
+              >
+            </div><div>
+              <span>Free Up Space</span><span
+                >Reclaim space when your work is safely recoverable</span
+              >
+            </div><div>
+              <span>Refresh</span><span
+                >Fetch updates from your repository source</span
+              >
+            </div>
+          </div>
         </div>
+        <figure class="finder-screenshot">
+          <img
+            src="/screenshots/enoughrepos-finder.png"
+            alt="EnoughRepos actions in a repository's Finder context menu: Keep Downloaded, Free Up Space, and Refresh."
+            width="1746"
+            height="1254"
+            loading="lazy"
+            decoding="async"
+          />
+        </figure>
       </section>
       <section
         class="download section"
@@ -391,8 +414,8 @@ const faqs = [
           <p class="eyebrow">Start with the beta</p><h2 id="download-title">
             A home for<br /><em>every repository.</em>
           </h2><p>
-            Built in the open by Enough Tools, on the foundation of Cloudflare's
-            ArtifactFS. Free to use, inspect, and contribute to.
+            By Enough Tools, built on Cloudflare's ArtifactFS. Free to use,
+            inspect, and contribute to.
           </p><a id="setup-guide" class="text-link" href={setupHref}
             >Read the setup guide</a
           >
@@ -471,15 +494,6 @@ const faqs = [
                 : "https://github.com/enoughtools/reporeach"}>Checksums</a
             >
           </div>
-          <p class="release-note">
-            {
-              firstDownload && release.product === "RepoReach" && (
-                <>The current download was published as RepoReach. </>
-              )
-            }
-            An early beta for deliberate testing. Keep backups of important local
-            work.
-          </p>
         </div>
       </section>
       <section
@@ -532,7 +546,7 @@ const faqs = [
             `Demonstrate ${pinned ? "freeing space for" : "keeping downloaded"} ${button.dataset.demoRepo}`,
           );
           document.getElementById("demo-status").textContent =
-            `${button.dataset.demoRepo}: ${pinned ? "kept for offline work" : "available on demand"}. This is a demonstration.`;
+            `${button.dataset.demoRepo}: ${pinned ? "kept for offline work" : "available on demand"}.`;
         }),
       );
       document

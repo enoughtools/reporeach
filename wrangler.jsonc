@@ -4,7 +4,10 @@
   "account_id": "2b770eb5992d931c6468f98024f8f5b7",
   "compatibility_date": "2026-10-04",
   "assets": { "directory": "./site/dist" },
-  "routes": [{ "pattern": "reporeach.reb.run", "custom_domain": true }],
+  "routes": [
+    { "pattern": "reporeach.reb.run", "custom_domain": true },
+    { "pattern": "enoughrepos.reb.run", "custom_domain": true }
+  ],
   "workers_dev": false,
   "preview_urls": false
 }

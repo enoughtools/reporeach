@@ -341,9 +341,9 @@ final class RepoReachVolume: FSVolume, FSVolume.Operations,
 
     func synchronize(flags: FSSyncFlags, replyHandler: @escaping (Error?) -> Void) {
         perform(exclusive: true, reply: replyHandler) {
+            // Synchronization proves pending writes reached storage. Advisory
+            // statistics must not prevent a no-write volume from unmounting.
             try await self.synchronizeHandles()
-            let response = try await self.client.request(FSBridgeRequest(op: "statfs"))
-            self.locked { self.statistics = response.stat }
         }
     }
 

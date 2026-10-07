@@ -13,6 +13,7 @@ final class RepositoryStore: ObservableObject {
     @Published private(set) var isStarting = true
     @Published private(set) var serviceRunning = false
     @Published private(set) var launchAtLogin = false
+    @Published private(set) var filesystemExtension: FilesystemExtensionAvailability = .checking
     @Published var selectedRepositoryID: String?
     let demoMode: Bool
     var showSettingsHandler: (() -> Void)?
@@ -20,6 +21,7 @@ final class RepositoryStore: ObservableObject {
     private let service = EngineService()
     private var pollTask: Task<Void, Never>?
     private var startupTask: Task<Void, Never>?
+    private var filesystemCheckTask: Task<Void, Never>?
     private var busyCount = 0
     private var finderSnapshot: FinderStatusSnapshot?
     private var repositoryActivity: NSObjectProtocol?
@@ -31,7 +33,7 @@ final class RepositoryStore: ObservableObject {
     init(demoMode: Bool = false) {
         self.demoMode = demoMode
         launchAtLogin = SMAppService.mainApp.status == .enabled
-        if demoMode { status = .demo; selectedRepositoryID = "enoughtools/reporeach"; isStarting = false; serviceRunning = true }
+        if demoMode { status = .demo; selectedRepositoryID = "enoughtools/reporeach"; isStarting = false; serviceRunning = true; filesystemExtension = .enabled }
     }
 
     var repositories: [RepositoryRecord] { status?.repositories ?? [] }
@@ -62,6 +64,7 @@ final class RepositoryStore: ObservableObject {
 
     func start() async {
         guard !demoMode, !invalidated else { return }
+        Task { await self.checkFilesystemExtension() }
         if let startupTask { await startupTask.value; return }
         let task = Task { await self.startService() }
         startupTask = task
@@ -242,6 +245,10 @@ final class RepositoryStore: ObservableObject {
     func mount() async {
         guard !demoMode else { return }
         await perform {
+            #if REPOREACH_NATIVE_FSKIT
+            await self.checkFilesystemExtension()
+            guard self.filesystemExtension == .enabled else { return }
+            #endif
             let _: EmptyResponse = try await self.service.client.request("POST", path: "/v1/mount", timeout: 45)
             await self.refreshStatus()
         }
@@ -290,6 +297,18 @@ final class RepositoryStore: ObservableObject {
     }
 
     func showSettings() { showSettingsHandler?() }
+    func checkFilesystemExtension() async {
+        guard !demoMode, !invalidated else { return }
+        if let filesystemCheckTask { await filesystemCheckTask.value; return }
+        let task = Task {
+            let availability = await FilesystemExtensionDiscovery.check()
+            guard !self.invalidated else { return }
+            self.filesystemExtension = availability
+        }
+        filesystemCheckTask = task
+        await task.value
+        filesystemCheckTask = nil
+    }
     func showFinderExtensionSettings() {
         if let url = URL(string: "x-apple.systempreferences:com.apple.ExtensionsPreferences") { NSWorkspace.shared.open(url) }
     }
@@ -343,6 +362,7 @@ final class RepositoryStore: ObservableObject {
         invalidated = true
         pollTask?.cancel(); pollTask = nil
         startupTask?.cancel(); startupTask = nil
+        filesystemCheckTask?.cancel(); filesystemCheckTask = nil
         if let repositoryActivity { ProcessInfo.processInfo.endActivity(repositoryActivity); self.repositoryActivity = nil }
         service.stop()
     }

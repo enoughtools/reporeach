@@ -411,7 +411,11 @@ func (m *nativeFSKitMount) sessionPresent(mounts []fsKitMountIdentity) bool {
 		return false
 	}
 	for _, mounted := range mounts {
-		if mounted.fsid == m.identity.fsid {
+		if mounted.fsid == m.identity.fsid || mountSourceMatches(mounted.source, m.source) {
+			// An FSKit resource can still be attached after its cached mount
+			// identity changes. Retain its bridge and stores conservatively;
+			// Unmount still requires the complete originally captured identity
+			// and cannot detach an unidentified replacement or moved volume.
 			return true
 		}
 	}
@@ -589,12 +593,14 @@ func (m *nativeFSKitMount) unmount(ctx context.Context) error {
 func (m *nativeFSKitMount) Join(ctx context.Context) error {
 	var bridgeErr error
 	serverDone := m.bridge.Done()
+	absenceObserved := false
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
 		mounts, err := m.ops.mounts()
-		if err == nil && !m.sessionPresent(mounts) {
+		absent := err == nil && !m.sessionPresent(mounts)
+		if absent && absenceObserved {
 			if bridgeErr == nil {
 				bridgeErr = m.bridge.Err()
 			}
@@ -616,6 +622,11 @@ func (m *nativeFSKitMount) Join(ctx context.Context) error {
 			// A failed drain does not authorize closing repository stores. Retry
 			// while this observation context lives; cancellation retains ownership.
 		}
+		// Darwin enumerates a snapshot of FSIDs and can omit a mount whose
+		// identity changes during that iteration. One successful missing sample
+		// must not close a live resource. Confirm absence on the next poll;
+		// any present or unavailable inventory restarts the observation.
+		absenceObserved = absent
 		timer := time.NewTimer(m.ops.poll)
 		select {
 		case <-ctx.Done():
@@ -625,6 +636,9 @@ func (m *nativeFSKitMount) Join(ctx context.Context) error {
 			timer.Stop()
 			bridgeErr = m.bridge.Err()
 			serverDone = nil
+			// A server wakeup is not a polling interval. A failed bridge must
+			// not turn one missing inventory into immediate detachment proof.
+			absenceObserved = false
 		case <-timer.C:
 		}
 	}

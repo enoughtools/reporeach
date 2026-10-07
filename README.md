@@ -1,3 +1,5 @@
+<!-- Modified by Enough Tools for EnoughRepos. Based on Cloudflare ArtifactFS (Apache-2.0); see UPSTREAM.md. -->
+
 # EnoughRepos
 
 **Every repo, right at home.** An open source Mac app by [Enough Tools](https://enoughtools.com).
@@ -6,13 +8,14 @@ EnoughRepos puts Git repositories in a folder you choose. Add a Git remote or ad
 
 The app has a native SwiftUI management window, a background service, and Finder contextual actions. Closing the window keeps the service running; there is no menu-bar app.
 
-[Website and downloads](https://reporeach.reb.run) · [Setup guide](docs/reporeach/user-guide.md) · [Architecture](docs/reporeach/architecture.md) · [Contributing](CONTRIBUTING.md)
+[Website and downloads](https://enoughrepos.reb.run) · [Setup guide](docs/reporeach/user-guide.md) · [Architecture](docs/reporeach/architecture.md) · [ArtifactFS provenance](UPSTREAM.md) · [Contributing](CONTRIBUTING.md)
 
 EnoughRepos was previously called RepoReach. Existing state under
 `~/Library/Application Support/RepoReach`, signing identifiers, the FSKit short
 name `reporeach`, and developer command/environment names are retained for
-compatibility. The source repository, website address, documentation paths, and
-historical downloads still use the previous name. Upgrading keeps existing
+compatibility. The source repository, documentation paths, and historical
+downloads still use the previous name; the previous website address remains
+available alongside `enoughrepos.reb.run`. Upgrading keeps existing
 repositories and settings; it does not create a separate app identity.
 
 ## Beta status
@@ -62,7 +65,7 @@ npm ci
 npm run build
 ```
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for native tests, mounted filesystem checks, and the development workflow. The original upstream CLI remains available at `cmd/artifact-fs`; its [original documentation](docs/upstream/README.md) is retained for reference. EnoughRepos's desktop commands extend that same binary.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for native tests, mounted filesystem checks, and the development workflow. The original upstream CLI remains available at `cmd/artifact-fs`; its [original documentation](docs/upstream/README.md) is retained for reference. EnoughRepos's desktop commands extend that same binary. [ArtifactFS provenance](UPSTREAM.md) records the upstream revision, reused engine, and desktop-specific changes.
 
 ## Security and licensing
 

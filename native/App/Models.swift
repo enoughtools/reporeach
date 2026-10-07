@@ -1,5 +1,78 @@
 import Foundation
 
+/// Approval is separate from OS support and from an active repository mount.
+/// The path matters: a different installed copy must not satisfy this app's setup.
+enum FilesystemExtensionAvailability: Equatable, Sendable {
+    case checking, unsupported, notRegistered, disabled, enabled, conflicting, unavailable
+
+    struct InstalledModule: Sendable {
+        let identifier: String
+        let url: URL
+        let enabled: Bool
+        let filesystemShortName: String?
+    }
+
+    static let moduleIdentifier = "com.enoughtools.reporeach.fskit"
+
+    static func assess(_ modules: [InstalledModule], expectedURL: URL) -> Self {
+        guard modules.count <= 64, let expected = canonicalModuleURL(expectedURL) else { return .unavailable }
+        // macOS mounts by filesystem short name, so validation or third-party
+        // bundle identifiers advertising the same type also conflict.
+        guard modules.filter(\.enabled).allSatisfy({
+            canonicalModuleURL($0.url) != nil && $0.filesystemShortName?.isEmpty == false
+        }) else { return .unavailable }
+        let matching = modules.filter { $0.identifier == moduleIdentifier || $0.filesystemShortName == "reporeach" }
+        guard matching.allSatisfy({ canonicalModuleURL($0.url) != nil }) else { return .unavailable }
+        let own = matching.filter { $0.identifier == moduleIdentifier && canonicalModuleURL($0.url) == expected }
+        let otherEnabled = matching.contains { $0.enabled && ($0.identifier != moduleIdentifier || canonicalModuleURL($0.url) != expected) }
+        guard !otherEnabled, own.count <= 1 else { return .conflicting }
+        guard let installed = own.first else { return .notRegistered }
+        guard !installed.enabled || installed.filesystemShortName == "reporeach" else { return .unavailable }
+        return installed.enabled ? .enabled : .disabled
+    }
+
+    var needsSetup: Bool {
+        switch self {
+        case .notRegistered, .disabled, .conflicting, .unavailable: return true
+        default: return false
+        }
+    }
+
+    var title: String {
+        switch self {
+        case .checking: return "Checking filesystem extension…"
+        case .unsupported: return "Virtual folders require macOS 26"
+        case .enabled: return "EnoughRepos filesystem enabled"
+        case .disabled: return "Enable EnoughRepos filesystem access"
+        case .notRegistered: return "Finish setting up virtual folders"
+        case .conflicting: return "Choose this copy of EnoughRepos"
+        case .unavailable: return "Check filesystem extension access"
+        }
+    }
+
+    var instructions: String {
+        switch self {
+        case .notRegistered:
+            return "Keep EnoughRepos in Applications and reopen it so macOS can register its bundled extension. In System Settings → General → Login Items & Extensions → File System Extensions, turn on EnoughRepos Filesystem, then return and choose Check Again."
+        case .conflicting:
+            return "Another copy of the EnoughRepos filesystem is enabled. In System Settings → General → Login Items & Extensions → File System Extensions, turn off the other copy and turn on EnoughRepos Filesystem from this app, then return and choose Check Again."
+        case .unavailable:
+            return "EnoughRepos couldn't check the filesystem permission. In System Settings → General → Login Items & Extensions → File System Extensions, check that EnoughRepos Filesystem is on, then return and choose Check Again."
+        case .unsupported:
+            return "You can manage local checkouts here. Update to macOS 26 or later to browse virtual repository folders."
+        default:
+            return "In System Settings → General → Login Items & Extensions → File System Extensions, turn on EnoughRepos Filesystem, then return and choose Check Again. The extension is included in the app."
+        }
+    }
+
+    private static func canonicalModuleURL(_ url: URL) -> String? {
+        guard url.isFileURL, url.path.hasPrefix("/"), url.path.utf8.count <= 4096,
+              url.host == nil || url.host == "" || url.host == "localhost",
+              url.query == nil, url.fragment == nil else { return nil }
+        return url.standardizedFileURL.resolvingSymlinksInPath().path
+    }
+}
+
 struct GitHubAccount: Codable, Equatable {
     let login: String
     let avatarURL: String?
@@ -285,6 +358,5 @@ extension EngineStatus {
         account: GitHubAccount(login: "enoughtools", avatarURL: nil), repositories: [
             RepositoryRecord(id: "enoughtools/reporeach", owner: "enoughtools", name: "reporeach", description: "All your repositories. Within reach.", state: "pinned", pinned: true, downloadedBytes: 8_400_000),
             RepositoryRecord(id: "enoughtools/enough-ui", owner: "enoughtools", name: "enough-ui", description: "A quiet design system for tools that get out of your way.", state: "available", downloadedBytes: 1_200_000),
-            RepositoryRecord(id: "enoughtools/minutes", owner: "enoughtools", name: "minutes", description: "A little more time for the things that matter.", state: "virtual"),
             RepositoryRecord(id: "cloudflare/artifact-fs", owner: "cloudflare", name: "artifact-fs", description: "Git repositories, available as local working trees.", state: "virtual")])
 }

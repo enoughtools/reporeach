@@ -49,7 +49,7 @@ def record(args):
             raise SystemExit(f"Missing release artifact: {archive}")
         artifacts.append({
             "architecture": args.arch, "format": extension, "filename": filename,
-            "url": f"https://reporeach.reb.run/releases/{args.version}/{filename}",
+            "url": f"https://enoughrepos.reb.run/releases/{args.version}/{filename}",
             "sha256": digest(archive), "bytes": archive.stat().st_size,
             "signature": args.signature, "notarized": args.notarized == "true",
         })

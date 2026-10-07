@@ -518,6 +518,102 @@ func TestNativeFSKitJoinInspectionFailureDoesNotReleaseStores(t *testing.T) {
 	}
 }
 
+func TestNativeFSKitChangedIdentityWithSameResourceRetainsOwnership(t *testing.T) {
+	for _, name := range []string{"same root", "moved root", "directory resource URL"} {
+		t.Run(name, func(t *testing.T) {
+			f := newFakeFSKitMount(t)
+			m := f.mount(t)
+			original, verified := m.verifiedIdentity()
+			if !verified {
+				t.Fatal("fixture mount was not verified")
+			}
+			changed := original
+			changed.fsid = [2]int32{300, 400}
+			switch name {
+			case "moved root":
+				changed.root = "/somewhere/else"
+			case "directory resource URL":
+				changed.source = (&url.URL{Scheme: "file", Path: m.source}).String() + "/"
+			}
+			f.setMounts(changed)
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+			defer cancel()
+			if err := m.Join(ctx); !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("live resource lost its owner: %v", err)
+			}
+			if err := m.Unmount(); !errors.Is(err, errFSKitMountOwnership) {
+				t.Fatalf("changed identity authorized detachment: %v", err)
+			}
+			if f.bridge.closeCount() != 0 || f.commandCount() != 1 {
+				t.Fatalf("live resource was drained or unmounted: drains=%d commands=%d", f.bridge.closeCount(), f.commandCount())
+			}
+			if identity, verified := m.verifiedIdentity(); !verified || identity != original {
+				t.Fatal("liveness observation adopted an unidentified replacement")
+			}
+			f.setMounts()
+			if err := m.Join(context.Background()); err != nil {
+				t.Fatalf("confirmed resource detachment did not drain: %v", err)
+			}
+			if f.bridge.closeCount() != 1 {
+				t.Fatal("detached resource was not drained exactly once")
+			}
+		})
+	}
+}
+
+func TestNativeFSKitJoinConfirmsAbsenceBeforeDraining(t *testing.T) {
+	for _, name := range []string{"single missing sample", "inspection error resets absence"} {
+		t.Run(name, func(t *testing.T) {
+			f := newFakeFSKitMount(t)
+			m := f.mount(t)
+			inventory := m.ops.mounts
+			calls := 0
+			m.ops.mounts = func() ([]fsKitMountIdentity, error) {
+				calls++
+				if calls == 1 || calls == 3 {
+					return nil, nil
+				}
+				if name == "inspection error resets absence" && calls == 2 {
+					return nil, errors.New("fixture: inventory temporarily unavailable")
+				}
+				return inventory()
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Millisecond)
+			defer cancel()
+			if err := m.Join(ctx); !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("transient inventory absence lost the live owner: %v", err)
+			}
+			if calls < 4 || f.bridge.closeCount() != 0 {
+				t.Fatalf("transient absence drained the live bridge: samples=%d drains=%d", calls, f.bridge.closeCount())
+			}
+			f.setMounts()
+			m.ops.mounts = inventory
+			if err := m.Join(context.Background()); err != nil {
+				t.Fatalf("confirmed detachment did not drain: %v", err)
+			}
+			if f.bridge.closeCount() != 1 {
+				t.Fatal("confirmed detached bridge was not drained exactly once")
+			}
+		})
+	}
+}
+
+func TestNativeFSKitJoinBridgeWakeupCannotConfirmDetachment(t *testing.T) {
+	f := newFakeFSKitMount(t)
+	m := f.mount(t)
+	m.ops.poll = 20 * time.Millisecond
+	m.ops.mounts = func() ([]fsKitMountIdentity, error) { return nil, nil }
+	close(f.bridge.done)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
+	defer cancel()
+	if err := m.Join(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("bridge wakeup bypassed detachment confirmation: %v", err)
+	}
+	if f.bridge.closeCount() != 0 {
+		t.Fatal("bridge wakeup drained an unconfirmed session")
+	}
+}
+
 func TestNativeFSKitCommandSuccessRequiresActualAttachment(t *testing.T) {
 	f := newFakeFSKitMount(t)
 	f.command = func(context.Context, string, ...string) error { return nil }

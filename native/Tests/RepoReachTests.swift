@@ -1,6 +1,98 @@
 import XCTest
 @testable import RepoReach
 
+final class FilesystemExtensionAvailabilityTests: XCTestCase {
+    private let ownURL = URL(fileURLWithPath: "/fixture/EnoughRepos.app/Contents/Extensions/RepoReachFSKit.appex")
+    private let otherURL = URL(fileURLWithPath: "/fixture/Old Copy.app/Contents/Extensions/RepoReachFSKit.appex")
+
+    private func module(_ url: URL, enabled: Bool, identifier: String = FilesystemExtensionAvailability.moduleIdentifier,
+                        shortName: String? = "reporeach") -> FilesystemExtensionAvailability.InstalledModule {
+        .init(identifier: identifier, url: url, enabled: enabled, filesystemShortName: shortName)
+    }
+
+    func testFirstLaunchRequiresApprovalEvenWhenMacOSSupportsFSKit() {
+        let state = FilesystemExtensionAvailability.assess([module(ownURL, enabled: false)], expectedURL: ownURL)
+        XCTAssertEqual(state, .disabled)
+        XCTAssertTrue(state.needsSetup)
+        XCTAssertTrue(state.instructions.contains("File System Extensions"))
+        XCTAssertTrue(state.instructions.contains("EnoughRepos Filesystem"))
+        XCTAssertTrue(state.instructions.contains("Check Again"))
+    }
+
+    func testEnabledExactBundleCompletesSetup() {
+        let state = FilesystemExtensionAvailability.assess([module(ownURL, enabled: true)], expectedURL: ownURL)
+        XCTAssertEqual(state, .enabled)
+        XCTAssertFalse(state.needsSetup)
+    }
+
+    func testOSSupportAndUncertainDiscoveryNeverClaimPermission() {
+        XCTAssertFalse(FilesystemExtensionAvailability.unsupported.needsSetup)
+        XCTAssertFalse(FilesystemExtensionAvailability.checking.needsSetup)
+        XCTAssertTrue(FilesystemExtensionAvailability.unavailable.needsSetup)
+        XCTAssertEqual(FilesystemExtensionAvailability.assess([], expectedURL: ownURL), .notRegistered)
+    }
+
+    func testEnabledDifferentCopyCannotSatisfyApproval() {
+        for modules in [[module(otherURL, enabled: true)],
+                        [module(ownURL, enabled: false), module(otherURL, enabled: true)],
+                        [module(ownURL, enabled: true), module(otherURL, enabled: true)]] {
+            XCTAssertEqual(FilesystemExtensionAvailability.assess(modules, expectedURL: ownURL), .conflicting)
+        }
+    }
+
+    func testDisabledOtherCopyAndUnrelatedModuleDoNotBlockOwnApproval() {
+        let modules = [module(ownURL, enabled: true), module(otherURL, enabled: false),
+                       module(otherURL, enabled: true, identifier: "com.example.unrelated.filesystem", shortName: "otherfs")]
+        XCTAssertEqual(FilesystemExtensionAvailability.assess(modules, expectedURL: ownURL), .enabled)
+        XCTAssertEqual(FilesystemExtensionAvailability.assess([module(otherURL, enabled: false)], expectedURL: ownURL), .notRegistered)
+    }
+
+    func testDuplicateOwnRegistrationRequiresAttention() {
+        let own = module(ownURL, enabled: true)
+        XCTAssertEqual(FilesystemExtensionAvailability.assess([own, own], expectedURL: ownURL), .conflicting)
+    }
+
+    func testDifferentBundleAdvertisingTheSameFilesystemConflicts() {
+        for identifier in ["com.enoughtools.reporeach.validation.fskit", "com.example.other.filesystem"] {
+            let modules = [module(ownURL, enabled: true), module(otherURL, enabled: true, identifier: identifier)]
+            XCTAssertEqual(FilesystemExtensionAvailability.assess(modules, expectedURL: ownURL), .conflicting)
+        }
+    }
+
+    func testUnknownEnabledMetadataDoesNotClaimUnambiguousSelection() {
+        for shortName in [nil, ""] {
+            let unknown = module(otherURL, enabled: true, identifier: "com.example.unknown.filesystem", shortName: shortName)
+            XCTAssertEqual(FilesystemExtensionAvailability.assess([module(ownURL, enabled: true), unknown], expectedURL: ownURL), .unavailable)
+        }
+        XCTAssertEqual(FilesystemExtensionAvailability.assess([module(ownURL, enabled: true, shortName: "otherfs")], expectedURL: ownURL), .unavailable)
+    }
+
+    func testDiscoveryRejectsRemoteAndAmbiguousModuleLocations() {
+        for rawURL in ["https://example.com/EnoughRepos.app/Contents/Extensions/RepoReachFSKit.appex",
+                       "file://remote/fixture/EnoughRepos.app/Contents/Extensions/RepoReachFSKit.appex",
+                       ownURL.absoluteString + "?copy=1", ownURL.absoluteString + "#other"] {
+            let url = URL(string: rawURL)!
+            XCTAssertEqual(FilesystemExtensionAvailability.assess([module(url, enabled: true)], expectedURL: ownURL), .unavailable)
+            XCTAssertEqual(FilesystemExtensionAvailability.assess([], expectedURL: url), .unavailable)
+        }
+        XCTAssertEqual(FilesystemExtensionAvailability.assess(Array(repeating: module(ownURL, enabled: true), count: 65), expectedURL: ownURL), .unavailable)
+    }
+
+    func testManagedApplicationSymlinkStillMatchesItsActualModule() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let bundle = directory.appendingPathComponent("Actual.app", isDirectory: true)
+        let moduleURL = bundle.appendingPathComponent("Contents/Extensions/RepoReachFSKit.appex", isDirectory: true)
+        try FileManager.default.createDirectory(at: moduleURL, withIntermediateDirectories: true)
+        let alias = directory.appendingPathComponent("EnoughRepos.app", isDirectory: true)
+        try FileManager.default.createSymbolicLink(at: alias, withDestinationURL: bundle)
+        XCTAssertEqual(FilesystemExtensionAvailability.assess([module(moduleURL, enabled: true)],
+                       expectedURL: alias.appendingPathComponent("Contents/Extensions/RepoReachFSKit.appex", isDirectory: true)), .enabled)
+        let urlWithoutDirectoryHint = URL(fileURLWithPath: moduleURL.path, isDirectory: false)
+        XCTAssertEqual(FilesystemExtensionAvailability.assess([module(urlWithoutDirectoryHint, enabled: true)], expectedURL: moduleURL), .enabled)
+    }
+}
+
 final class ActionRouteTests: XCTestCase {
     func testFinderActionRoundTrip() throws {
         let route = try XCTUnwrap(ActionRoute(repo: "enoughtools/enough-ui.v2", action: .keep))

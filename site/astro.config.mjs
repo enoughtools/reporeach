@@ -1,5 +1,5 @@
 import { defineConfig } from "astro/config";
 export default defineConfig({
-  site: "https://reporeach.reb.run",
+  site: "https://enoughrepos.reb.run",
   output: "static",
 });

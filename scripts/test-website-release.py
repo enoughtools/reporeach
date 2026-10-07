@@ -76,13 +76,14 @@ def normalized(text):
 
 def release_fixture(backend="macfuse", product="RepoReach"):
     artifacts = []
+    origin = "https://enoughrepos.reb.run" if product == "EnoughRepos" else "https://reporeach.reb.run"
     for architecture in ("arm64", "x86_64"):
         for extension in ("dmg", "zip"):
             filename = f"{product}-{VERSION}-macOS-{architecture}.{extension}"
             artifacts.append({
                 "architecture": architecture, "format": extension,
                 "filename": filename,
-                "url": f"https://reporeach.reb.run/releases/{VERSION}/{filename}",
+                "url": f"{origin}/releases/{VERSION}/{filename}",
                 "signature": "developer-id" if backend == "fskit" or architecture == "arm64" else "ad-hoc",
                 "notarized": False, "sha256": "0" * 64, "bytes": 1234,
             })
@@ -158,6 +159,10 @@ def assert_brand(page):
     brand = page.by_class("product-brand")
     assert normalized(brand.text()) == "EnoughRepos"
     assert brand.attrs.get("aria-label") == "EnoughRepos home"
+    canonical = next(node for node in page.elements if node.tag == "link" and node.attrs.get("rel") == "canonical")
+    assert canonical.attrs["href"] == "https://enoughrepos.reb.run"
+    open_graph = next(node for node in page.elements if node.tag == "meta" and node.attrs.get("property") == "og:url")
+    assert open_graph.attrs["content"] == "https://enoughrepos.reb.run"
 
 
 def assert_release_page(page, fixture):
@@ -173,8 +178,6 @@ def assert_release_page(page, fixture):
     assert normalized(page.ids["download-detail"].text()) == "Developer ID signed · Not yet notarized"
     assert VERSION in normalized(page.by_class("download-title").text())
     assert "EnoughRepos for macOS" in normalized(page.by_class("download-title").text())
-    legacy_notice = "The current download was published as RepoReach."
-    assert (legacy_notice in normalized(page.by_class("release-note").text())) == (fixture["product"] == "RepoReach")
     assert page.ids["checksums"].attrs["href"] == f"/releases/{VERSION}/SHA256SUMS"
     setup_url = fixture["requirements"]["setupURL"]
     assert page.ids["setup-guide"].attrs["href"] == setup_url

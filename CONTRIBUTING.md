@@ -1,8 +1,8 @@
 # Contributing to EnoughRepos
 
-EnoughRepos is an [Enough Tools](https://enoughtools.com) project built on Cloudflare ArtifactFS. Work happens at [github.com/enoughtools/reporeach](https://github.com/enoughtools/reporeach); product information lives at [reporeach.reb.run](https://reporeach.reb.run).
+EnoughRepos is an [Enough Tools](https://enoughtools.com) project built on Cloudflare ArtifactFS. Work happens at [github.com/enoughtools/reporeach](https://github.com/enoughtools/reporeach); product information lives at [enoughrepos.reb.run](https://enoughrepos.reb.run).
 
-Read [AGENTS.md](AGENTS.md), [the architecture](docs/reporeach/architecture.md), and [the beta's actual behavior](docs/reporeach/user-guide.md) before changing lifecycle, hydration, or storage release. Keep attribution and third-party license notices intact. The source uses Apache 2.0; bundled dependencies have their own licenses.
+Read [AGENTS.md](AGENTS.md), [the architecture](docs/reporeach/architecture.md), and [the beta's actual behavior](docs/reporeach/user-guide.md) before changing lifecycle, hydration, or storage release. [UPSTREAM.md](UPSTREAM.md) identifies the ArtifactFS baseline, reused packages, and modified files. Keep attribution, change notices, and third-party license notices intact; mark further modified upstream files and update that map. The source uses Apache 2.0; bundled dependencies have their own licenses.
 
 ## Development requirements
 

@@ -1,3 +1,3 @@
 User-agent: *
 Allow: /
-Sitemap: https://reporeach.reb.run/sitemap.xml
+Sitemap: https://enoughrepos.reb.run/sitemap.xml

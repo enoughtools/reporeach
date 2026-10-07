@@ -1,3 +1,6 @@
+// Modified by Enough Tools for EnoughRepos.
+// Based on Cloudflare ArtifactFS (Apache-2.0); see UPSTREAM.md.
+
 package cli
 
 import (

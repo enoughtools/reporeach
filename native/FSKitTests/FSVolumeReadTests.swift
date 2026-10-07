@@ -11,6 +11,57 @@ import Darwin
 /// boundary without constructing framework-owned mutable buffers or mounting.
 @available(macOS 15.4, *)
 final class FSVolumeReadTests: XCTestCase {
+    func testSynchronizeWithoutWritersSucceedsAfterBridgeDisappears() async throws {
+        let fixture = try VolumeReadFixture(read: { _ in VolumeReadFixture.binary(Data()) })
+        defer { fixture.stop() }
+        let (volume, _) = try await prepareDirectory(fixture)
+        let requestCount = fixture.requests.count
+        fixture.stop()
+
+        let error = try await synchronize(volume)
+
+        XCTAssertNil(error, "No pending writable handles means there is no backend work to sync")
+        XCTAssertEqual(fixture.requests.count, requestCount)
+        try await shutdown(volume)
+    }
+
+    func testSynchronizeFlushesWritersWithoutDependingOnAdvisoryStatistics() async throws {
+        let fixture = try VolumeReadFixture(read: { _ in VolumeReadFixture.binary(Data()) },
+            metadataFailure: { request, attempt in request.operation == "statfs" && attempt > 1 ? ENOENT : 0 })
+        defer { fixture.stop() }
+        let (volume, item) = try await prepare(fixture)
+        let openError = try await open(volume, item: item, modes: .write)
+        XCTAssertNil(openError)
+
+        let error = try await synchronize(volume)
+
+        XCTAssertNil(error)
+        XCTAssertEqual(fixture.requests.filter { $0.operation == "fsync" }.map(\.handle), [101])
+        XCTAssertEqual(fixture.requests.filter { $0.operation == "statfs" }.count, 1, "Only activation requests volume statistics")
+        let closeError = try await close(volume, item: item, modes: [])
+        XCTAssertNil(closeError)
+        try await shutdown(volume)
+        XCTAssertTrue(fixture.failures.isEmpty)
+    }
+
+    func testSynchronizeStillPropagatesWritableHandleFailure() async throws {
+        let fixture = try VolumeReadFixture(read: { _ in VolumeReadFixture.binary(Data()) },
+            metadataFailure: { request, _ in request.operation == "fsync" ? EIO : 0 })
+        defer { fixture.stop() }
+        let (volume, item) = try await prepare(fixture)
+        let openError = try await open(volume, item: item, modes: .write)
+        XCTAssertNil(openError)
+
+        let error = try await synchronize(volume)
+
+        assertPOSIX(error, EIO)
+        XCTAssertEqual(fixture.requests.filter { $0.operation == "fsync" }.map(\.handle), [101])
+        let closeError = try await close(volume, item: item, modes: [])
+        XCTAssertNil(closeError)
+        try await shutdown(volume)
+        XCTAssertTrue(fixture.failures.isEmpty)
+    }
+
     func testReadBeforeOpenUsesAndReleasesTemporaryReadHandle() async throws {
         let bytes = Data([0, 255, 128, 13, 10, 0, 97])
         let fixture = try VolumeReadFixture(read: { _ in VolumeReadFixture.binary(bytes) })
@@ -1361,6 +1412,14 @@ final class FSVolumeReadTests: XCTestCase {
         let finished = expectation(description: "Production deactivate callback")
         let reply = ReadReply()
         volume.deactivate(options: []) { error in reply.store(count: 0, error: error); finished.fulfill() }
+        await fulfillment(of: [finished], timeout: 3)
+        return try XCTUnwrap(reply.value).error
+    }
+
+    private func synchronize(_ volume: RepoReachVolume) async throws -> Error? {
+        let finished = expectation(description: "Production synchronize callback")
+        let reply = ReadReply()
+        volume.synchronize(flags: .wait) { error in reply.store(count: 0, error: error); finished.fulfill() }
         await fulfillment(of: [finished], timeout: 3)
         return try XCTUnwrap(reply.value).error
     }

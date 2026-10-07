@@ -4,6 +4,7 @@ Copyright 2026 Enough Tools.
 
 This product includes software developed by Cloudflare:
 ArtifactFS — https://github.com/cloudflare/artifact-fs
+Copyright 2026 Cloudflare.
 Licensed under the Apache License, Version 2.0.
 
 The macOS distribution includes the official GitHub CLI:
