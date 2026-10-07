@@ -6,7 +6,22 @@ The current harness tests the hybrid catalogue contract: organization folders ar
 
 This is a narrow acceptance harness, not complete native release qualification. A skipped test, a successful Go compilation, and bridge tests are not mounted FSKit evidence.
 
-## Local15 hybrid acceptance
+## Local16 Finder dispatch acceptance
+
+Installed signed local build 16 uses clean executable source
+`aa8021b219532b91b73f5da6536ece1808948369`. Signed packaging, 67 native UI tests,
+and production Finder typechecking pass. On macOS 27.0.1 ARM64, actual Finder
+Refresh launched the stopped app/service and completed in 1.363 seconds. Runtime
+code identity matched installed local16; HEAD and clean Git status were unchanged,
+and the checkout remained pinned/materialized with its kept-downloaded badge.
+This verifies shared dispatch through Refresh. Keep remains the local15 app-button
+result; no extra Finder Keep/Free cycle was run. Unchanged Go/FSKit retains the
+local15 passes below without a local16 rerun. Evidence:
+`build/fskit-evidence/local16/finder-dispatch-success.json`, `finder-runtime.json`,
+and `finder-actions.jsonl` in that directory. Existing release limits remain; no
+release was made.
+
+## Historical local15 hybrid acceptance
 
 Installed signed local build 15, with clean executable source
 `de3610c581d32bfbd89039bfdd0c5d3e1c4701c8`, passes all three actual mounted
@@ -59,10 +74,11 @@ cached contents do not measure network hydration.
 
 Finder callbacks now read current official
 selected/targeted URLs, revalidate eligibility, and explicitly dispatch to the
-containing app. The live local15 Keep callback reaches its handler but rejects
-the containing-app identity read under the extension sandbox. Actual Finder
-dispatch remains pending the local16 correction; prior menu visibility and
-management-app conversion do not prove that execution works.
+containing app. The live local15 Keep callback reached its handler but rejected
+the containing-app identity read under the extension sandbox. Local16 replaces
+that read with exact OS-registered-path validation and the compiled application
+identifier; its live Refresh proof is recorded above. Prior menu visibility and
+management-app conversion alone did not establish that execution.
 
 Normal fixture shutdown is part of the passing sequences. Independent complete
 cached global mount inspections after the fixtures and after normal GUI quit

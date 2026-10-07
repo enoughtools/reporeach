@@ -12,14 +12,16 @@ Repositories/
     shared-project/
 ```
 
-This guide describes the signed local15 development build. Its three mounted
-storage fixtures passed on macOS 27.0.1 ARM64, including Keep across 160 descendant
+This guide describes the signed local16 development build. Actual Finder Refresh
+launched the stopped app/service, completed, and preserved the existing local
+checkout's HEAD and clean Git status. Its unchanged Go/FSKit implementation retains
+local15's three mounted fixture passes on macOS 27.0.1 ARM64, including Keep across 160 descendant
 directories. Keep through the management app also completed on an existing live
 repository, producing an ordinary local checkout with clean Git status and native
 Git reads after the app stopped. Prior local12 Finder checks verified nested
 traversal, selective previews, and context actions.
-Live Finder dispatch still requires the local16 sandbox correction; the management
-app remains the verified action path. Real-network cold Finder latency and release
+The live Keep conversion used the local15 management app; no extra Finder Keep/Free
+cycle was run to test local16 dispatch. Real-network cold Finder latency and release
 readiness remain unqualified; see the
 [acceptance record](fskit-acceptance.md). Historical beta.3 downloads retain their
 macFUSE installation, separate-clone adoption, and cache-based Keep behavior.
@@ -137,9 +139,9 @@ indicator and file/byte totals when known, and Finder refreshes badges for visib
 children. Progress counts unique file contents, so duplicate files can share one
 download. Keep batches missing downloads, and accepted operations continue in the
 background while the management window is closed.
-Finder actions use the current selection and recheck eligibility. In local15,
-the containing-app dispatch still fails a sandbox identity read; use repository
-actions in the management app while that correction is being verified.
+Finder actions use the current selection, recheck eligibility, and open the exact
+registered containing app. Refresh has verified this path even with the app and
+service initially stopped.
 
 **Keep covers the current checkout, not all offline history.** Uncached historical
 blobs may still need the remote. Submodules and filters such as Git LFS are refused;

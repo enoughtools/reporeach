@@ -207,11 +207,19 @@ refreshes visible child badges. Scoped process activity remains active during
 accepted repository operations and ends when work completes. Finder callbacks
 read fresh official selection/target URLs, recheck route eligibility, and dispatch
 explicitly to the containing app; menu visibility alone does not prove execution.
-The live local15 callback exposes a sandbox refusal of the containing-app identity
-read, so final Finder dispatch remains pending its local16 correction. See
+Local16 avoids the sandbox-refused parent-bundle identity read, validates the exact
+OS-registered application path with its compiled identifier, and explicitly opens
+that app. Live Finder Refresh has verified this dispatch with the app/service
+initially stopped. See
 [Finder extension details](../../native/FinderExtension/README.md).
 
-The installed signed local15 build at executable source `de3610c` passed ordered
+The installed signed local16 build at executable source `aa8021b` passed signed
+packaging, 67 native UI tests, and production Finder typechecking. Live Finder
+Refresh launched the stopped app/service and preserved checkout state, proving
+shared dispatch. Keep used the local15 app button; no extra Finder Keep/Free cycle
+was run. Unchanged Go/FSKit retains the local15 results below without a local16 rerun.
+
+The prior installed signed local15 build at executable source `de3610c` passed ordered
 Go checks and all three mounted fixtures on macOS 27.0.1 ARM64. Expanded dormant
 Keep covers cached native attributes and unvisited contents in 160 descendant
 directories, 207 regular files and one symlink, 208 unique blobs, prompt accepted
@@ -227,8 +235,7 @@ for an existing 188-blob repository and produced an ordinary checkout with clean
 native Git status. After normal app shutdown, Git status, HEAD, and README blob
 reads still worked with lazy fetching disabled and no app, engine, or mounted
 RepoReach volume. Its contents were already cached; the observation measures
-conversion/app-off access, not network downloads. Live Finder dispatch remains
-unqualified. See
+conversion/app-off access, not network downloads. See
 [the mounted record](fskit-acceptance.md),
 [the user guide](user-guide.md), and
 [Contributing](../../CONTRIBUTING.md) for visible behavior and engine invariants.

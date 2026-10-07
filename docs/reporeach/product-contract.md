@@ -97,7 +97,15 @@ metadata. Ownership receipts and journals also protect that cleanup.
 
 ## Acceptance status
 
-The installed signed local15 build uses clean executable source
+The installed signed local16 build uses clean executable source
+`aa8021b219532b91b73f5da6536ece1808948369`. Live Finder Refresh launched the stopped
+app/service; its operation was observed running-to-complete in 1.363 seconds with verified runtime identity,
+unchanged HEAD, and clean Git status. This proves shared dispatch through Refresh;
+the live Keep used the local15 app button, with no extra Finder Keep/Free cycle.
+Go/FSKit is unchanged; the local15 mounted/full-Go results below were not rerun
+on local16.
+
+The prior installed signed local15 build used clean executable source
 `de3610c581d32bfbd89039bfdd0c5d3e1c4701c8`. Ordered CLI build, vet, and full Go
 tests passed in 8.547, 2.305, and 159.504 seconds respectively. Three mounted
 fixtures passed on macOS 27.0.1 ARM64: expanded dormant-preview Keep in
@@ -145,10 +153,11 @@ read HEAD and the README blob with lazy fetching disabled. Complete cached mount
 inspections after the fixtures and app shutdown found no RepoReach volumes.
 This is a conversion/app-off observation, not network download timing.
 
-The actual Finder Keep callback reaches its handler but local15 rejects a
-containing-app identity read under the extension sandbox. Finder dispatch remains
-pending the local16 correction; use of the management app above does not qualify
-Finder execution.
+The local15 Finder callback rejected a containing-app identity read under the
+extension sandbox. Local16 removes that parent-bundle read and validates the exact
+OS-registered app path with the compiled app identifier. The successful live
+Refresh above establishes dispatch; the prior Keep conversion remains an
+app-button result.
 UI capture duration is not filesystem latency, and a
 real-network cold GitHub Finder benchmark remains unqualified. macOS 26 and Intel
 runtime are also unqualified. See the [mounted acceptance record](fskit-acceptance.md)
