@@ -1,6 +1,9 @@
 #!/bin/bash
 # Build and package one macOS architecture. Network dependencies are pinned.
 set -euo pipefail
+# Signed payloads must remain readable when copied to shared Applications.
+# Private evidence and signing inputs use their own explicit permissions.
+umask 022
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 export GOTOOLCHAIN=go1.26.8
 ARCH=arm64
@@ -261,6 +264,7 @@ done
 SOURCE_REVISION="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["revision"])' "$STAGE/source.json")"
 /usr/libexec/PlistBuddy -c "Add :RepoReachSourceRevision string $SOURCE_REVISION" "$APP/Contents/Info.plist" 2>/dev/null || \
   /usr/libexec/PlistBuddy -c "Set :RepoReachSourceRevision $SOURCE_REVISION" "$APP/Contents/Info.plist"
+python3 "$ROOT/scripts/normalize-app-permissions.py" --app "$APP"
 SIGNATURE=ad-hoc
 if [ -n "$SIGN_IDENTITY" ]; then
   SIGNATURE=developer-id
@@ -270,6 +274,8 @@ if [ -n "$SIGN_IDENTITY" ]; then
   if [ "$BACKEND" = fskit ]; then
     FSMODULE="$APP/Contents/Extensions/RepoReachFSKit.appex"
     FSKIT_CLAIMS="$STAGE/fskit-signing"
+    mkdir -p "$FSKIT_CLAIMS"
+    chmod 0700 "$FSKIT_CLAIMS"
     python3 "$ROOT/scripts/validate-fskit-bundle.py" prepare \
       --profile "$REPOREACH_FSKIT_PROFILE" --bundle-id com.enoughtools.reporeach.fskit \
       --entitlements "$ROOT/native/FSKitExtension/FSKit.entitlements" \
@@ -279,6 +285,7 @@ if [ -n "$SIGN_IDENTITY" ]; then
       --output-directory "$FSKIT_CLAIMS"
     codesign --force --timestamp --options runtime --entitlements "$FSKIT_CLAIMS/helper.entitlements" --sign "$SIGN_IDENTITY" "$APP/Contents/Helpers/artifact-fs"
     cp "$REPOREACH_FSKIT_PROFILE" "$FSMODULE/Contents/embedded.provisionprofile"
+    chmod 0644 "$FSMODULE/Contents/embedded.provisionprofile"
     codesign --force --timestamp --options runtime --entitlements "$FSKIT_CLAIMS/module.entitlements" --sign "$SIGN_IDENTITY" "$FSMODULE"
   else
     codesign --force --timestamp --options runtime --sign "$SIGN_IDENTITY" "$APP/Contents/Helpers/artifact-fs"
@@ -304,6 +311,7 @@ if [ "$BACKEND" = fskit ]; then
   python3 "$ROOT/scripts/validate-fskit-bundle.py" signed --app "$APP" --arch "$ARCH" \
     --entitlements "$ROOT/native/FSKitExtension/FSKit.entitlements"
 fi
+python3 "$ROOT/scripts/normalize-app-permissions.py" --app "$APP" --check
 if [ "$LOCAL_APP" = true ]; then
   python3 - "$STAGE/source.json" "$STAGE/local-build.json" "$APP" "$VERSION" "$ARCH" <<'PY_LOCAL_APP'
 import json, pathlib, sys
@@ -342,12 +350,14 @@ if [ "$NOTARIZE" = true ]; then
   NOTARIZED=true
   rm "$NOTARY_ZIP"
 fi
+python3 "$ROOT/scripts/normalize-app-permissions.py" --app "$APP" --check
 ZIP="$OUTPUT/$BASENAME.zip"
 DMG="$OUTPUT/$BASENAME.dmg"
 rm -f "$ZIP" "$DMG"
 ditto -c -k --sequesterRsrc --keepParent "$APP" "$ZIP"
 DMG_STAGE="$STAGE/dmg"
 mkdir -p "$DMG_STAGE"
+chmod 0755 "$DMG_STAGE"
 rm -rf "$DMG_STAGE/EnoughRepos.app" "$DMG_STAGE/RepoReach.app"
 ditto "$APP" "$DMG_STAGE/EnoughRepos.app"
 ln -sfn /Applications "$DMG_STAGE/Applications"

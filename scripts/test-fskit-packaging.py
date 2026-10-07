@@ -4,8 +4,11 @@ import copy
 import datetime
 import importlib.util
 import json
+import os
 import pathlib
 import plistlib
+import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -536,6 +539,195 @@ class LocalValidationArtifactTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "architecture"):
                 local_validation.export(self.args)
         self.assertFalse(self.args.output.exists())
+
+
+class DistributionPermissionTests(unittest.TestCase):
+    def setUp(self):
+        # Keep Unix socket paths below macOS's length limit. These disposable
+        # fixtures contain no real profiles, credentials or signed components.
+        self.temporary = tempfile.TemporaryDirectory(prefix="enoughrepos-modes-", dir="/tmp")
+        self.addCleanup(self.temporary.cleanup)
+        self.folder = pathlib.Path(self.temporary.name).resolve()
+        self.app = self.folder / "Fixture.app"
+        self.helper = pathlib.Path(__file__).with_name("normalize-app-permissions.py").resolve()
+        self.executables = (
+            "Contents/MacOS/Fixture",
+            "Contents/Helpers/artifact-fs",
+            "Contents/Helpers/gh",
+            "Contents/PlugIns/FixtureFinder.appex/Contents/MacOS/FixtureFinder",
+            "Contents/Extensions/RepoReachFSKit.appex/Contents/MacOS/RepoReachFSKit",
+        )
+        self.resources = (
+            "Contents/Info.plist",
+            "Contents/Resources/Licenses/NOTICE.txt",
+            "Contents/_CodeSignature/CodeResources",
+            "Contents/Extensions/RepoReachFSKit.appex/Contents/_CodeSignature/CodeResources",
+            "Contents/Extensions/RepoReachFSKit.appex/Contents/embedded.provisionprofile",
+        )
+        previous_umask = os.umask(0o077)
+        try:
+            for relative in (*self.executables, *self.resources):
+                path = self.app / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b"disposable binary fixture\0\xff: " + relative.encode())
+            for relative in self.executables:
+                (self.app / relative).chmod(0o700)
+        finally:
+            os.umask(previous_umask)
+
+    def invoke(self, *options):
+        return subprocess.run(
+            [sys.executable, str(self.helper), "--app", str(self.app), *options],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=20,
+        )
+
+    def snapshot(self, root=None):
+        root = self.app if root is None else root
+        result = {}
+        for base, directories, files in os.walk(root, followlinks=False):
+            for path in [pathlib.Path(base), *(pathlib.Path(base) / name for name in directories + files)]:
+                relative = str(path.relative_to(root))
+                if relative in result:
+                    continue
+                mode = path.lstat().st_mode
+                content = path.read_bytes() if stat.S_ISREG(mode) else os.readlink(path) if stat.S_ISLNK(mode) else None
+                result[relative] = (stat.S_IFMT(mode), stat.S_IMODE(mode), content)
+        return result
+
+    def test_restrictive_umask_bundle_becomes_publicly_readable_without_changing_contents(self):
+        before = self.snapshot()
+        self.assertEqual(before["."][1], 0o700)
+        self.assertEqual(before["Contents/Info.plist"][1], 0o600)
+        self.assertEqual(before["Contents/MacOS/Fixture"][1], 0o700)
+        result = self.invoke()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        after = self.snapshot()
+        self.assertEqual(set(after), set(before))
+        for path, (kind, mode, content) in before.items():
+            with self.subTest(path=path):
+                expected = 0o755 if kind == stat.S_IFDIR or mode & 0o111 else 0o644
+                self.assertEqual(after[path], (kind, expected, content))
+
+    def test_external_file_directory_and_dangling_symlinks_are_never_followed(self):
+        external = self.folder / "external"
+        external.mkdir(mode=0o700)
+        target = external / "private-resource"
+        target.write_bytes(b"external fixture must remain unchanged\0\xff")
+        target.chmod(0o600)
+        # Preflight must not descend into a directory reached through a link.
+        os.mkfifo(external / "unsupported-outside-bundle", mode=0o600)
+        links = {
+            "Contents/Resources/external-file": target,
+            "Contents/Resources/external-directory": external,
+            "Contents/Resources/dangling": self.folder / "absent-target",
+        }
+        for relative, destination in links.items():
+            (self.app / relative).symlink_to(destination)
+        before = self.snapshot(external)
+        link_modes = {name: (self.app / name).lstat().st_mode for name in links}
+        result = self.invoke()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.snapshot(external), before)
+        for relative, destination in links.items():
+            with self.subTest(link=relative):
+                self.assertEqual(os.readlink(self.app / relative), str(destination))
+                self.assertEqual((self.app / relative).lstat().st_mode, link_modes[relative])
+        check = self.invoke("--check")
+        self.assertEqual(check.returncode, 0, check.stderr)
+        self.assertEqual(self.snapshot(external), before)
+
+    def test_fifo_rejection_preflights_the_complete_tree_before_any_chmod(self):
+        os.mkfifo(self.app / "Contents/Resources/z-unsupported-pipe", mode=0o600)
+        before = self.snapshot()
+        for options in ((), ("--check",)):
+            with self.subTest(options=options):
+                result = self.invoke(*options)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(self.snapshot(), before)
+
+    @unittest.skipUnless(hasattr(socket, "AF_UNIX"), "Requires Unix filesystem sockets")
+    def test_socket_rejection_preserves_all_original_modes_and_contents(self):
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener:
+            listener.bind(str(self.app / "z-unsupported-socket"))
+            before = self.snapshot()
+            for options in ((), ("--check",)):
+                with self.subTest(options=options):
+                    result = self.invoke(*options)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertEqual(self.snapshot(), before)
+
+    def test_check_rejects_restrictive_permissions_without_modifying_them(self):
+        before = self.snapshot()
+        result = self.invoke("--check")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.snapshot(), before)
+
+    def test_check_accepts_normalized_bundle_without_modifying_it(self):
+        normalize = self.invoke()
+        self.assertEqual(normalize.returncode, 0, normalize.stderr)
+        before = self.snapshot()
+        result = self.invoke("--check")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.snapshot(), before)
+
+    def test_canonical_build_normalizes_before_signing_and_profile_copy_is_readable(self):
+        script = pathlib.Path(__file__).with_name("build-macos.sh").read_text()
+        lines = script.splitlines()
+        normalization = script.index('python3 "$ROOT/scripts/normalize-app-permissions.py" --app "$APP"')
+        first_signature = next(index for index, line in enumerate(lines) if line.lstrip().startswith("codesign "))
+        normalization_line = script[:normalization].count("\n")
+        self.assertLess(normalization_line, first_signature)
+        distribution_umask = next(index for index, line in enumerate(lines) if line.strip() == "umask 022")
+        project_generation = next(index for index, line in enumerate(lines) if line.lstrip().startswith("xcodegen generate "))
+        self.assertLess(distribution_umask, project_generation)
+        profile_copy = script.index('cp "$REPOREACH_FSKIT_PROFILE" "$FSMODULE/Contents/embedded.provisionprofile"')
+        profile_mode = script.index('chmod 0644 "$FSMODULE/Contents/embedded.provisionprofile"')
+        module_signature = script.index('codesign --force --timestamp --options runtime --entitlements "$FSKIT_CLAIMS/module.entitlements"')
+        self.assertLess(profile_copy, profile_mode)
+        self.assertLess(profile_mode, module_signature)
+
+    def run_canonical_directory_setup(self, variable, directory, umask):
+        lines = pathlib.Path(__file__).with_name("build-macos.sh").read_text().splitlines()
+        mkdir_line = next(index for index, line in enumerate(lines) if line.strip() == f'mkdir -p "${variable}"')
+        # Execute the actual two canonical commands, never a copied substitute
+        # or any surrounding build, signing, image creation or notary command.
+        snippet = "\n".join(lines[mkdir_line:mkdir_line + 2])
+        self.assertTrue(lines[mkdir_line + 1].strip().startswith("chmod "))
+        environment = dict(os.environ, **{variable: str(directory)})
+        result = subprocess.run(
+            ["bash", "-eu", "-c", f"umask {umask}\n{snippet}"],
+            env=environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, timeout=20,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return lines, mkdir_line
+
+    def test_dmg_staging_root_is_accessible_for_existing_and_new_directories(self):
+        for existing in (True, False):
+            with self.subTest(existing=existing):
+                directory = self.folder / ("existing-dmg-stage" if existing else "new-dmg-stage")
+                if existing:
+                    directory.mkdir(mode=0o700)
+                    directory.chmod(0o700)
+                    (directory / "retained-fixture").write_bytes(b"existing stage fixture")
+                lines, mkdir_line = self.run_canonical_directory_setup("DMG_STAGE", directory, "077")
+                self.assertEqual(stat.S_IMODE(directory.stat().st_mode), 0o755)
+                image_creation = next(index for index, line in enumerate(lines) if line.lstrip().startswith("hdiutil create "))
+                self.assertLess(mkdir_line + 1, image_creation)
+                if existing:
+                    self.assertEqual((directory / "retained-fixture").read_bytes(), b"existing stage fixture")
+
+    def test_signing_claims_directory_is_private_before_preparation(self):
+        for existing_mode in (None, 0o700, 0o755):
+            with self.subTest(existing_mode=existing_mode):
+                directory = self.folder / ("claims-new" if existing_mode is None else f"claims-{existing_mode:o}")
+                if existing_mode is not None:
+                    directory.mkdir(mode=existing_mode)
+                    directory.chmod(existing_mode)
+                lines, mkdir_line = self.run_canonical_directory_setup("FSKIT_CLAIMS", directory, "022")
+                self.assertEqual(stat.S_IMODE(directory.stat().st_mode), 0o700)
+                preparation = next(index for index, line in enumerate(lines) if line.lstrip().startswith('python3 "$ROOT/scripts/validate-fskit-bundle.py" prepare '))
+                self.assertLess(mkdir_line + 1, preparation)
 
 
 class ValidationGenerationFlagsTests(unittest.TestCase):
