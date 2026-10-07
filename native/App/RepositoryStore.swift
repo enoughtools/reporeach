@@ -14,6 +14,8 @@ final class RepositoryStore: ObservableObject {
     @Published private(set) var serviceRunning = false
     @Published private(set) var launchAtLogin = false
     @Published private(set) var filesystemExtension: FilesystemExtensionAvailability = .checking
+    @Published private(set) var isRecoveringVirtualFolders = false
+    @Published private(set) var mountRecoveryError: String?
     @Published var selectedRepositoryID: String?
     let demoMode: Bool
     var showSettingsHandler: (() -> Void)?
@@ -139,6 +141,7 @@ final class RepositoryStore: ObservableObject {
 
     private func apply(_ loaded: EngineStatus) {
         status = loaded
+        if loaded.mounted { mountRecoveryError = nil }
         serviceRunning = true
         updateRepositoryActivity()
         if !service.isIsolated { UserDefaults.standard.set(loaded.mountRoot, forKey: "mountRoot") }
@@ -251,6 +254,32 @@ final class RepositoryStore: ObservableObject {
             #endif
             let _: EmptyResponse = try await self.service.client.request("POST", path: "/v1/mount", timeout: 45)
             await self.refreshStatus()
+        }
+    }
+
+    func recoverVirtualFolders() async {
+        guard !demoMode, !invalidated, !isBusy, !isRecoveringVirtualFolders,
+              status?.canRecoverVirtualFolders == true else { return }
+        isRecoveringVirtualFolders = true
+        mountRecoveryError = nil
+        actionRevision &+= 1
+        updateRepositoryActivity()
+        defer {
+            isRecoveringVirtualFolders = false
+            updateRepositoryActivity()
+        }
+        await perform {
+            do {
+                let loaded = try await self.service.client.recoverVirtualFolders()
+                guard !self.invalidated else { return }
+                // A poll started during recovery must not overwrite its result.
+                self.actionRevision &+= 1
+                self.apply(loaded)
+            } catch {
+                guard !self.invalidated else { return }
+                self.actionRevision &+= 1
+                self.mountRecoveryError = EngineClient.recoveryFailureMessage(error)
+            }
         }
     }
 
@@ -371,6 +400,7 @@ final class RepositoryStore: ObservableObject {
         // Keep background status/progress updates responsive while an accepted
         // operation runs. Ordinary idle browsing remains eligible for App Nap.
         let active = !invalidated && (pendingRepositoryActions > 0 ||
+            isRecoveringVirtualFolders ||
             serviceRunning && status?.operations.contains(where: \.isRunning) == true)
         if active, repositoryActivity == nil {
             repositoryActivity = ProcessInfo.processInfo.beginActivity(options: .userInitiatedAllowingIdleSystemSleep,

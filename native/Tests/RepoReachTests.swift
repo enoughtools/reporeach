@@ -597,6 +597,123 @@ final class FinderCacheTests: XCTestCase {
     }
 }
 
+final class MountRecoveryContractTests: XCTestCase {
+    func testRecoveryRequiresExplicitServiceAvailabilityAndDisconnectedState() throws {
+        let legacy = try JSONDecoder().decode(EngineStatus.self, from: Data(#"{"mountRoot":"/fixture/Repos"}"#.utf8))
+        XCTAssertFalse(legacy.mountRecoveryAvailable)
+        XCTAssertFalse(legacy.canRecoverVirtualFolders)
+        let offered = try JSONDecoder().decode(EngineStatus.self, from: Data(#"{"mountRoot":"/fixture/Repos","mounted":false,"mountRecoveryAvailable":true}"#.utf8))
+        XCTAssertTrue(offered.canRecoverVirtualFolders)
+        let healthy = EngineStatus(mountRoot: "/fixture/Repos", mounted: true, mountRecoveryAvailable: true)
+        XCTAssertFalse(healthy.canRecoverVirtualFolders, "An inconsistent stale flag must not offer recovery for a mounted session")
+    }
+
+    func testRecoveryAvailabilitySurvivesRoundTripAndRepositoryProgressUpdates() throws {
+        let initial = EngineStatus(mountRoot: "/fixture/Repos", virtualRoot: "/fixture/PrivateVolume", mountRecoveryAvailable: true)
+        let operation = try JSONDecoder().decode(EngineOperation.self, from: Data(#"{"id":"running","repositoryID":"owner/repo","action":"keep","status":"running"}"#.utf8))
+        let recording = initial.recording(operation)
+        XCTAssertTrue(recording.mountRecoveryAvailable)
+        XCTAssertTrue(recording.canRecoverVirtualFolders)
+        XCTAssertEqual(try JSONDecoder().decode(EngineStatus.self, from: JSONEncoder().encode(recording)), recording)
+    }
+
+    func testRecoveryClientUsesOnlyExplicitRecoveryEndpointAndDecodesStatus() async throws {
+        let fixture = try makeEngine(response: #"{"mountRoot":"/fixture/Repos","mounted":true,"mountRecoveryAvailable":false}"#, status: 0)
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+
+        let result = try await fixture.client.recoverVirtualFolders()
+
+        XCTAssertTrue(result.mounted)
+        XCTAssertFalse(result.canRecoverVirtualFolders)
+        XCTAssertEqual(try String(contentsOf: fixture.calls, encoding: .utf8), "requested\n")
+    }
+
+    func testRecoveryFailurePreservesBusyGuidanceAndNeverRetries() async throws {
+        let fixture = try makeEngine(response: #"{"error":"Virtual folders are still in use. Close files and Finder windows using them, then try recovery again. Bearer ghp_fixtureSecret","recoveryError":true}"#, status: 1)
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+        do {
+            let _ = try await fixture.client.recoverVirtualFolders()
+            XCTFail("Busy recovery must report failure")
+        } catch {
+            let message = EngineClient.recoveryFailureMessage(error)
+            XCTAssertTrue(message.contains("still in use"))
+            XCTAssertTrue(message.contains("Close files and Finder windows"))
+            XCTAssertFalse(message.contains("fixtureSecret"))
+            XCTAssertEqual((error as? EngineFailure)?.origin, .recoveryService)
+        }
+        XCTAssertEqual(try String(contentsOf: fixture.calls, encoding: .utf8), "requested\n", "Recovery failures must never trigger an automatic second request")
+    }
+
+    func testRecoveryDurabilityErrorKeepsServiceGuidanceWithoutClaimingSuccess() {
+        let failure = EngineFailure(message: "The filesystem could not confirm pending writes. Close files using virtual folders before trying recovery again.", origin: .recoveryService)
+        let message = EngineClient.recoveryFailureMessage(failure)
+        XCTAssertTrue(message.contains("couldn't be recovered"))
+        XCTAssertTrue(message.contains("could not confirm pending writes"))
+        XCTAssertTrue(message.contains("Close files"))
+    }
+
+    func testCLITransportErrorJSONRemainsUncertainAfterPossibleAcceptance() async throws {
+        let fixture = try makeEngine(response: #"{"error":"could not connect to EnoughRepos's background service"}"#, status: 1)
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+        do {
+            let _ = try await fixture.client.recoverVirtualFolders()
+            XCTFail("Transport failure must report uncertainty")
+        } catch {
+            XCTAssertEqual((error as? EngineFailure)?.origin, .client)
+            let message = EngineClient.recoveryFailureMessage(error)
+            XCTAssertTrue(message.contains("couldn't confirm recovery"))
+            XCTAssertFalse(message.contains("couldn't be recovered"))
+            XCTAssertFalse(message.contains("could not connect"))
+        }
+        XCTAssertEqual(try String(contentsOf: fixture.calls, encoding: .utf8), "requested\n")
+    }
+
+    func testUncertainRecoveryDoesNotRecommendRestartOrRepeatRawHelperDiagnostics() async throws {
+        let fixture = try makeEngine(response: "", status: 1, stderr: "restart your Mac; raw-private-diagnostic")
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+        do {
+            let _ = try await fixture.client.recoverVirtualFolders()
+            XCTFail("Missing service response must report uncertainty")
+        } catch {
+            let message = EngineClient.recoveryFailureMessage(error)
+            XCTAssertTrue(message.contains("couldn't confirm recovery"))
+            XCTAssertFalse(message.contains("restart"))
+            XCTAssertFalse(message.contains("raw-private-diagnostic"))
+            XCTAssertTrue(message.contains("Finder windows"))
+        }
+        XCTAssertEqual(try String(contentsOf: fixture.calls, encoding: .utf8), "requested\n")
+    }
+
+    private func makeEngine(response: String, status: Int32, stderr: String = "") throws -> (directory: URL, client: EngineClient, calls: URL) {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("rr-recovery-client-" + UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+        let executable = directory.appendingPathComponent("fixture-engine")
+        let script = """
+        #!/bin/sh
+        printf 'requested\\n' >> "${0}.calls"
+        if [ "$#" -ne 8 ] || [ "$1" != desktop ] || [ "$2" != request ] || [ "$3" != --socket ] || [ "$4" != /fixture/engine.sock ] || [ "$5" != --method ] || [ "$6" != POST ] || [ "$7" != --path ] || [ "$8" != /v1/mount/recover ]; then
+          printf '%s\\n' 'Unexpected recovery control request' >&2
+          exit 97
+        fi
+        cat <<'RECOVERY_RESPONSE'
+        \(response)
+        RECOVERY_RESPONSE
+        cat <<'RECOVERY_ERROR' >&2
+        \(stderr)
+        RECOVERY_ERROR
+        exit \(status)
+        """
+        do {
+            try Data(script.utf8).write(to: executable)
+            try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: executable.path)
+        } catch {
+            try? FileManager.default.removeItem(at: directory)
+            throw error
+        }
+        return (directory, EngineClient(executable: executable, socket: URL(fileURLWithPath: "/fixture/engine.sock")), directory.appendingPathComponent("fixture-engine.calls"))
+    }
+}
+
 final class EngineContractTests: XCTestCase {
     func testDecodesStatusWithOptionalFieldsAndPrivateRepo() throws {
         let json = #"{"version":"0.1.0","mountRoot":"/Users/example/Repositories","mounted":false,"dependencyReady":true,"account":{"login":"octocat"},"repositories":[{"id":"owner/repo","owner":"owner","name":"repo","private":true,"state":"virtual"}]}"#

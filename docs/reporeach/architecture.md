@@ -6,8 +6,8 @@ retains `github.com/cloudflare/artifact-fs` as its Go module path. The
 [product contract](product-contract.md) makes cold browsing and ordinary local
 storage the acceptance priorities.
 
-This document describes the native development implementation for macOS 26 or
-later. Its bundled FSKit extension replaces the FUSE transport. Historical beta.3
+This document describes the native implementation for macOS 26 or later.
+Its bundled FSKit extension replaces the FUSE transport. Historical beta.3
 builds mount the whole catalogue through separately installed macFUSE; their
 installation requirements and validation do not establish acceptance of the new
 implementation. See [Native FSKit](native-fskit.md) and the
@@ -207,36 +207,26 @@ refreshes visible child badges. Scoped process activity remains active during
 accepted repository operations and ends when work completes. Finder callbacks
 read fresh official selection/target URLs, recheck route eligibility, and dispatch
 explicitly to the containing app; menu visibility alone does not prove execution.
-Local16 avoids the sandbox-refused parent-bundle identity read, validates the exact
-OS-registered application path with its compiled identifier, and explicitly opens
-that app. Live Finder Refresh has verified this dispatch with the app/service
-initially stopped. See
+The extension validates the exact OS-registered application path using its compiled
+application identifier and opens that app explicitly. It does not read the
+containing app's bundle identity across the sandbox boundary. See
 [Finder extension details](../../native/FinderExtension/README.md).
 
-The installed signed local16 build, produced under the previous RepoReach name,
-at executable source `aa8021b` passed signed
-packaging, 67 native UI tests, and production Finder typechecking. Live Finder
-Refresh launched the stopped app/service and preserved checkout state, proving
-shared dispatch. Keep used the local15 app button; no extra Finder Keep/Free cycle
-was run. Unchanged Go/FSKit retains the local15 results below without a local16 rerun.
+**Recover Virtual Folders** handles an ownerless stale native session only when a
+private durable same-boot receipt proves its exact root, source, filesystem type,
+owner UID, FSID, and backing-root identity. Under the original source lease, the
+service rechecks ownership, requests one normal unmount, and independently
+confirms absence before cleaning only receipted stale bridge files and creating a
+fresh session. Busy access or uncertain state retains recovery records and data;
+users can close applications and Finder windows using those folders, then retry.
+Legacy sessions without
+that ownership binding cannot be reclaimed through this product flow. Adopted
+ordinary checkouts are unaffected.
 
-The prior installed signed local15 build at executable source `de3610c` passed ordered
-Go checks and all three mounted fixtures on macOS 27.0.1 ARM64. Expanded dormant
-Keep covers cached native attributes and unvisited contents in 160 descendant
-directories, 207 regular files and one symlink, 208 unique blobs, prompt accepted
-status, repeated inventories, and ordinary app-off reads. Primary/cold tests cover
-dirty state, selective reads, safe Free, and
-reacquisition. Actual Finder checks on local12 verified ordinary-root and nested preview
-traversal without permission badges, selected-thumbnail hydration without writable
-preparation, and public/nested context actions. The tested repository metadata
-was already cached; fixture timings and UI capture duration do not establish
-real-network cold Finder latency or release readiness. macOS 26 and Intel runtime
-remain unqualified. Live Keep through the local15 management app also completed
-for an existing 188-blob repository and produced an ordinary checkout with clean
-native Git status. After normal app shutdown, Git status, HEAD, and README blob
-reads still worked with lazy fetching disabled and no app, engine, or mounted
-RepoReach volume. Its contents were already cached; the observation measures
-conversion/app-off access, not network downloads. See
-[the mounted record](fskit-acceptance.md),
-[the user guide](user-guide.md), and
-[Contributing](../../CONTRIBUTING.md) for visible behavior and engine invariants.
+The [mounted acceptance record](fskit-acceptance.md) retains actual source/app
+identities, installed-module checks, fixture results, and observed Finder actions.
+Those results apply to their recorded builds and platforms. Each release
+candidate still needs its own complete packaging and installed-app validation;
+loopback fixture timings do not establish cold GitHub Finder performance. See
+[the user guide](user-guide.md) and [Contributing](../../CONTRIBUTING.md) for
+visible behavior and engine invariants.

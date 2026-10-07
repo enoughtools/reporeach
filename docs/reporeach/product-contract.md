@@ -2,7 +2,7 @@
 
 Cold browsing is the main product requirement. EnoughRepos should make repositories
 visible in the user's chosen folder without downloading their file contents.
-Release work is deferred until the local experience meets these requirements.
+These requirements guide implementation and release qualification.
 
 ## Required behavior
 
@@ -37,8 +37,14 @@ Release work is deferred until the local experience meets these requirements.
    data. Ordinary directories stay on disk; hiding changes only owned catalogue
    links and virtual access. Manual sources use native Git authentication
    independently of optional GitHub discovery.
+8. **Recover owned virtual sessions explicitly.** Recovery can reclaim an
+   ownerless stale native session only with a matching durable ownership record.
+   It must use normal disconnection and verify absence before creating a fresh
+   session. Busy access, changed identities, or uncertain ownership retain data
+   and report an actionable error. Adopted ordinary checkouts are outside this
+   flow; older unrecorded sessions confer no automatic recovery authority.
 
-## Native development implementation
+## Native implementation
 
 The selected root and organization folders are ordinary host directories. Virtual
 repos are app-owned symbolic links into one hidden FSKit volume in private app
@@ -82,9 +88,8 @@ so entering an unvisited directory cannot change the view halfway through Keep.
 Native enumeration retires completed directory sessions before reaching its
 bounded session limit, preserving active partial pages and reference recovery.
 Export file descriptors acquire close-on-exec atomically. Former engine storage
-stays
-as a verified rollback copy until successful Free cleanup. Free verifies local
-state and remote recovery, moves the owned checkout aside, publishes its virtual
+stays as a verified rollback copy until successful Free cleanup. Free verifies
+local state and remote recovery, moves the owned checkout aside, publishes its virtual
 link, then removes verified owned copies. Startup recovery completes or rolls
 back interrupted handoffs. Changed files or uncertain ownership retain data and
 produce an error; incomplete cleanup must not be reported as reclaimed space.
@@ -95,77 +100,20 @@ For repos with only preview content, Free can reclaim verified immutable content
 and its shallow source without preparing a writable checkout, retaining browsing
 metadata. Ownership receipts and journals also protect that cleanup.
 
-## Acceptance status
+## Acceptance and qualification
 
-The installed signed local16 build uses clean executable source
-`aa8021b219532b91b73f5da6536ece1808948369`. Live Finder Refresh launched the stopped
-app/service; its operation was observed running-to-complete in 1.363 seconds with verified runtime identity,
-unchanged HEAD, and clean Git status. This proves shared dispatch through Refresh;
-the live Keep used the local15 app button, with no extra Finder Keep/Free cycle.
-Go/FSKit is unchanged; the local15 mounted/full-Go results below were not rerun
-on local16.
+Release validation must cover ordinary-folder placement, dirty adoption and
+preserved Git state, metadata-only cold listings, selected-blob hydration without
+writable preparation, Keep across unvisited descendants, offline app-off access,
+conservative Free refusal, clean reclamation, and reacquisition. Installed Finder
+checks must establish actual action dispatch and status updates, beyond menu
+visibility or unit tests. Recovery checks must retain data and report busy or
+uncertain ownership without forced disconnection.
 
-The prior installed signed local15 build used clean executable source
-`de3610c581d32bfbd89039bfdd0c5d3e1c4701c8`. Ordered CLI build, vet, and full Go
-tests passed in 8.547, 2.305, and 159.504 seconds respectively. Three mounted
-fixtures passed on macOS 27.0.1 ARM64: expanded dormant-preview Keep in
-12.26 seconds, primary in 7.96 seconds, and cold storage in 7.67 seconds. They
-verified ordinary-folder placement, dirty adoption and native Git state, Keep, app-off
-access, safe Free refusal, full clean cleanup, and reacquisition.
-
-The dormant Keep fixture started with cached file/directory attributes and
-unvisited nested content across 160 descendant directories. Accepted-operation
-and blocked-source progress status each rounded to 0 ms. Keep materialized
-207 regular files and one symlink, representing 208 unique blobs and 4,341 bytes,
-into an ordinary checkout readable with the app stopped and zero source requests.
-This expanded disposable regression exceeds the native directory-session budget
-and verifies repeated export inventories.
-
-A bulk Git fixture also acquired 188 selected blobs in two HTTP requests and
-extracted cached contents offline without changing native Git state.
-
-The cold fixture verifies metadata-only listing, selected 20-byte read-only
-hydration without writable preparation, five unique blobs totaling 107 bytes
-through Keep, zero-request offline reads, metadata-aware Free refusal, clean
-Free, and reacquisition. These loopback fixtures do not measure Finder navigation
-or GitHub network latency.
-
-Actual Finder checks on local12 opened an ordinary root with 14 organization
-folders, a group of four repos, a 49-entry repository, and nested directories
-without permission alerts or red badges. The selected repository's tree metadata
-was already cached. Root/org navigation left its content cache empty; entering
-the repo caused thumbnails to acquire four selected image blobs totaling
-18,741 bytes. It remained virtual without preparing a writable checkout, and
-the total engine registrations stayed at 114 throughout. Keep and Refresh actions on its public catalogue path were enabled while Free was disabled with no cached content;
-after thumbnail downloads, nested context menus enabled Keep, Free, and Refresh.
-No conversion action was invoked on the user's repository.
-
-These observations establish traversal, action availability, and selected-thumbnail
-hydration on local12. Local15 Finder callbacks now use fresh selected/targeted
-URLs, recheck action eligibility, and explicitly dispatch to the containing app.
-Live Keep through the management app also completed for an existing repository,
-with an observed accepted-to-complete interval of 10.113 seconds. Its 188 blobs
-totaling 2,491,698 bytes were already cached. The result is an ordinary checkout
-with its own `.git` directory, clean native Git status, Finder's folder/kept
-presentation, and the app's local-checkout state. After normal app shutdown,
-the app and engine were absent; native Git still reported clean status and could
-read HEAD and the README blob with lazy fetching disabled. Complete cached mount
-inspections after the fixtures and app shutdown found no RepoReach volumes.
-This is a conversion/app-off observation, not network download timing.
-
-The local15 Finder callback rejected a containing-app identity read under the
-extension sandbox. Local16 removes that parent-bundle read and validates the exact
-OS-registered app path with the compiled app identifier. The successful live
-Refresh above establishes dispatch; the prior Keep conversion remains an
-app-button result.
-UI capture duration is not filesystem latency, and a
-real-network cold GitHub Finder benchmark remains unqualified. macOS 26 and Intel
-runtime are also unqualified. See the [mounted acceptance record](fskit-acceptance.md)
-for precise scope. Further release qualification must cover remaining recovery,
-failure, and cache-coherence gates using disposable fixtures; do not convert the
-user's live checkout as an experiment.
-
-Historical beta.3 downloads retain their macFUSE transport, separate-clone
-adoption, and cache-based Keep behavior. Native development changes do not alter
-those releases. Incremental local app builds precede release packaging,
-notarization, and deployment.
+The [mounted acceptance record](fskit-acceptance.md) preserves results for exact
+source revisions, app builds, and platforms. Historical fixture passes and cached
+Finder observations do not qualify a later release candidate or measure cold
+GitHub network performance. Each candidate needs its own package, signing,
+installed-module, and runtime evidence. Historical beta.3 downloads retain their
+macFUSE transport, separate-clone adoption, and cache-based Keep behavior;
+subsequent native changes do not alter those downloads.

@@ -277,6 +277,7 @@ struct EngineStatus: Codable, Equatable {
     let virtualRoot: String?
     let mounted: Bool
     let dependencyReady: Bool
+    let mountRecoveryAvailable: Bool
     let account: GitHubAccount?
     let repositories: [RepositoryRecord]
     let operations: [EngineOperation]
@@ -285,14 +286,15 @@ struct EngineStatus: Codable, Equatable {
 
     init(version: String = "0.1.0", mountRoot: String, mounted: Bool = false, dependencyReady: Bool = false,
          account: GitHubAccount? = nil, repositories: [RepositoryRecord] = [], operations: [EngineOperation] = [], organizations: [OrganizationRecord] = [], message: String? = nil,
-         virtualRoot: String? = nil) {
+         virtualRoot: String? = nil, mountRecoveryAvailable: Bool = false) {
         self.version = version; self.mountRoot = mountRoot; self.mounted = mounted
         self.dependencyReady = dependencyReady; self.account = account; self.repositories = repositories
         self.operations = operations; self.organizations = organizations; self.message = message
         self.virtualRoot = virtualRoot
+        self.mountRecoveryAvailable = mountRecoveryAvailable
     }
 
-    enum CodingKeys: String, CodingKey { case version, mountRoot, virtualRoot, mounted, dependencyReady, account, repositories, operations, organizations, message }
+    enum CodingKeys: String, CodingKey { case version, mountRoot, virtualRoot, mounted, dependencyReady, mountRecoveryAvailable, account, repositories, operations, organizations, message }
     init(from decoder: Decoder) throws {
         let value = try decoder.container(keyedBy: CodingKeys.self)
         version = try value.decodeIfPresent(String.self, forKey: .version) ?? "0.1.0"
@@ -300,12 +302,15 @@ struct EngineStatus: Codable, Equatable {
         virtualRoot = try value.decodeIfPresent(String.self, forKey: .virtualRoot)
         mounted = try value.decodeIfPresent(Bool.self, forKey: .mounted) ?? false
         dependencyReady = try value.decodeIfPresent(Bool.self, forKey: .dependencyReady) ?? false
+        mountRecoveryAvailable = try value.decodeIfPresent(Bool.self, forKey: .mountRecoveryAvailable) ?? false
         account = try value.decodeIfPresent(GitHubAccount.self, forKey: .account)
         repositories = try value.decodeIfPresent([RepositoryRecord].self, forKey: .repositories) ?? []
         operations = try value.decodeIfPresent([EngineOperation].self, forKey: .operations) ?? []
         organizations = try value.decodeIfPresent([OrganizationRecord].self, forKey: .organizations) ?? []
         message = try value.decodeIfPresent(String.self, forKey: .message)
     }
+
+    var canRecoverVirtualFolders: Bool { mountRecoveryAvailable && !mounted }
 
     var finderSnapshot: FinderStatusSnapshot {
         var latestOperations: [String: EngineOperation] = [:]
@@ -326,7 +331,7 @@ struct EngineStatus: Codable, Equatable {
         updated.append(operation)
         return EngineStatus(version: version, mountRoot: mountRoot, mounted: mounted, dependencyReady: dependencyReady,
                             account: account, repositories: repositories, operations: updated, organizations: organizations,
-                            message: message, virtualRoot: virtualRoot)
+                            message: message, virtualRoot: virtualRoot, mountRecoveryAvailable: mountRecoveryAvailable)
     }
 }
 

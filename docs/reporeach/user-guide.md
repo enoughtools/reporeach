@@ -12,25 +12,13 @@ Repositories/
     shared-project/
 ```
 
-This guide describes the native implementation validated by the signed local16
-development build, produced under the previous RepoReach name. Existing state and
-repositories carry forward under EnoughRepos; rebranded builds need their own
-packaging and installed-app checks. Actual Finder Refresh
-launched the stopped app/service, completed, and preserved the existing local
-checkout's HEAD and clean Git status. Its unchanged Go/FSKit implementation retains
-local15's three mounted fixture passes on macOS 27.0.1 ARM64, including Keep across 160 descendant
-directories. Keep through the management app also completed on an existing live
-repository, producing an ordinary local checkout with clean Git status and native
-Git reads after the app stopped. Prior local12 Finder checks verified nested
-traversal, selective previews, and context actions.
-The live Keep conversion used the local15 management app; no extra Finder Keep/Free
-cycle was run to test local16 dispatch. Real-network cold Finder latency and release
-readiness remain unqualified; see the
-[acceptance record](fskit-acceptance.md). Historical beta.3 downloads retain their
-macFUSE installation, separate-clone adoption, and cache-based Keep behavior.
-Development changes do not alter those releases or establish release readiness.
+This guide describes the native FSKit implementation. Check each download's
+manifest for its version, supported platform, signing, and notarization status.
+The [acceptance record](fskit-acceptance.md) identifies tested app/source revisions
+and remaining qualification work. Historical RepoReach beta.3 downloads retain
+their original macFUSE requirements and behavior.
 
-## Set up the native build
+## Set up EnoughRepos
 
 1. Use the native build for macOS 26 or later. Its FSKit extension is bundled;
    no separate macFUSE installation is required. Consult the build manifest for
@@ -121,7 +109,7 @@ commit or push changes in either kind of repo.
 
 ## Repository actions
 
-| Action | Native development behavior |
+| Action | Behavior |
 | --- | --- |
 | Discover repositories | Updates GitHub entries; missing known entries and local data are retained. |
 | Add repository | Registers remote/bare sources virtually or adopts existing checkouts in place without GitHub sign-in. |
@@ -129,6 +117,7 @@ commit or push changes in either kind of repo.
 | Open / prepare | Opens local checkouts directly; acquires virtual metadata or writable storage as needed. |
 | Refresh Repository | Replaces an unprepared preview after safe disconnection; fetches prepared Git data without resetting its visible baseline. Local checkouts fetch their own remotes. |
 | Keep Downloaded | Hydrates the current tree and safely publishes a local checkout with current files and existing Git state. |
+| Recover Virtual Folders | Reconnects an eligible owned stale filesystem session after normal disconnection and ownership checks. |
 | Cancel | Stops the active operation; completed cache and necessary recovery data remain. |
 | Free Up Space | Reclaims verified preview content, or returns app-created checkouts/managed virtual storage to on-demand entries after recovery checks. Adopted originals cannot be freed. |
 
@@ -143,8 +132,8 @@ children. Progress counts unique file contents, so duplicate files can share one
 download. Keep batches missing downloads, and accepted operations continue in the
 background while the management window is closed.
 Finder actions use the current selection, recheck eligibility, and open the exact
-registered containing app. Refresh has verified this path even with the app and
-service initially stopped.
+registered containing app. An eligible action can launch the app and service
+when they are stopped.
 
 **Keep covers the current checkout, not all offline history.** Uncached historical
 blobs may still need the remote. Submodules and filters such as Git LFS are refused;
@@ -173,6 +162,21 @@ as fully reclaimed space. An interrupted Keep's retained standalone checkout pat
 remains in status after restart, and partial Free cleanup can resume. Preserve
 those recovery folders until recovery succeeds. Keep independent backups for
 important work.
+
+## Recover virtual folders
+
+If virtual folders stop responding, open EnoughRepos and choose **Recover Virtual
+Folders** when offered. The app verifies that the stale session belongs to
+it, disconnects that session normally, and establishes a fresh connection.
+
+If recovery reports that folders are busy, close editor files, terminal sessions,
+and Finder windows using those virtual folders, then retry. Busy folders or
+uncertain ownership retain your data and report why recovery cannot complete.
+Preserve the reported error if recovery still cannot proceed.
+
+Recovery requires a matching saved ownership record. Older unrecorded sessions
+or conflicting filesystem sessions cannot be reclaimed automatically. Adopted
+and kept ordinary checkouts remain independent of virtual-folder recovery.
 
 ## Lifecycle and upgrades
 

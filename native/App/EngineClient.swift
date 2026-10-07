@@ -2,7 +2,13 @@ import Foundation
 import Darwin
 
 struct EngineFailure: LocalizedError, Equatable {
+    enum Origin: Equatable { case client, recoveryService }
     let message: String
+    let origin: Origin
+    init(message: String, origin: Origin = .client) {
+        self.message = message
+        self.origin = origin
+    }
     var errorDescription: String? { message }
 }
 
@@ -70,6 +76,21 @@ struct EngineClient {
     let executable: URL
     let socket: URL
 
+    /// Recovery is an explicit operation. A normal mount request never invokes
+    /// this endpoint or retries it after an error.
+    func recoverVirtualFolders() async throws -> EngineStatus {
+        try await request("POST", path: "/v1/mount/recover", timeout: 90)
+    }
+
+    static func recoveryFailureMessage(_ error: Error) -> String {
+        if let failure = error as? EngineFailure, failure.origin == .recoveryService {
+            return "Virtual folders couldn't be recovered. " + redact(failure.message)
+        }
+        // Transport and malformed-response errors cannot establish whether
+        // recovery reached the service. Do not suggest a restart or retry it.
+        return "EnoughRepos couldn't confirm recovery. Check the service status, and close files, terminals and Finder windows using virtual folders before trying Recover Virtual Folders again."
+    }
+
     func request<T: Decodable>(_ method: String, path: String, body: [String: String]? = nil, timeout: TimeInterval = 45) async throws -> T {
         try await execute(method, path: path, encodedBody: body.map { try Self.encodeBody($0) }, timeout: timeout)
     }
@@ -96,14 +117,21 @@ struct EngineClient {
 
     static func decode<T: Decodable>(_ response: CommandResult) throws -> T {
         if response.status != 0 {
-            if let object = try? JSONSerialization.jsonObject(with: response.output) as? [String: Any], let message = object["error"] as? String {
-                throw EngineFailure(message: redact(message))
+            if let failure = try? JSONDecoder().decode(ErrorResponse.self, from: response.output) {
+                // CLI transport failures also use {error:...}. Only the
+                // recovery route's explicit marker proves a service response.
+                throw EngineFailure(message: redact(failure.error), origin: failure.recoveryError == true ? .recoveryService : .client)
             }
             let detail = String(data: response.errorOutput, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             throw EngineFailure(message: detail.isEmpty ? "The repository service is unavailable. Reopen EnoughRepos to start it again." : redact(detail))
         }
         do { return try JSONDecoder().decode(T.self, from: response.output) }
         catch { throw EngineFailure(message: "The repository service returned an unreadable response. Update EnoughRepos and try again.") }
+    }
+
+    private struct ErrorResponse: Decodable {
+        let error: String
+        let recoveryError: Bool?
     }
 
     static func redact(_ value: String, limit: Int = 1800, redactUserInfo: Bool = true) -> String {

@@ -8,6 +8,11 @@ EnoughRepos puts Git repositories in a folder you choose. Add a Git remote or ad
 
 The app has a native SwiftUI management window, a background service, and Finder contextual actions. Closing the window keeps the service running; there is no menu-bar app.
 
+If a virtual folder disconnects, use **Recover Virtual Folders** when offered in
+the app. Recovery checks ownership and uses normal filesystem disconnection;
+close apps and Finder windows using those folders if they are busy, then retry.
+See [recovery guidance](docs/reporeach/user-guide.md#recover-virtual-folders).
+
 [Website and downloads](https://enoughrepos.reb.run) · [Setup guide](docs/reporeach/user-guide.md) · [Architecture](docs/reporeach/architecture.md) · [ArtifactFS provenance](UPSTREAM.md) · [Contributing](CONTRIBUTING.md)
 
 EnoughRepos was previously called RepoReach. Existing state under
@@ -20,7 +25,7 @@ repositories and settings; it does not create a separate app identity.
 
 ## Beta status
 
-EnoughRepos is in local development, built on a focused fork of [Cloudflare ArtifactFS](https://github.com/cloudflare/artifact-fs). Virtual repositories require **macOS 26 or later**, Git, and normal approval of the bundled FSKit extension. No separate macFUSE installation is required. Read the [setup guide](docs/reporeach/platform-setup.md) and keep backups of valuable local work. The download manifest identifies each published build's signature, notarization status, source revision, and checksum.
+EnoughRepos is an early beta built on a focused fork of [Cloudflare ArtifactFS](https://github.com/cloudflare/artifact-fs). Virtual repositories require **macOS 26 or later**, Git, and normal approval of the bundled FSKit extension. No separate macFUSE installation is required. Read the [setup guide](docs/reporeach/platform-setup.md) and keep backups of valuable local work. The download manifest identifies each published build's signature, notarization status, source revision, and checksum.
 
 The [native acceptance record](docs/reporeach/fskit-acceptance.md) describes the local macOS 27 Apple Silicon checks and remaining qualification work. Historical RepoReach beta.3 downloads retain their original macFUSE requirements and behavior; they do not contain these native changes. The current implementation supports:
 

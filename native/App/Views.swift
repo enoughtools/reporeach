@@ -39,10 +39,14 @@ struct ContentView: View {
                 if store.demoMode { demoNotice }
                 if let error = store.errorMessage { errorBanner(error) }
                 if let auth = store.authSession, auth.pending { authorizationBanner(auth) }
-                if let status = store.status, !status.dependencyReady, !store.demoMode {
+                if store.isRecoveringVirtualFolders, !store.demoMode {
+                    mountRecoveryNotice
+                } else if let status = store.status, !status.dependencyReady, !store.demoMode {
                     dependencyBanner
                 } else if store.filesystemExtension.needsSetup, store.status?.mounted != true, !store.demoMode {
                     filesystemSetupBanner
+                } else if store.status?.canRecoverVirtualFolders == true || store.mountRecoveryError != nil, !store.demoMode {
+                    mountRecoveryNotice
                 } else if let status = store.status, !status.mounted,
                           let message = status.message, !message.isEmpty,
                           store.errorMessage == nil, !store.demoMode {
@@ -560,10 +564,24 @@ struct ContentView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
+    private var virtualFolderStatusLabel: String {
+        if store.demoMode { return "Demo catalogue" }
+        if store.isRecoveringVirtualFolders { return "Recovering virtual folders…" }
+        if store.status?.canRecoverVirtualFolders == true { return "Virtual folders disconnected" }
+        if store.status?.mounted == true { return "Virtual folders available" }
+        return store.serviceRunning ? "Background service running" : "Background service stopped"
+    }
+
+    private var virtualFolderActionTitle: String {
+        if store.isRecoveringVirtualFolders { return "Recovering…" }
+        if store.status?.canRecoverVirtualFolders == true { return "Recover Virtual Folders" }
+        return store.status?.mounted == true ? "Pause Virtual Folders" : "Enable Virtual Folders"
+    }
+
     private var statusBar: some View {
         HStack(spacing: 8) {
             Circle().fill(store.status?.mounted == true ? ReachTheme.success : ReachTheme.muted).frame(width: 6, height: 6)
-            Text(store.demoMode ? "Demo catalogue" : store.status?.mounted == true ? "Virtual folders available" : store.serviceRunning ? "Background service running" : "Background service stopped")
+            Text(virtualFolderStatusLabel)
                 .font(.system(size: 10)).foregroundStyle(ReachTheme.muted)
             if let status = store.status, !status.mountRoot.isEmpty {
                 Text("·").foregroundStyle(ReachTheme.hairline)
@@ -576,9 +594,10 @@ struct ContentView: View {
             }
             Spacer(minLength: 10)
             if !store.demoMode {
-                Button(store.status?.mounted == true ? "Pause Virtual Folders" : "Enable Virtual Folders") {
+                Button(virtualFolderActionTitle) {
                     Task {
-                        if store.status?.mounted == true { await store.unmount() }
+                        if store.status?.canRecoverVirtualFolders == true { await store.recoverVirtualFolders() }
+                        else if store.status?.mounted == true { await store.unmount() }
                         else { await store.mount() }
                     }
                 }
@@ -646,6 +665,29 @@ struct ContentView: View {
             Spacer(minLength: 8)
             Button("Try Again") { Task { await store.mount() } }
                 .buttonStyle(ReachButtonStyle(compact: true)).disabled(store.isBusy)
+        }
+    }
+
+    private var mountRecoveryNotice: some View {
+        notice(symbol: "arrow.trianglehead.2.clockwise", color: ReachTheme.danger) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(store.isRecoveringVirtualFolders ? "Recovering virtual folders" : store.mountRecoveryError != nil ? "Virtual folders need attention" : "Virtual folders disconnected")
+                    .font(.system(size: 12, weight: .semibold))
+                NoticeMessage(message: store.isRecoveringVirtualFolders
+                    ? "Reconnecting your virtual repository folders…"
+                    : store.mountRecoveryError ?? "Close files, terminals and Finder windows using virtual folders, then recover to reconnect your repositories.")
+                    .font(.system(size: 11)).foregroundStyle(ReachTheme.muted)
+                    .accessibilityIdentifier("mount-recovery-message")
+            }
+            Spacer(minLength: 8)
+            if store.isRecoveringVirtualFolders {
+                ProgressView().controlSize(.small)
+                    .accessibilityLabel("Recovering virtual folders")
+            } else if store.status?.canRecoverVirtualFolders == true {
+                Button("Recover Virtual Folders") { Task { await store.recoverVirtualFolders() } }
+                    .buttonStyle(ReachButtonStyle(compact: true)).disabled(store.isBusy)
+                    .accessibilityIdentifier("mount-recovery-action")
+            }
         }
     }
 
