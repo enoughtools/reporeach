@@ -11,6 +11,33 @@ The current harness tests the hybrid catalogue contract: organization folders ar
 
 This is a narrow acceptance harness, not complete native release qualification. A skipped test, a successful Go compilation, and bridge tests are not mounted FSKit evidence.
 
+## Local17 EnoughRepos rebrand acceptance
+
+The signed local17 `EnoughRepos.app` uses clean executable source
+`175ad7ae6b915ed83003e28bd8f57a1853a6bbf5`. On macOS 27.0.1 ARM64, all three
+installed mounted fixtures pass: primary acceptance in 7.75 seconds, cold storage
+in 8.13 seconds, and dormant cold Keep in 12.84 seconds. The renamed bundle path
+required restoring the FSKit switch through normal System Settings; public
+inspection then confirmed the exact new module path enabled.
+
+The live upgrade retains 154 catalogue repositories and one kept ordinary
+checkout, with clean Git status and HEAD
+`5d5ba015c961ce95c12710943321535cd6d66a4b`. The legacy bundled-helper alias
+resolves to the renamed app's GitHub CLI. The background virtual service and
+ordinary chosen root remain responsive after the management window closes.
+Actual Finder Refresh has an observed running-to-complete interval of approximately
+0.66 seconds;
+dynamic runtime validation matches Finder extension PID 16663 to the installed
+code hash, and action logs record callback, dispatch start, and completion. The
+checkout remains local, pinned, and materialized.
+
+Evidence is retained under `build/fskit-evidence/local17`, including
+`installed-mounted-tests.log`, `enabled-module.json`, `live-install-validation.json`,
+`finder-runtime.json`, `finder-actions.jsonl`, and `finder-refresh-status.jsonl`.
+These are local macOS 27 Apple Silicon observations, not qualification of macOS 26,
+Intel, general installer migration, cold GitHub network performance, or a release.
+No release was made.
+
 ## Local16 Finder dispatch acceptance
 
 Installed signed local build 16 uses clean executable source
